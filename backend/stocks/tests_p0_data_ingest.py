@@ -1,0 +1,152 @@
+"""P0 数据入库修复回归测试（DAT-01 / PERF-01 / DAT-03 / DAT-02 / DAT-07）"""
+
+from datetime import date, datetime
+from decimal import Decimal
+from io import StringIO
+from unittest.mock import patch
+
+import pandas as pd
+from django.core.management import call_command
+from django.test import TestCase
+from django.utils import timezone
+
+from . import services
+from .models import DailyQuote, MinuteBar, Stock
+
+
+def _aware(s):
+    return timezone.make_aware(datetime.strptime(s, '%Y-%m-%d %H:%M:%S'))
+
+
+def _sina_minute_df(days):
+    """模拟新浪 stock_zh_a_minute：多日 bar 混在一起，列为字符串。
+
+    days: {'YYYY-MM-DD': [(HH:MM, high, low), ...]}
+    """
+    rows = []
+    for d, bars in days.items():
+        for hm, high, low in bars:
+            rows.append({
+                'day': f'{d} {hm}:00', 'open': str(low), 'high': str(high),
+                'low': str(low), 'close': str(high), 'volume': '1000', 'amount': '10000',
+            })
+    return pd.DataFrame(rows)
+
+
+def _make_quote(stock, d, close=10, **kw):
+    fields = dict(
+        open_price=Decimal(close), close_price=Decimal(close),
+        high_price=Decimal(close), low_price=Decimal(close),
+        open_close_diff=Decimal(0), open_close_pct=Decimal(0),
+        high_low_diff=Decimal(0), high_low_pct=Decimal(0),
+    )
+    fields.update(kw)
+    return DailyQuote.objects.create(stock=stock, trade_date=d, **fields)
+
+
+class _NoSleep:
+    def setUp(self):
+        p = patch('stocks.services.time.sleep')
+        p.start()
+        self.addCleanup(p.stop)
+        super().setUp()
+
+
+class SinaMinuteDateFilterTests(_NoSleep, TestCase):
+    """DAT-01：新浪分钟线必须按请求日期过滤，高低点只用当日 bar。"""
+
+    def setUp(self):
+        super().setUp()
+        self.stock = Stock.objects.create(code='600000', name='浦发银行')
+        self.day = date(2026, 9, 2)
+        _make_quote(self.stock, self.day)
+        # 前一日的极值（11 / 8）比当日（10.5 / 9.5）更极端：不过滤就会写错
+        self.df = _sina_minute_df({
+            '2026-09-01': [('09:31', 11.0, 8.0), ('09:32', 10.0, 9.0)],
+            '2026-09-02': [('09:31', 10.0, 9.8), ('10:15', 10.5, 9.9), ('14:01', 10.1, 9.5)],
+        })
+
+    def _run(self, sources):
+        with patch('stocks.services.DATA_SOURCES', sources):
+            return services.fetch_minute_data(self.stock, trade_date='2026-09-02')
+
+    def test_sina_fallback_uses_only_requested_day(self):
+        with patch('akshare.stock_zh_a_minute', return_value=self.df):
+            result = self._run([services.SinaSource()])
+        self.assertEqual(result['high_time'], _aware('2026-09-02 10:15:00'))
+        self.assertEqual(result['low_time'], _aware('2026-09-02 14:01:00'))
+        q = DailyQuote.objects.get(stock=self.stock, trade_date=self.day)
+        self.assertEqual(q.high_time, _aware('2026-09-02 10:15:00'))
+        self.assertEqual(q.low_time, _aware('2026-09-02 14:01:00'))
+        # 只入库当日 3 根，不再写入前一日的 bar
+        self.assertEqual(MinuteBar.objects.filter(stock=self.stock).count(), 3)
+
+    def test_empty_after_filter_falls_through_to_next_source(self):
+        other_day = _sina_minute_df({'2026-08-28': [('09:31', 11.0, 8.0)]})
+
+        class _Next(services.DataSource):
+            name = 'next'
+            called = False
+
+            def fetch_minute(self, symbol, start_dt, end_dt):
+                _Next.called = True
+                return _sina_minute_df({'2026-09-02': [('09:45', 10.2, 9.7)]}).rename(
+                    columns={'day': '时间', 'open': '开盘', 'high': '最高', 'low': '最低',
+                             'close': '收盘', 'volume': '成交量', 'amount': '成交额'})
+
+        with patch('akshare.stock_zh_a_minute', return_value=other_day):
+            result = self._run([services.SinaSource(), _Next()])
+        self.assertTrue(_Next.called)
+        self.assertEqual(result['high_time'], _aware('2026-09-02 09:45:00'))
+
+    def test_all_sources_out_of_range_returns_none(self):
+        other_day = _sina_minute_df({'2026-08-28': [('09:31', 11.0, 8.0)]})
+        with patch('akshare.stock_zh_a_minute', return_value=other_day):
+            self.assertIsNone(self._run([services.SinaSource()]))
+        q = DailyQuote.objects.get(stock=self.stock, trade_date=self.day)
+        self.assertIsNone(q.high_time)
+
+
+class RebuildHighLowTimesCommandTests(TestCase):
+    """DAT-01 回刷命令：用已有 MinuteBar 按交易日重算。"""
+
+    def setUp(self):
+        self.stock = Stock.objects.create(code='000001', name='平安银行')
+        self.other = Stock.objects.create(code='000002', name='万科A')
+        wrong = _aware('2026-09-01 09:31:00')
+        self.q1 = _make_quote(self.stock, date(2026, 9, 1), high_time=wrong, low_time=wrong)
+        self.q2 = _make_quote(self.stock, date(2026, 9, 2), high_time=wrong, low_time=wrong)
+        self.q3 = _make_quote(self.other, date(2026, 9, 2), high_time=wrong, low_time=wrong)
+        for stock in (self.stock, self.other):
+            for s, h, lo in [('2026-09-01 09:31:00', 11, 8), ('2026-09-01 10:00:00', 10, 9),
+                             ('2026-09-02 09:31:00', 10, 9.8), ('2026-09-02 10:15:00', 10.5, 9.9),
+                             ('2026-09-02 14:01:00', 10.1, 9.5)]:
+                MinuteBar.objects.create(stock=stock, datetime=_aware(s), open=h, close=h,
+                                         high=h, low=lo, volume=1)
+
+    def test_dry_run_does_not_write(self):
+        out = StringIO()
+        call_command('rebuild_high_low_times', '--dry-run', stdout=out)
+        self.assertIn('更正 2 个', out.getvalue())
+        self.q2.refresh_from_db()
+        self.assertEqual(self.q2.high_time, _aware('2026-09-01 09:31:00'))
+
+    def test_rebuild_with_code_and_since(self):
+        call_command('rebuild_high_low_times', '--code', '000001', '--since', '2026-09-02',
+                     stdout=StringIO())
+        self.q2.refresh_from_db()
+        self.assertEqual(self.q2.high_time, _aware('2026-09-02 10:15:00'))
+        self.assertEqual(self.q2.low_time, _aware('2026-09-02 14:01:00'))
+        # since 之前与其他股票不动
+        self.q3.refresh_from_db()
+        self.assertEqual(self.q3.high_time, _aware('2026-09-01 09:31:00'))
+
+    def test_rebuild_all(self):
+        call_command('rebuild_high_low_times', stdout=StringIO())
+        self.q3.refresh_from_db()
+        self.assertEqual(self.q3.high_time, _aware('2026-09-02 10:15:00'))
+        self.q1.refresh_from_db()
+        self.assertEqual(self.q1.low_time, _aware('2026-09-01 09:31:00'))
+        self.assertEqual(self.q1.high_time, _aware('2026-09-01 09:31:00'))
+
+

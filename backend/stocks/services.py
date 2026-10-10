@@ -16,7 +16,7 @@
 
 import logging
 import time
-from datetime import datetime, timedelta
+from datetime import datetime, time as dt_time, timedelta
 from decimal import Decimal
 
 import akshare as ak
@@ -46,6 +46,44 @@ def _to_shsz_prefix(code):
     code = code.zfill(6)
     prefix = 'sh' if code.startswith(('6', '9')) else 'sz'
     return f'{prefix}{code}'
+
+
+def _filter_minute_range(df, start_dt, end_dt):
+    """按请求的 [start_dt, end_dt] 过滤分钟 bar（DAT-01）。
+
+    新浪分钟接口无视日期参数，固定返回最近约 8 个交易日；不过滤就会拿多日数据
+    求极值并写进错误交易日。'时间' 列统一解析为 Timestamp。
+    """
+    if df is None or not isinstance(df, pd.DataFrame) or df.empty or '时间' not in df.columns:
+        return df
+    t = pd.to_datetime(df['时间'], errors='coerce')
+    mask = (t >= pd.Timestamp(start_dt)) & (t <= pd.Timestamp(end_dt))
+    out = df.loc[mask].copy()
+    out['时间'] = t[mask]
+    return out.reset_index(drop=True)
+
+
+def _day_bounds(date_obj):
+    """本地时区某日 [00:00, 次日 00:00) 的 aware 边界"""
+    start = timezone.make_aware(datetime.combine(date_obj, dt_time.min))
+    return start, start + timedelta(days=1)
+
+
+def compute_high_low_times(bars):
+    """由同一交易日的分钟 bar 求最高/最低点时间（并列取最早一根）。
+
+    bars: 可迭代 (datetime, high, low)，须按时间正序。返回 (high_time, low_time,
+    high, low)，无数据返回 None。供 fetch_minute_data 与 rebuild_high_low_times 共用。
+    """
+    high_bar = low_bar = None
+    for dt, high, low in bars:
+        if high is not None and (high_bar is None or high > high_bar[1]):
+            high_bar = (dt, high)
+        if low is not None and (low_bar is None or low < low_bar[1]):
+            low_bar = (dt, low)
+    if high_bar is None or low_bar is None:
+        return None
+    return high_bar[0], low_bar[0], high_bar[1], low_bar[1]
 
 
 # ============================================================
@@ -137,6 +175,8 @@ class SinaSource(DataSource):
     def fetch_minute(self, symbol, start_dt, end_dt):
         # 新浪分钟线需要 sh 前缀
         bs_code = _to_shsz_prefix(symbol)
+        # 注意：该接口固定返回最近 1970 根 bar（约 8 个交易日），不接受日期参数；
+        # 按请求区间过滤在 _try_sources 统一做（DAT-01）
         df = ak.stock_zh_a_minute(
             symbol=bs_code, period="1"
         )
@@ -331,6 +371,15 @@ def _try_sources(method_name, *args, sources=None, **kwargs):
         try:
             method = getattr(source, method_name)
             result = method(*args, **kwargs)
+            if method_name == 'fetch_minute' and len(args) >= 3:
+                # 按请求区间过滤；过滤后为空（源返回的全是别的日子）视为该源失败
+                before = len(result) if isinstance(result, pd.DataFrame) else 0
+                result = _filter_minute_range(result, args[1], args[2])
+                if before and (result is None or result.empty):
+                    logger.info(
+                        f"数据源 {source.name} 分钟线 {before} 根均不在 "
+                        f"{args[1]}~{args[2]} 内，尝试下一个"
+                    )
             if result is not None and (not isinstance(result, pd.DataFrame) or not result.empty):
                 logger.info(f"数据源 {source.name} 获取 {method_name} 成功")
                 return source, result
@@ -570,7 +619,8 @@ def fetch_minute_data(stock, trade_date=None):
     symbol = format_symbol(stock.code)
 
     if trade_date is None:
-        trade_date = timezone.now().strftime('%Y-%m-%d')
+        # 本地交易日（timezone.now() 是 UTC，凌晨会落到前一天）
+        trade_date = timezone.localdate().strftime('%Y-%m-%d')
 
     start_dt = f"{trade_date} 09:30:00"
     end_dt = f"{trade_date} 15:00:00"
@@ -579,6 +629,15 @@ def fetch_minute_data(stock, trade_date=None):
 
     if df is None or df.empty:
         logger.error(f"获取 {stock.code} 分钟K线失败：所有数据源均不可用")
+        return None
+
+    # 纵深防御：求极值前再按交易日过滤一次，绝不拿别的交易日的 bar 求高低点
+    date_obj = datetime.strptime(trade_date, '%Y-%m-%d').date()
+    df = df.copy()
+    df['时间'] = pd.to_datetime(df['时间'], errors='coerce')
+    df = df[df['时间'].dt.date == date_obj].sort_values('时间').reset_index(drop=True)
+    if df.empty:
+        logger.warning(f"[{source.name}] {stock.code} {trade_date} 无当日分钟数据")
         return None
 
     # 保存分钟数据
@@ -606,36 +665,38 @@ def fetch_minute_data(stock, trade_date=None):
             logger.warning(f"解析 {stock.code} 分钟数据行失败: {e}")
             continue
 
-    # 推算最高/最低点精确时间
+    # 推算最高/最低点精确时间（只用当日 bar，并列取最早一根）
     try:
-        high_idx = df['最高'].astype(float).idxmax()
-        low_idx = df['最低'].astype(float).idxmin()
-        high_time = pd.to_datetime(df.loc[high_idx, '时间'])
-        low_time = pd.to_datetime(df.loc[low_idx, '时间'])
+        hl = compute_high_low_times(
+            (timezone.make_aware(t.to_pydatetime()), float(h), float(lo))
+            for t, h, lo in zip(df['时间'], df['最高'], df['最低'])
+            if pd.notna(t) and pd.notna(h) and pd.notna(lo)
+        )
+        if hl is None:
+            logger.warning(f"{stock.code} {trade_date} 分钟数据无有效价格，无法推算高低点")
+            return None
+        high_time, low_time, high_val, low_val = hl
 
-        # 更新 DailyQuote 的高低点时间
-        date_obj = datetime.strptime(trade_date, '%Y-%m-%d').date()
-        try:
-            daily_quote = DailyQuote.objects.get(stock=stock, trade_date=date_obj)
-            daily_quote.high_time = high_time
-            daily_quote.low_time = low_time
-            daily_quote.save()
-        except DailyQuote.DoesNotExist:
+        # 只更新两个字段，不再 get()+save() 全字段回写
+        updated = DailyQuote.objects.filter(stock=stock, trade_date=date_obj).update(
+            high_time=high_time, low_time=low_time,
+        )
+        if not updated:
             logger.warning(
                 f"{stock.code} {trade_date} 日K线数据不存在，无法更新高低点时间"
             )
 
         logger.info(
             f"[{source.name}] {stock.code} {trade_date} "
-            f"最高点 {df.loc[high_idx, '最高']} @ {high_time}, "
-            f"最低点 {df.loc[low_idx, '最低']} @ {low_time}"
+            f"最高点 {high_val} @ {high_time}, "
+            f"最低点 {low_val} @ {low_time}"
         )
 
         return {
             'high_time': high_time,
             'low_time': low_time,
-            'high_price': Decimal(str(df.loc[high_idx, '最高'])),
-            'low_price': Decimal(str(df.loc[low_idx, '最低'])),
+            'high_price': Decimal(str(high_val)),
+            'low_price': Decimal(str(low_val)),
         }
     except Exception as e:
         logger.error(f"推算 {stock.code} 高低点时间失败: {e}")
@@ -664,7 +725,7 @@ def fetch_stock_all_data(stock, days_back=5, light=False):
     daily_count = fetch_daily_data(stock)
 
     max_trading_days = 2 if light else min(max(days_back, 1), 5)
-    today = timezone.now().date()
+    today = timezone.localdate()
     fetched = 0
     # 多扫几天自然日以凑够交易日
     for i in range(max_trading_days * 3 + 5):
