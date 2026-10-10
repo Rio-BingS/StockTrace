@@ -30,6 +30,16 @@ body {
   min-height: 100vh;
 }
 
+/* 涨跌着色（A 股红涨绿跌）：pctClass() 返回 up/down，全局兜底，
+   组件内 scoped 定义可再覆盖 */
+.up {
+  color: var(--up);
+}
+
+.down {
+  color: var(--down);
+}
+
 a {
   color: var(--accent);
   text-decoration: none;
