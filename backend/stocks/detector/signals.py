@@ -82,6 +82,9 @@ def evaluate_target(ctx, configs):
     up_votes, down_votes = [], []
 
     for cfg in configs:
+        # 停用维度（DB is_enabled=False，或注册表未实现）既不评估也不投票（ALG-07）
+        if not cfg.get('enabled', True) or cfg.get('evaluate') is None:
+            continue
         if ctx['kind'] not in cfg['targets']:
             continue
         try:
