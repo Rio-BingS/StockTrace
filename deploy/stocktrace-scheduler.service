@@ -1,0 +1,29 @@
+[Unit]
+Description=StockTrace APScheduler (manage.py run_scheduler, independent of gunicorn)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=www
+Group=www
+WorkingDirectory=/opt/stocktrace/backend
+EnvironmentFile=/etc/stocktrace/env
+# 锁文件/心跳文件放 /run/stocktrace（tmpfs，属主 www；重启机器自动清空，不会残留 root 属主的锁）
+RuntimeDirectory=stocktrace
+RuntimeDirectoryMode=0755
+# 停服时保留目录：Web 进程的 /api/health/ 还要读心跳文件（缺失=调度未运行）
+RuntimeDirectoryPreserve=yes
+Environment=STOCKTRACE_RUN_DIR=/run/stocktrace
+Environment=PYTHONUNBUFFERED=1
+ExecStart=/opt/stocktrace/backend/venv/bin/python manage.py run_scheduler
+Restart=always
+RestartSec=10
+# 停止时先 SIGTERM，run_scheduler 等在跑任务（分钟线循环/探测器扫描）结束再退出
+KillSignal=SIGTERM
+TimeoutStopSec=300
+# 1H2G：与 gunicorn(1200M) 分开计量；akshare/pandas 拉全市场数据时峰值较高
+MemoryMax=700M
+
+[Install]
+WantedBy=multi-user.target

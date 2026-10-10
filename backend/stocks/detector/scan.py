@@ -149,12 +149,24 @@ def run_scan(trade_date=None):
             continue
 
         scanned += 1
-        is_calm, _meta = calm_mod.is_calm(ctx)
+        target_key = f"{target['kind']}:{target['code']}"
+        # 平静判定与维度评估同样按单对象隔离：一个对象的脏序列不能让整轮扫描崩溃（P0 ALG-01）
+        try:
+            is_calm, _meta = calm_mod.is_calm(ctx)
+        except Exception as e:  # noqa: BLE001
+            logger.exception(f'探测器平静判定异常 {target_key}')
+            degraded.append({'target': target_key, 'reason': f'平静判定异常: {e}'})
+            continue
         if not is_calm:
             continue
         calm_count += 1
 
-        signal_data, dim_results = signals.evaluate_target(ctx, configs)
+        try:
+            signal_data, dim_results = signals.evaluate_target(ctx, configs)
+        except Exception as e:  # noqa: BLE001
+            logger.exception(f'探测器维度评估异常 {target_key}')
+            degraded.append({'target': target_key, 'reason': f'维度评估异常: {e}'})
+            continue
 
         # 热力图矩阵：只收平静板块（平静前提不成立的板块不参与微变评估）
         if target['kind'] in matrix:
@@ -172,7 +184,12 @@ def run_scan(trade_date=None):
 
         if signal_data is None:
             continue
-        signals.upsert_signal(signal_data, dim_results)
+        try:
+            signals.upsert_signal(signal_data, dim_results)
+        except Exception as e:  # noqa: BLE001
+            logger.exception(f'探测器信号落库异常 {target_key}')
+            degraded.append({'target': target_key, 'reason': f'信号落库异常: {e}'})
+            continue
         if signal_data['cycles'] >= 2:
             sustained_count += 1
         else:

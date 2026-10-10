@@ -50,6 +50,13 @@ socket.setdefaulttimeout(int(os.environ.get('STOCKTRACE_UPSTREAM_TIMEOUT', '30')
 # stocks/ai/ 可调参数（llm.py 与 throttle.py 经 settings 读取，必须在此接线环境变量）
 STOCKTRACE_LLM_TIMEOUT = int(os.environ.get('STOCKTRACE_LLM_TIMEOUT', '60'))
 STOCKTRACE_AI_DAILY_LIMIT = int(os.environ.get('STOCKTRACE_AI_DAILY_LIMIT', '100'))
+# AI 服务商 base_url 安全校验（SEC-01）：默认只允许 https 公网地址。
+# AI_ALLOW_HTTP_BASE_URL=1 放行 http（仅本地开发）；AI_BASE_URL_ALLOWED_HOSTS 逗号分隔的主机白名单，
+# 非空时只允许白名单主机，且白名单主机跳过内网地址检查（本地开发如 127.0.0.1）。
+AI_ALLOW_HTTP_BASE_URL = os.environ.get('AI_ALLOW_HTTP_BASE_URL', '').lower() in ('1', 'true', 'yes')
+AI_BASE_URL_ALLOWED_HOSTS = [
+    h.strip() for h in os.environ.get('AI_BASE_URL_ALLOWED_HOSTS', '').split(',') if h.strip()
+]
 
 # 价格提醒可选外发推送（Server酱兼容：POST {title, desp}）；留空则只记本地
 STOCKTRACE_PUSH_URL = os.environ.get('STOCKTRACE_PUSH_URL', '')
@@ -122,6 +129,11 @@ DATABASES = {
         },
     }
 }
+# 写事务一开始就拿写锁（BEGIN IMMEDIATE）：默认 DEFERRED 事务在「先读后写」时升级写锁
+# 会直接报 database is locked 且不走 timeout 等待；分钟线/日线入库现为每股一个
+# transaction.atomic。该选项需 Django >= 5.1，低版本传给 sqlite3.connect 会报错，故按版本开启
+if __import__('django').VERSION >= (5, 1):
+    DATABASES['default']['OPTIONS']['transaction_mode'] = 'IMMEDIATE'
 
 
 # Password validation
@@ -191,3 +203,57 @@ REST_FRAMEWORK = {
 
 # APScheduler
 SCHEDULER_AUTOSTART = True
+# 调度运行时目录（锁文件/心跳文件）。生产设为 /run/stocktrace（stocktrace-scheduler.service
+# 的 RuntimeDirectory=），本地开发缺省放在 backend/ 下。
+STOCKTRACE_RUN_DIR = Path(os.environ.get('STOCKTRACE_RUN_DIR') or BASE_DIR)
+STOCKTRACE_SCHEDULER_LOCK = Path(
+    os.environ.get('STOCKTRACE_SCHEDULER_LOCK') or STOCKTRACE_RUN_DIR / 'scheduler.lock'
+)
+# 调度心跳文件：调度进程每 60s 及每次任务结束时写入，Web 进程的 /api/health/ 读取（REL-02）
+STOCKTRACE_SCHEDULER_HEARTBEAT = Path(
+    os.environ.get('STOCKTRACE_SCHEDULER_HEARTBEAT') or STOCKTRACE_RUN_DIR / 'scheduler_heartbeat.json'
+)
+# 心跳超过该秒数未更新即判定调度器失联
+STOCKTRACE_HEARTBEAT_STALE_SECONDS = int(os.environ.get('STOCKTRACE_HEARTBEAT_STALE_SECONDS', '180'))
+
+
+# Logging（REL-02）
+# 之前没有 LOGGING：INFO（调度启动、清理条数、拉取结果）全部丢失，WARNING 以上只经 lastResort
+# 裸输出、没有时间/模块名。现在统一输出到 stdout（systemd 收进 journald）；
+# 设置 STOCKTRACE_LOG_FILE 时另写一份文件（WatchedFileHandler，配合 logrotate 轮转；
+# Web 与调度是两个进程，建议各用一个文件，例如 /var/log/stocktrace/web.log、scheduler.log）。
+STOCKTRACE_LOGLEVEL = os.environ.get('STOCKTRACE_LOGLEVEL', 'INFO').upper()
+STOCKTRACE_LOG_FILE = os.environ.get('STOCKTRACE_LOG_FILE', '')
+
+LOGGING = {
+    'version': 1,
+    'disable_existing_loggers': False,
+    'formatters': {
+        'std': {
+            'format': '%(asctime)s %(levelname)s %(name)s [%(process)d %(threadName)s] %(message)s',
+        },
+    },
+    'handlers': {
+        'console': {
+            'class': 'logging.StreamHandler',
+            'stream': 'ext://sys.stdout',
+            'formatter': 'std',
+        },
+    },
+    'root': {'handlers': ['console'], 'level': 'WARNING'},
+    'loggers': {
+        # 业务日志（stocks.scheduler / stocks.services / stocks.market.* / stocks.detector.* ...）
+        'stocks': {'level': STOCKTRACE_LOGLEVEL},
+        'django.request': {'level': 'WARNING'},
+        # 只要 WARNING：job 异常/错过（misfire）会以 ERROR/WARNING 记录
+        'apscheduler': {'level': 'WARNING'},
+    },
+}
+if STOCKTRACE_LOG_FILE:
+    LOGGING['handlers']['file'] = {
+        'class': 'logging.handlers.WatchedFileHandler',
+        'filename': STOCKTRACE_LOG_FILE,
+        'formatter': 'std',
+        'encoding': 'utf-8',
+    }
+    LOGGING['root']['handlers'].append('file')

@@ -4,7 +4,8 @@
 所有上游接口（指数日线/两融）一律 patch，测试绝不触网。
 """
 
-from datetime import timedelta
+from datetime import datetime, time as dt_time, timedelta
+from types import SimpleNamespace
 from unittest.mock import patch
 
 from django.test import TestCase
@@ -27,6 +28,16 @@ _TODAY = timezone.localdate()
 
 def _trading_true(day=None):
     return True
+
+
+def _after_close_clock():
+    """只替换 scan 模块里的 timezone，把「现在」固定在今天 16:00。
+
+    run_scan 对当日有 15:30 前跳过的守卫；不固定时钟的话，这类用例在 15:30 前跑必然拿到
+    {'skipped': 'before_close'}（与墙钟相关的不稳定用例）。
+    """
+    fixed = timezone.make_aware(datetime.combine(_TODAY, dt_time(16, 0)))
+    return SimpleNamespace(localdate=lambda *a: fixed.date(), localtime=lambda *a: fixed)
 
 
 def _price_ctx(volumes, closes, kind='stock'):
@@ -263,6 +274,7 @@ class SectorSignalScanTests(TestCase):
 
     def _run(self):
         with patch('stocks.services.is_trading_day', _trading_true), \
+                patch.object(scan, 'timezone', _after_close_clock()), \
                 patch('stocks.detector.scan.save_margin_snapshot', return_value=0), \
                 patch('stocks.detector.scan.build_index_context', return_value=(None, '指数日线不可用')):
             return scan.run_scan()
@@ -467,6 +479,7 @@ class MarginSnapshotTests(TestCase):
 class DegradedScanTests(TestCase):
     def test_all_sources_down_produces_no_fabricated_signals(self):
         with patch('stocks.services.is_trading_day', _trading_true), \
+                patch.object(scan, 'timezone', _after_close_clock()), \
                 patch('stocks.detector.scan.save_margin_snapshot', return_value=0), \
                 patch('stocks.detector.scan.build_index_context', return_value=(None, '指数日线不可用')):
             summary = scan.run_scan()

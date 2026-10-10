@@ -8,17 +8,28 @@ APScheduler 集成到 Django
 4. 收盘后 15:30–21:00 每30分钟预热晚到行情缓存并落日度快照（交易日）
 5. 每交易日 17:15 探测器扫描（板块/大盘快照已在前两轮预热落库后）
 
-多 worker（Gunicorn）下用文件锁保证仅一个进程持有调度器。
+运行方式（REL-01）：
+- 生产：独立进程 `python manage.py run_scheduler`（systemd 单元 stocktrace-scheduler），
+  不再寄生在 Gunicorn worker 里——worker 被 max_requests 回收/重启时会杀掉长任务、错过定时点。
+- 兼容：设置 STOCKTRACE_RUN_SCHEDULER_IN_WEB=1 时仍由 AppConfig.ready() 在 Web 进程内启动。
+两种方式都用同一把文件锁（STOCKTRACE_SCHEDULER_LOCK，默认 <STOCKTRACE_RUN_DIR>/scheduler.lock）
+保证全机只有一个进程持有调度器。
 """
 
 import atexit
+import json
 import logging
 import os
 import sys
+import threading
 from datetime import time as dt_time
 
+from zoneinfo import ZoneInfo
+
+from apscheduler.events import EVENT_JOB_ERROR, EVENT_JOB_EXECUTED, EVENT_JOB_MISSED
 from apscheduler.schedulers.background import BackgroundScheduler
 from apscheduler.triggers.cron import CronTrigger
+from apscheduler.triggers.interval import IntervalTrigger
 from django.conf import settings
 from django.utils import timezone
 
@@ -32,6 +43,19 @@ _SKIP_COMMANDS = {
     'collectstatic', 'shell', 'dbshell', 'test', 'check',
     'createsuperuser', 'changepassword', 'flush', 'loaddata',
     'dumpdata', 'inspectdb',
+    # 独立调度进程自己管理调度器，ready() 不能再在同进程内启动一份
+    'run_scheduler',
+}
+
+# A 股交易时间天然是北京时间：trigger 显式带时区，不依赖服务器/进程的本地时区
+SCHEDULER_TZ = ZoneInfo('Asia/Shanghai')
+
+# 任务默认：错过时间点后在宽限期内仍补跑（APScheduler 3.x 默认只有 1s，进程稍忙/重启就整次跳过）；
+# coalesce 把积压的多次合并成一次；max_instances=1 防止同一任务重叠执行
+JOB_DEFAULTS = {
+    'misfire_grace_time': 900,
+    'coalesce': True,
+    'max_instances': 1,
 }
 
 # 收盘后降频窗口（含端点）；用于挡住 cron 在 15:00 的误触发
@@ -58,8 +82,9 @@ def _should_start_scheduler():
 def _acquire_lock():
     """Cross-platform exclusive lock; returns True if this process owns the scheduler."""
     global _lock_fh
-    lock_path = os.path.join(settings.BASE_DIR, 'scheduler.lock')
+    lock_path = str(getattr(settings, 'STOCKTRACE_SCHEDULER_LOCK', os.path.join(settings.BASE_DIR, 'scheduler.lock')))
     try:
+        os.makedirs(os.path.dirname(lock_path) or '.', exist_ok=True)
         _lock_fh = open(lock_path, 'a+')
         if sys.platform == 'win32':
             import msvcrt
@@ -231,8 +256,168 @@ def _detector_scan_job():
         logger.error(f'探测器扫描失败: {e}')
 
 
+def register_jobs(sched):
+    """注册全部定时任务（Web 内启动与 run_scheduler 共用同一份注册）。
+
+    每个 job 都显式 timezone=Asia/Shanghai、coalesce=True 并给出 misfire_grace_time：
+    盘中 5 分钟任务宽限 4 分钟（再晚就该让位给下一轮）；日度任务宽限更长，
+    它们自带交易日/收盘时间守卫，晚跑不会写错日期。
+    """
+    def add(func, trigger, job_id, grace):
+        sched.add_job(
+            func,
+            trigger,
+            id=job_id,
+            replace_existing=True,
+            misfire_grace_time=grace,
+            coalesce=True,
+            max_instances=1,
+        )
+
+    # 开盘前：增量日线预热
+    add(_preopen_incremental_job, CronTrigger(hour=8, minute=50, timezone=SCHEDULER_TZ),
+        'preopen_incremental', 1800)
+
+    add(_intraday_job, CronTrigger(hour='9-14', minute='*/5', timezone=SCHEDULER_TZ),
+        'intraday_fetch', 240)
+
+    add(_daily_summary_job, CronTrigger(hour=15, minute=10, timezone=SCHEDULER_TZ),
+        'daily_summary', 3600)
+
+    # 收盘后：15:30–21:00 每 30 分钟预热晚到行情（cron 含 15:00，由窗口守卫丢弃）
+    add(_post_close_lagging_job,
+        CronTrigger(day_of_week='mon-fri', hour='15,16,17,18,19,20,21', minute='0,30', timezone=SCHEDULER_TZ),
+        'post_close_lagging', 900)
+
+    # 探测器：交易日 17:15（板块/大盘快照已在前两轮预热落库）
+    add(_detector_scan_job, CronTrigger(day_of_week='mon-fri', hour=17, minute=15, timezone=SCHEDULER_TZ),
+        'detector_scan', 3600)
+    return sched
+
+
+# ---------------------------------------------------------------------------
+# 心跳（REL-02）：调度进程把存活时间、各 job 下次运行时间、最近一次结果写到 JSON 文件，
+# Web 进程的 /api/health/ 读取它判断调度是否在跑——两者是不同进程，不能用进程内缓存。
+# ---------------------------------------------------------------------------
+
+HEARTBEAT_JOB_ID = 'scheduler_heartbeat'
+HEARTBEAT_INTERVAL_SECONDS = 60
+
+_hb_lock = threading.Lock()
+_hb_state = {'started_at': None, 'mode': None, 'last_runs': {}}
+
+
+def heartbeat_path():
+    return str(getattr(
+        settings, 'STOCKTRACE_SCHEDULER_HEARTBEAT',
+        os.path.join(settings.BASE_DIR, 'scheduler_heartbeat.json'),
+    ))
+
+
+def read_heartbeat():
+    """读取心跳文件；不存在/损坏返回 None。"""
+    try:
+        with open(heartbeat_path(), encoding='utf-8') as fh:
+            return json.load(fh)
+    except (OSError, ValueError):
+        return None
+
+
+def _iso(dt):
+    return dt.isoformat() if dt is not None else None
+
+
+def write_heartbeat(sched, running=True):
+    """原子写入心跳文件（tmp + os.replace，读方永远看不到半个 JSON）。失败只记日志。"""
+    jobs = []
+    try:
+        for job in sched.get_jobs():
+            if job.id == HEARTBEAT_JOB_ID:
+                continue
+            jobs.append({'id': job.id, 'next_run_time': _iso(getattr(job, 'next_run_time', None))})
+    except Exception:
+        logger.exception('读取调度任务列表失败')
+    with _hb_lock:
+        payload = {
+            'pid': os.getpid(),
+            'mode': _hb_state['mode'],
+            'running': bool(running),
+            'started_at': _hb_state['started_at'],
+            'updated_at': timezone.now().isoformat(),
+            'jobs': jobs,
+            'last_runs': dict(_hb_state['last_runs']),
+        }
+        path = heartbeat_path()
+        tmp = f'{path}.{os.getpid()}.tmp'
+        try:
+            os.makedirs(os.path.dirname(path) or '.', exist_ok=True)
+            with open(tmp, 'w', encoding='utf-8') as fh:
+                json.dump(payload, fh, ensure_ascii=False)
+            os.replace(tmp, path)
+        except Exception as e:
+            logger.warning(f'调度心跳写入失败 {path}: {e}')
+
+
+def _make_job_listener(sched):
+    def _on_job_event(event):
+        if event.job_id == HEARTBEAT_JOB_ID:
+            return
+        if event.code == EVENT_JOB_ERROR:
+            status = 'error'
+            # APScheduler 自身已在 apscheduler.executors.* 记录带堆栈的 ERROR，这里补一条业务口径
+            logger.error(f'定时任务 {event.job_id} 执行失败: {event.exception!r}')
+        elif event.code == EVENT_JOB_MISSED:
+            status = 'missed'
+            logger.warning(f'定时任务 {event.job_id} 错过执行时间 {event.scheduled_run_time}（超出 misfire 宽限）')
+        else:
+            status = 'ok'
+        with _hb_lock:
+            _hb_state['last_runs'][event.job_id] = {
+                'status': status,
+                'scheduled_run_time': _iso(getattr(event, 'scheduled_run_time', None)),
+                'finished_at': timezone.now().isoformat(),
+                'error': repr(event.exception)[:300] if getattr(event, 'exception', None) else None,
+            }
+        write_heartbeat(sched)
+    return _on_job_event
+
+
+def attach_heartbeat(sched, mode):
+    """给调度器挂上心跳任务与 job 结果监听；沿用旧心跳文件里的最近结果（重启后不丢"最近任务时间"）。"""
+    prev = read_heartbeat() or {}
+    with _hb_lock:
+        _hb_state['started_at'] = timezone.now().isoformat()
+        _hb_state['mode'] = mode
+        _hb_state['last_runs'] = dict(prev.get('last_runs') or {})
+    sched.add_listener(_make_job_listener(sched), EVENT_JOB_EXECUTED | EVENT_JOB_ERROR | EVENT_JOB_MISSED)
+    sched.add_job(
+        write_heartbeat,
+        IntervalTrigger(seconds=HEARTBEAT_INTERVAL_SECONDS, timezone=SCHEDULER_TZ),
+        args=[sched],
+        id=HEARTBEAT_JOB_ID,
+        replace_existing=True,
+        misfire_grace_time=30,
+        coalesce=True,
+        max_instances=1,
+    )
+    return sched
+
+
+def build_scheduler(scheduler_cls=BackgroundScheduler):
+    """构造带时区与任务默认值的调度器并注册任务（不启动、不加锁）。"""
+    sched = scheduler_cls(timezone=SCHEDULER_TZ, job_defaults=dict(JOB_DEFAULTS))
+    return register_jobs(sched)
+
+
+_STARTED_MSG = (
+    "APScheduler 已启动 "
+    "(08:50 增量日线 / 09-14 */5 分钟 / 15:10 收盘汇总 / "
+    "15:30-21:00 */30 晚到行情预热 / 17:15 探测器扫描)"
+)
+
+
 def start():
-    """启动 APScheduler（带启动条件与单实例文件锁）"""
+    """Web 进程内启动 APScheduler（兼容模式；带启动条件与单实例文件锁）"""
     global scheduler
     if scheduler is not None:
         return
@@ -245,57 +430,11 @@ def start():
         logger.info("APScheduler 未启动：其他进程已持有调度锁")
         return
 
-    scheduler = BackgroundScheduler()
-
-    # 开盘前：增量日线预热
-    scheduler.add_job(
-        _preopen_incremental_job,
-        CronTrigger(hour=8, minute=50),
-        id='preopen_incremental',
-        replace_existing=True,
-    )
-
-    scheduler.add_job(
-        _intraday_job,
-        CronTrigger(hour='9-14', minute='*/5'),
-        id='intraday_fetch',
-        replace_existing=True,
-    )
-
-    scheduler.add_job(
-        _daily_summary_job,
-        CronTrigger(hour=15, minute=10),
-        id='daily_summary',
-        replace_existing=True,
-    )
-
-    # 收盘后：15:30–21:00 每 30 分钟预热晚到行情（cron 含 15:00，由窗口守卫丢弃）
-    scheduler.add_job(
-        _post_close_lagging_job,
-        CronTrigger(
-            day_of_week='mon-fri',
-            hour='15,16,17,18,19,20,21',
-            minute='0,30',
-        ),
-        id='post_close_lagging',
-        replace_existing=True,
-    )
-
-    # 探测器：交易日 17:15（板块/大盘快照已在前两轮预热落库）
-    scheduler.add_job(
-        _detector_scan_job,
-        CronTrigger(day_of_week='mon-fri', hour=17, minute=15),
-        id='detector_scan',
-        replace_existing=True,
-    )
-
+    scheduler = attach_heartbeat(build_scheduler(), mode='web')
     scheduler.start()
+    write_heartbeat(scheduler)
     atexit.register(stop)
-    logger.info(
-        "APScheduler 已启动 "
-        "(08:50 增量日线 / 09-14 */5 分钟 / 15:10 收盘汇总 / "
-        "15:30-21:00 */30 晚到行情预热 / 17:15 探测器扫描)"
-    )
+    logger.info(_STARTED_MSG + "，运行于 Web 进程（兼容模式）")
 
 
 def stop():
@@ -305,5 +444,42 @@ def stop():
             scheduler.shutdown(wait=False)
         except Exception:
             pass
+        write_heartbeat(scheduler, running=False)
         scheduler = None
     _release_lock()
+
+
+def run_forever(stop_event, lock_retry_seconds=60):
+    """独立调度进程主循环（manage.py run_scheduler 调用）：阻塞直到 stop_event 被置位。
+
+    - 拿不到调度锁（例如兼容模式下 Web 进程已持有）时每 lock_retry_seconds 秒重试并记 WARNING，
+      而不是直接退出——持锁方退出后本进程自动接管。
+    - 退出时 shutdown(wait=True)：等正在跑的任务结束（systemd TimeoutStopSec 兜底），
+      不再像 Web worker 回收那样把长任务拦腰截断。
+    返回 True 表示正常启动过调度器；False 表示在拿到锁之前就被要求退出。
+    """
+    global scheduler
+    while not _acquire_lock():
+        logger.warning(f"调度锁被其他进程持有，{lock_retry_seconds}s 后重试")
+        if stop_event.wait(lock_retry_seconds):
+            return False
+
+    sched = attach_heartbeat(build_scheduler(), mode='process')
+    scheduler = sched
+    try:
+        sched.start()
+        write_heartbeat(sched)
+        logger.info(_STARTED_MSG + f"，独立进程 pid={os.getpid()}")
+        stop_event.wait()
+        logger.info("收到退出信号，等待正在执行的任务结束后关闭调度器")
+    finally:
+        try:
+            if sched.running:
+                sched.shutdown(wait=True)
+        except Exception:
+            logger.exception("调度器关闭异常")
+        write_heartbeat(sched, running=False)
+        scheduler = None
+        _release_lock()
+    logger.info("APScheduler 已停止")
+    return True

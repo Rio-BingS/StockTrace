@@ -27,6 +27,64 @@ _ETF_SNAPSHOT_FIELDS = ('code', 'name', 'share', 'market_cap', 'turnover')
 _MAX_CALENDAR_LOOKBACK_DAYS = 120
 
 
+# 大盘资金流口径：沪（上证 1.000001）+ 深（深证成指 0.399001）两 secid 同日合计，
+# 单位元（东财 fflow f52-f56 原值）。快照落库与窗口聚合共用同一合并逻辑（DAT-05）。
+MARKET_FF_SECIDS = ('1.000001', '0.399001')
+MARKET_FF_FLOW_KEYS = ('main_net', 'small_net', 'mid_net', 'large_net', 'super_net')
+MARKET_FF_SCOPE = 'sh+sz'
+MARKET_FF_UNIT = '元'
+MARKET_FF_SRC_FFLOW = 'em_fflow'
+
+
+def merge_market_ff_rows(by_secid):
+    """{secid: {date: row}} -> {date: 合计行}；仅沪深两边都有、且同日齐全的日期参与合计。
+
+    单一市场缺失（某 secid 整体失败或某日缺行）时该日不出现在结果里——
+    不把单市场数值冒充两市合计。某字段两边都为 None 时合计为 None（不拿 0 补）。
+    """
+    if set(by_secid) != set(MARKET_FF_SECIDS):
+        return {}
+    sides = [by_secid[secid] for secid in MARKET_FF_SECIDS]
+    dates = set(sides[0]) & set(sides[1])
+    merged_rows = {}
+    for date_str in sorted(dates):
+        merged = {'date': date_str}
+        for key in MARKET_FF_FLOW_KEYS:
+            vals = [side[date_str].get(key) for side in sides]
+            merged[key] = None if all(v is None for v in vals) else round(sum(v or 0 for v in vals), 2)
+        merged.update({'src': MARKET_FF_SRC_FFLOW, 'unit': MARKET_FF_UNIT, 'scope': MARKET_FF_SCOPE})
+        merged_rows[date_str] = merged
+    return merged_rows
+
+
+def fetch_market_ff_merged_rows():
+    """抓取沪深两 secid 的 fflow 日线并按同日合并；返回 ({date: 合计行}, [错误信息])。
+
+    push2his 被掐时 fetch_flow_klines 退 push2delay（当日一根），两边各一根照样可合并；
+    任一 secid 失败则整体返回空（错误列表注明哪一边），由调用方决定是否用快照兜底。
+    """
+    from .etf_flow import fetch_flow_klines, parse_flow_kline  # 延迟导入：便于测试打桩
+
+    by_secid, errors = {}, []
+    for secid in MARKET_FF_SECIDS:
+        try:
+            klines = fetch_flow_klines(secid)
+        except Exception as e:  # noqa: BLE001  单边失败如实记录
+            logger.warning(f'大盘资金流 {secid} 抓取失败: {e}')
+            errors.append(f'{secid}: {e}')
+            continue
+        rows = {}
+        for raw in klines:
+            row = parse_flow_kline(raw)
+            if row:
+                rows[row['date']] = row
+        if rows:
+            by_secid[secid] = rows
+        else:
+            errors.append(f'{secid}: 无可解析数据')
+    return merge_market_ff_rows(by_secid), errors
+
+
 def save_daily_snapshots(trade_date=None):
     """把当日板块资金流与 ETF 份额写入快照表；返回 {'kind': 条数} 与失败项。
 
@@ -100,34 +158,10 @@ def save_daily_snapshots(trade_date=None):
     # 同日口径合并；逐行 upsert——push2his 恢复时自动回补历史。单一市场缺失时
     # 该日不写（不把单市场合计冒充两市）。
     try:
-        from .etf_flow import fetch_flow_klines, parse_flow_kline
-
-        secids = ('1.000001', '0.399001')
-        by_secid = {}
-        for secid in secids:
-            try:
-                klines = fetch_flow_klines(secid)
-            except Exception as e:
-                logger.warning(f'大盘资金流 {secid} 抓取失败: {e}')
-                continue
-            rows = {}
-            for raw in klines:
-                row = parse_flow_kline(raw)
-                if row:
-                    rows[row['date']] = row
-            if rows:
-                by_secid[secid] = rows
-        # 合计仅用沪深都成功且同日齐全的行
-        dates = set(by_secid[secids[0]]) & set(by_secid[secids[1]]) \
-            if set(by_secid) == set(secids) else set()
+        merged_rows, _errors = fetch_market_ff_merged_rows()
         written = 0
-        for date_str in sorted(dates):
-            merged = {'date': date_str}
-            for key in ('main_net', 'small_net', 'mid_net', 'large_net', 'super_net'):
-                merged[key] = round(
-                    sum((r.get(key) or 0) for r in (secrows[date_str] for secrows in by_secid.values())),
-                    2,
-                )
+        for date_str in sorted(merged_rows):
+            merged = merged_rows[date_str]
             MarketDailySnapshot.objects.update_or_create(
                 kind=MarketDailySnapshot.KIND_MARKET_FF,
                 trade_date=date_str,
@@ -256,6 +290,63 @@ def market_ff_snapshot_rows(start_date=None, end_date=None):
         return rows
     except Exception:
         return []
+
+
+# 量级巡检阈值：两市合计主力净流入（元）日常在 1e9~1e11 量级；绝对值不足 1e6 元
+# 基本可判定是「亿元」口径（北向兜底源）误写进来的污染行（DAT-06）。
+MARKET_FF_SUSPECT_ABS_LT = 1e6
+_MARKET_FF_TRUSTED_SRCS = (MARKET_FF_SRC_FFLOW, 'eastmoney_market_fund_flow')
+
+
+def audit_market_ff_snapshots(start_date=None, end_date=None):
+    """巡检 market_ff 快照，返回疑似污染行列表（只读，不改库）。
+
+    每项 {'trade_date', 'id', 'reasons': [...], 'main_net', 'src', 'unit'}；
+    reasons 取值：
+    - empty_payload：payload 为空或无 date；
+    - main_net_missing：主力净流入为 None；
+    - magnitude：0 < |main_net| < MARKET_FF_SUSPECT_ABS_LT（疑似亿元口径）；
+    - untrusted_src / bad_unit：payload 自带的来源/单位标注与本表口径不符；
+    - parts_all_none：主力有值但小/中/大/超大单全为 None（DS-02 撞名症状，仅提示）。
+    """
+    qs = MarketDailySnapshot.objects.filter(kind=MarketDailySnapshot.KIND_MARKET_FF)
+    if start_date is not None:
+        qs = qs.filter(trade_date__gte=start_date)
+    if end_date is not None:
+        qs = qs.filter(trade_date__lte=end_date)
+    suspects = []
+    for snap in qs.order_by('trade_date'):
+        items = [i for i in (snap.payload or []) if isinstance(i, dict) and i.get('date')]
+        item = items[0] if items else {}
+        reasons = []
+        main = item.get('main_net')
+        if not items:
+            reasons.append('empty_payload')
+        elif main is None:
+            reasons.append('main_net_missing')
+        else:
+            try:
+                main = float(main)
+            except (TypeError, ValueError):
+                main = None
+                reasons.append('main_net_missing')
+            if main is not None and 0 < abs(main) < MARKET_FF_SUSPECT_ABS_LT:
+                reasons.append('magnitude')
+        src, unit = item.get('src'), item.get('unit')
+        if src is not None and src not in _MARKET_FF_TRUSTED_SRCS:
+            reasons.append('untrusted_src')
+        if unit is not None and unit != MARKET_FF_UNIT:
+            reasons.append('bad_unit')
+        if items and main is not None and all(
+            item.get(k) is None for k in MARKET_FF_FLOW_KEYS if k != 'main_net'
+        ):
+            reasons.append('parts_all_none')
+        if reasons:
+            suspects.append({
+                'trade_date': snap.trade_date, 'id': snap.pk, 'reasons': reasons,
+                'main_net': item.get('main_net'), 'src': src, 'unit': unit,
+            })
+    return suspects
 
 
 def _recent_trading_days(n, end_date=None):

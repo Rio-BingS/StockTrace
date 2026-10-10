@@ -5,7 +5,17 @@ venv/
 
 # Django 运行产物
 db.sqlite3
+db.sqlite3-wal
+db.sqlite3-shm
+db.sqlite3-journal
+*.sqlite3.bak*
 backend/scheduler.lock
+backend/scheduler_heartbeat.json
+backend/logs/
+
+# 数据库备份目录（本地演练/误放在仓库内时）
+backups/
+*.sqlite3.gz
 
 # 环境变量与密钥
 .env

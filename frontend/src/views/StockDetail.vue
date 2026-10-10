@@ -2,7 +2,7 @@
 import { ref, onMounted, computed, watch } from 'vue'
 import { useRoute } from 'vue-router'
 import { stockApi, marketApi } from '../api/stocks.js'
-import { formatPct, formatNum, formatDateTime, pctClass } from '../utils/format.js'
+import { formatPct, formatNum, formatSigned, formatDateTime, pctClass } from '../utils/format.js'
 import KlineChart from '../components/KlineChart.vue'
 import IntradayChart from '../components/IntradayChart.vue'
 import AiAnalysisPanel from '../components/AiAnalysisPanel.vue'
@@ -25,9 +25,12 @@ const intradayQuote = ref(null)
 
 async function loadMargin() {
   margin.value = null
-  if (!code.value) return
+  const c = code.value
+  if (!c) return
   try {
-    margin.value = (await marketApi.getStockMargin(code.value)).data
+    const data = (await marketApi.getStockMargin(c)).data
+    // 切换股票后旧请求晚到时丢弃
+    if (code.value === c) margin.value = data
   } catch (e) {
     console.error(e)
   }
@@ -104,12 +107,17 @@ function resetAndLoad() {
 
 onMounted(() => {
   loadData()
-  loadMargin()
 })
 
 watch(stockId, () => {
   resetAndLoad()
-  loadMargin()
+})
+
+// 两融依赖 code：code 在 loadData 拉到股票信息后才赋值，
+// 因此监听 code 变化再加载（首次进入和切换股票都会触发）
+watch(code, (c) => {
+  if (c) loadMargin()
+  else margin.value = null
 })
 </script>
 
@@ -131,6 +139,10 @@ watch(stockId, () => {
           <span class="value">{{ latestQuote.trade_date }}</span>
         </div>
         <div class="summary-item">
+          <span class="label">昨收</span>
+          <span class="value">{{ formatNum(latestQuote.prev_close) }}</span>
+        </div>
+        <div class="summary-item">
           <span class="label">开盘价</span>
           <span class="value">{{ formatNum(latestQuote.open_price) }}</span>
         </div>
@@ -140,14 +152,20 @@ watch(stockId, () => {
         </div>
         <div class="summary-item">
           <span class="label">涨跌幅</span>
-          <span class="value" :class="pctClass(latestQuote.open_close_pct)">
-            {{ formatPct(latestQuote.open_close_pct) }}
+          <span class="value" :class="pctClass(latestQuote.change_pct)">
+            {{ formatPct(latestQuote.change_pct) }}
           </span>
         </div>
         <div class="summary-item">
           <span class="label">涨跌价</span>
-          <span class="value" :class="pctClass(latestQuote.open_close_diff)">
-            {{ formatNum(latestQuote.open_close_diff) }}
+          <span class="value" :class="pctClass(latestQuote.change_diff)">
+            {{ formatSigned(latestQuote.change_diff) }}
+          </span>
+        </div>
+        <div class="summary-item">
+          <span class="label">日内涨幅（较开盘）</span>
+          <span class="value" :class="pctClass(latestQuote.open_close_pct)">
+            {{ formatPct(latestQuote.open_close_pct) }}
           </span>
         </div>
         <div class="summary-item">

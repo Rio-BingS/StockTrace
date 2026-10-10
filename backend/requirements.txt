@@ -1,11 +1,21 @@
-django>=4.2,<7.0
-djangorestframework>=3.14
-django-cors-headers>=4.0
-apscheduler>=3.10
+# 顶层依赖：只写"允许的范围"，上界卡住已知会破坏代码的大版本（OPS-02）。
+# 生产部署一律装 requirements.lock（全量精确版本，含传递依赖）；本文件只用于升级时重新解析。
+# 升级流程见 deploy/DEPLOY.md「依赖锁定与升级」。
+#
+# Django：代码基于 6.0 生成、线上为 Django 6.x + Python 3.12；6.2 之前不放开
+django>=6.0,<6.2
+djangorestframework>=3.14,<4
+django-cors-headers>=4.0,<5
+# APScheduler 4.x 是不兼容重写：apscheduler.schedulers.background 不存在，
+# 调度会 ImportError 静默不启动——必须钉在 3.x
+apscheduler>=3.10,<4
 # 版本必须钉死（1.18.64 为 VPS 实测全集可用版本）：akshare 升级频繁且接口
 # 易变——同花顺板块资金流解析已由 sectors.py 自实现，不依赖其版本行为
 akshare==1.18.64
-baostock>=0.9
-cryptography>=42.0
-requests>=2.31
-gunicorn>=21.0
+# pandas 由 akshare 间接引入，但代码直接使用；测试环境实测 3.0.x 通过，
+# 上界卡在下一个大版本（4.x 的 API 变更需先在测试环境验证）
+pandas>=2.2,<4
+baostock>=0.9,<1
+cryptography>=42.0,<51
+requests>=2.31,<3
+gunicorn>=21.0,<27

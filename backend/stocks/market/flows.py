@@ -92,31 +92,55 @@ def fetch_market_activity(ttl=120):
     return data
 
 
+# 东财大盘资金流列：只认「<分项>净流入-净额」精确列名，「-净占比」显式排除（DS-02：
+# 两列都含「小单净流入」子串，旧逻辑 rename 成同名列，row.get 拿到 Series 被吞成 None）
+_MARKET_FUND_NET_COLS = {
+    '主力净流入-净额': 'main_net',
+    '超大单净流入-净额': 'super_net',
+    '大单净流入-净额': 'large_net',
+    '中单净流入-净额': 'mid_net',
+    '小单净流入-净额': 'small_net',
+}
+# 北向兜底源（stock_hsgt_hist_em）：akshare 已 /100 换算成「亿元」，口径为北向成交
+# 净买额/资金流入，与「沪深主力净流入（元）」语义不同——换算成元后单列 north_net_buy，
+# 绝不写进 main_net（DAT-06）。
+_NORTH_HIST_COLS = ('当日成交净买额', '当日资金流入')
+_NORTH_HIST_UNIT_FACTOR = 1e8  # 亿元 -> 元
+MARKET_FUND_SOURCE_EM = 'eastmoney_market_fund_flow'
+MARKET_FUND_SOURCE_NORTH = 'eastmoney_hsgt_hist_north'
+
+
 def _normalize_market_fund_hist(df, days, source_name):
-    """把不同源的资金历史表统一成 items 列表。"""
+    """把不同源的资金历史表统一成 items 列表（金额单位统一为元）。
+
+    - 东财主源：main/super/large/mid/small_net 来自精确的「-净额」列，口径沪深两市合计；
+    - 北向兜底：只产出 north_net_buy（亿元×1e8=元），main_net 恒为 None，
+      返回 available=False（不让前端把北向序列当主力画图）。
+    """
     if df is None or (isinstance(df, pd.DataFrame) and df.empty):
         return None
 
+    is_north = source_name == MARKET_FUND_SOURCE_NORTH
     work = df.copy()
     colmap = {}
     for c in work.columns:
-        s = str(c)
+        s = str(c).strip()
         if '日期' in s or s.lower() == 'date':
-            colmap[c] = 'date'
-        elif '主力净流入' in s or s in ('当日成交净买额', '当日资金流入', 'main_net'):
-            # 北向 hist 用净买额/资金流入近似「大盘外资流入」
-            if 'main_net' not in colmap.values():
-                colmap[c] = 'main_net'
-        elif '小单净流入' in s:
-            colmap[c] = 'small_net'
-        elif '中单净流入' in s:
-            colmap[c] = 'mid_net'
-        elif '大单净流入' in s and '超大' not in s:
-            colmap[c] = 'large_net'
-        elif '超大单净流入' in s:
-            colmap[c] = 'super_net'
+            if 'date' not in colmap.values():
+                colmap[c] = 'date'
+        elif is_north:
+            if s in _NORTH_HIST_COLS and 'north_net_buy' not in colmap.values():
+                colmap[c] = 'north_net_buy'
+        elif s in _MARKET_FUND_NET_COLS:
+            colmap[c] = _MARKET_FUND_NET_COLS[s]
+        elif s == 'main_net' and 'main_net' not in colmap.values():
+            colmap[c] = 'main_net'
     if colmap:
         work = work.rename(columns=colmap)
+    if work.columns.duplicated().any():
+        # 防御：上游若出现重名列，保留第一列，避免 row.get 返回 Series 被吞成 None
+        logger.warning('大盘资金历史存在重复列，保留首列: %s', list(work.columns[work.columns.duplicated()]))
+        work = work.loc[:, ~work.columns.duplicated()]
 
     if 'date' not in work.columns:
         return None
@@ -126,22 +150,30 @@ def _normalize_market_fund_hist(df, days, source_name):
 
     items = []
     for _, r in work.iterrows():
-        items.append({
-            'date': str(r.get('date', ''))[:10],
-            'main_net': _to_float(r.get('main_net')),
-            'small_net': _to_float(r.get('small_net')),
-            'mid_net': _to_float(r.get('mid_net')),
-            'large_net': _to_float(r.get('large_net')),
-            'super_net': _to_float(r.get('super_net')),
-        })
-    if not items or all(i['main_net'] is None for i in items):
+        item = {'date': str(r.get('date', ''))[:10]}
+        if is_north:
+            north = _to_float(r.get('north_net_buy'))
+            item.update({
+                'main_net': None, 'small_net': None, 'mid_net': None,
+                'large_net': None, 'super_net': None,
+                'north_net_buy': round(north * _NORTH_HIST_UNIT_FACTOR, 2) if north is not None else None,
+            })
+        else:
+            for key in ('main_net', 'small_net', 'mid_net', 'large_net', 'super_net'):
+                item[key] = _to_float(r.get(key))
+        items.append(item)
+    value_key = 'north_net_buy' if is_north else 'main_net'
+    if not items or all(i[value_key] is None for i in items):
         # 北向兜底源在披露调整后可能整列为空，全 null 的序列对图表无意义
         return None
     return {
-        'available': True,
+        # 北向兜底不是「大盘主力」：available=False，前端展示 message 而不画主力柱
+        'available': not is_north,
         'items': items,
         'message': '',
         'source': source_name,
+        'unit': '元',
+        'scope': 'north' if is_north else 'sh+sz',
     }
 
 
@@ -149,7 +181,8 @@ def fetch_market_fund_flow_hist(days=30, ttl=300, force=False):
     """
     大盘资金历史：
     1) 东财 stock_market_fund_flow（主力净流入，最完整）
-    2) 东财北向历史 stock_hsgt_hist_em（净买额兜底，口径不同但可看趋势）
+    2) 东财北向历史 stock_hsgt_hist_em（净买额兜底，口径不同：换算成元后单列
+       north_net_buy，main_net 为 None，available=False，不得写入 market_ff 快照）
     带源冷却，避免东财挂了还反复打。
     """
     cache_key = f'market_ff_{days}'
@@ -166,8 +199,8 @@ def fetch_market_fund_flow_hist(days=30, ttl=300, force=False):
 
     # 手工轮询以便 normalize
     candidates = [
-        ('eastmoney_market_fund_flow', load_em_main),
-        ('eastmoney_hsgt_hist_north', load_north_hist),
+        (MARKET_FUND_SOURCE_EM, load_em_main),
+        (MARKET_FUND_SOURCE_NORTH, load_north_hist),
     ]
     cool = [c for c in candidates if _source_is_cool(c[0])]
     hot = [c for c in candidates if not _source_is_cool(c[0])]
@@ -188,8 +221,11 @@ def fetch_market_fund_flow_hist(days=30, ttl=300, force=False):
                 continue
             _source_mark_ok(name)
             # 北向兜底时提示口径
-            if name == 'eastmoney_hsgt_hist_north':
-                parsed['message'] = '东财大盘主力暂不可用，已用北向资金净买额序列兜底（口径不同）'
+            if name == MARKET_FUND_SOURCE_NORTH:
+                parsed['message'] = (
+                    '东财大盘主力暂不可用；北向资金净买额口径不同，'
+                    '已单列为 north_net_buy（元），不作为主力净流入展示'
+                )
             data = parsed
             break
         except Exception as e:
@@ -211,14 +247,16 @@ def fetch_market_fund_flow_hist(days=30, ttl=300, force=False):
 
 
 def get_market_fund_flow_window(window, ttl=300):
-    """大盘主力资金流窗口聚合（东财 fflow 日线，secid=1.000001 上证指数）。
+    """大盘主力资金流窗口聚合（东财 fflow 日线，沪 1.000001 + 深 0.399001 同日合计，单位元）。
 
+    口径与 market_ff 快照一致（复用 snapshots.fetch_market_ff_merged_rows）：只合并
+    沪深两边同日齐全的行；单边成功时上游视为不可用，不覆盖快照里已有的两市合计。
     快照优先：本地日度快照（收盘后落库）先垫底，上游成功时按日期覆盖/回补。
     上游（push2his）挂掉时窗口仍可用——展示本地已积累的天数并如实提示；
     上游深度约 120 个交易日，超出部分以 coverage_start 如实标注。
     """
-    from .etf_flow import _flow_source, fetch_flow_klines, parse_flow_kline
-    from .snapshots import market_ff_snapshot_rows
+    from .etf_flow import _flow_source
+    from .snapshots import MARKET_FF_SCOPE, MARKET_FF_UNIT, fetch_market_ff_merged_rows, market_ff_snapshot_rows
 
     cache_key = period_cache_key('market_ff_win', window)
     cached = _cache_get(cache_key, ttl)
@@ -228,8 +266,10 @@ def get_market_fund_flow_window(window, ttl=300):
     upstream_error = ''
     upstream_rows = []
     try:
-        klines = fetch_flow_klines('1.000001')
-        upstream_rows = [r for r in (parse_flow_kline(k) for k in klines) if r]
+        merged, errors = fetch_market_ff_merged_rows()
+        upstream_rows = [merged[d] for d in sorted(merged)]
+        if not upstream_rows and errors:
+            upstream_error = '；'.join(errors)
     except Exception as e:  # noqa: BLE001  线路降级
         upstream_error = str(e)
         logger.warning('大盘资金流窗口获取失败: %s', e)
@@ -269,6 +309,9 @@ def get_market_fund_flow_window(window, ttl=300):
         'coverage_start': coverage_start,
         'truncated': bool(coverage_start and window.start.isoformat() < coverage_start),
         'items': rows,
+        # 口径标注：沪深两市合计，金额单位元（total_* 同单位，前端负责换算展示）
+        'scope': MARKET_FF_SCOPE,
+        'unit': MARKET_FF_UNIT,
         'summary': {
             'days': len(rows),
             'total_main_net': total('main_net') if rows else None,
@@ -287,10 +330,10 @@ def get_market_fund_flow_window(window, ttl=300):
         'meta': _cache_meta(
             cache_key, ttl,
             _flow_source() + ' + 本站日度快照' if snap_in_window
-            else _flow_source() + ' (1.000001)',
+            else _flow_source() + ' (沪深合计 1.000001+0.399001)',
             bool(rows),
             source_data_date=rows[-1]['date'] if rows else None,
-            disclaimer='历史主力净流入来自东方财富；本地快照由收盘后预热自动积累。',
+            disclaimer='历史主力净流入来自东方财富，口径为沪深两市合计（单位元）；本地快照由收盘后预热自动积累。',
         ),
     }
     if rows:

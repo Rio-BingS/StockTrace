@@ -12,6 +12,7 @@ import {
   MarkLineComponent,
 } from 'echarts/components'
 import { CanvasRenderer } from 'echarts/renderers'
+import { formatPct, pctFrom } from '../utils/format.js'
 
 use([
   CandlestickChart,
@@ -74,6 +75,12 @@ const chartOption = computed(() => {
         const idx = d.dataIndex
         const quote = sorted[idx]
         if (!quote) return ''
+        // 涨跌幅相对昨收：优先后端 change_pct；缺失时用 prev_close 或前一根K线收盘计算
+        let chg = quote.change_pct
+        if (chg == null) {
+          const base = quote.prev_close ?? (idx > 0 ? sorted[idx - 1].close_price : null)
+          chg = pctFrom(quote.close_price, base)
+        }
         return `
           <div style="font-size:13px">
             <b>${quote.trade_date}</b><br/>
@@ -83,7 +90,8 @@ const chartOption = computed(() => {
               ${quote.high_time ? '@ ' + quote.high_time.slice(11, 16) : ''}<br/>
             最低: ${Number(quote.low_price).toFixed(2)}
               ${quote.low_time ? '@ ' + quote.low_time.slice(11, 16) : ''}<br/>
-            涨跌幅: ${Number(quote.open_close_pct).toFixed(2)}%<br/>
+            涨跌幅: ${formatPct(chg)}<br/>
+            日内涨幅（较开盘）: ${formatPct(quote.open_close_pct)}<br/>
             振幅: ${Number(quote.high_low_pct).toFixed(2)}%
           </div>
         `

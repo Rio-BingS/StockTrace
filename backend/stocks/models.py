@@ -232,10 +232,13 @@ class DailyQuote(models.Model):
     change_diff = models.DecimalField('涨跌额', max_digits=10, decimal_places=2, null=True, blank=True)
     change_pct = models.DecimalField('涨跌幅', max_digits=8, decimal_places=4, null=True, blank=True)
 
-    volume = models.BigIntegerField('成交量', null=True, blank=True)
+    # 单位约定：成交量「股」、成交额「元」（各数据源在适配层换算，见 services.py）
+    volume = models.BigIntegerField('成交量(股)', null=True, blank=True)
     turnover = models.DecimalField(
-        '成交额', max_digits=15, decimal_places=2, null=True, blank=True
+        '成交额(元)', max_digits=15, decimal_places=2, null=True, blank=True
     )
+    # 实际数据来源（eastmoney/sina/baostock/tencent）；空串为 0009 迁移前的存量行，来源未知
+    source = models.CharField('数据来源', max_length=16, blank=True, default='')
 
     class Meta:
         verbose_name = '每日行情'
@@ -277,10 +280,13 @@ class MinuteBar(models.Model):
     close = models.DecimalField('收盘价', max_digits=10, decimal_places=2)
     high = models.DecimalField('最高价', max_digits=10, decimal_places=2)
     low = models.DecimalField('最低价', max_digits=10, decimal_places=2)
-    volume = models.BigIntegerField('成交量')
+    volume = models.BigIntegerField('成交量(股)')
     turnover = models.DecimalField(
-        '成交额', max_digits=15, decimal_places=2, null=True, blank=True
+        '成交额(元)', max_digits=15, decimal_places=2, null=True, blank=True
     )
+    source = models.CharField('数据来源', max_length=16, blank=True, default='')
+    # bar 周期（分钟）：东财/新浪为 1，BaoStock 兜底为 5；同一交易日只保留一种周期
+    freq = models.PositiveSmallIntegerField('周期(分钟)', default=1)
 
     class Meta:
         verbose_name = '分钟K线'

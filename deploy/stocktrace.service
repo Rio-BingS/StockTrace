@@ -8,6 +8,10 @@ User=www
 Group=www
 WorkingDirectory=/opt/stocktrace/backend
 EnvironmentFile=/etc/stocktrace/env
+# 调度器由独立的 stocktrace-scheduler.service 运行（REL-01）；Web 只读心跳文件给 /api/health/。
+# 注意 EnvironmentFile 里的同名变量优先于这里：/etc/stocktrace/env 不要设 STOCKTRACE_RUN_SCHEDULER_IN_WEB=1
+Environment=STOCKTRACE_RUN_SCHEDULER_IN_WEB=0
+Environment=STOCKTRACE_RUN_DIR=/run/stocktrace
 ExecStart=/opt/stocktrace/backend/venv/bin/gunicorn \
     --config /opt/stocktrace/backend/gunicorn_config.py \
     StockTrace.wsgi:application
