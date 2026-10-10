@@ -211,14 +211,16 @@ def fetch_market_fund_flow_hist(days=30, ttl=300, force=False):
 
 
 def get_market_fund_flow_window(window, ttl=300):
-    """大盘主力资金流窗口聚合（东财 fflow 日线，secid=1.000001 上证指数）。
+    """大盘主力资金流窗口聚合（东财 fflow 日线，沪 1.000001 + 深 0.399001 同日合计，单位元）。
 
+    口径与 market_ff 快照一致（复用 snapshots.fetch_market_ff_merged_rows）：只合并
+    沪深两边同日齐全的行；单边成功时上游视为不可用，不覆盖快照里已有的两市合计。
     快照优先：本地日度快照（收盘后落库）先垫底，上游成功时按日期覆盖/回补。
     上游（push2his）挂掉时窗口仍可用——展示本地已积累的天数并如实提示；
     上游深度约 120 个交易日，超出部分以 coverage_start 如实标注。
     """
-    from .etf_flow import _flow_source, fetch_flow_klines, parse_flow_kline
-    from .snapshots import market_ff_snapshot_rows
+    from .etf_flow import _flow_source
+    from .snapshots import MARKET_FF_SCOPE, MARKET_FF_UNIT, fetch_market_ff_merged_rows, market_ff_snapshot_rows
 
     cache_key = period_cache_key('market_ff_win', window)
     cached = _cache_get(cache_key, ttl)
@@ -228,8 +230,10 @@ def get_market_fund_flow_window(window, ttl=300):
     upstream_error = ''
     upstream_rows = []
     try:
-        klines = fetch_flow_klines('1.000001')
-        upstream_rows = [r for r in (parse_flow_kline(k) for k in klines) if r]
+        merged, errors = fetch_market_ff_merged_rows()
+        upstream_rows = [merged[d] for d in sorted(merged)]
+        if not upstream_rows and errors:
+            upstream_error = '；'.join(errors)
     except Exception as e:  # noqa: BLE001  线路降级
         upstream_error = str(e)
         logger.warning('大盘资金流窗口获取失败: %s', e)
@@ -269,6 +273,9 @@ def get_market_fund_flow_window(window, ttl=300):
         'coverage_start': coverage_start,
         'truncated': bool(coverage_start and window.start.isoformat() < coverage_start),
         'items': rows,
+        # 口径标注：沪深两市合计，金额单位元（total_* 同单位，前端负责换算展示）
+        'scope': MARKET_FF_SCOPE,
+        'unit': MARKET_FF_UNIT,
         'summary': {
             'days': len(rows),
             'total_main_net': total('main_net') if rows else None,
@@ -287,10 +294,10 @@ def get_market_fund_flow_window(window, ttl=300):
         'meta': _cache_meta(
             cache_key, ttl,
             _flow_source() + ' + 本站日度快照' if snap_in_window
-            else _flow_source() + ' (1.000001)',
+            else _flow_source() + ' (沪深合计 1.000001+0.399001)',
             bool(rows),
             source_data_date=rows[-1]['date'] if rows else None,
-            disclaimer='历史主力净流入来自东方财富；本地快照由收盘后预热自动积累。',
+            disclaimer='历史主力净流入来自东方财富，口径为沪深两市合计（单位元）；本地快照由收盘后预热自动积累。',
         ),
     }
     if rows:

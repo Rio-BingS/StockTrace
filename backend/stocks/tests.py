@@ -338,16 +338,24 @@ class MarketWindowEndpointTests(SimpleTestCase):
         from datetime import date
 
         window = PeriodWindow('custom', date(2026, 8, 27), date(2026, 8, 28))
-        mock_fetch.return_value = [
+        sh = [
             '2026-08-26,100.0,0.0,0.0,0.0,0.0,0,0,0,0,0,3000.0,0.5',   # 窗口外
             '2026-08-27,200.0,0.0,0.0,0.0,0.0,0,0,0,0,0,3100.0,0.5',
             '2026-08-28,-50.0,0.0,0.0,0.0,0.0,0,0,0,0,0,3090.0,-0.1',
         ]
+        sz = [
+            '2026-08-26,10.0,0.0,0.0,0.0,0.0,0,0,0,0,0,9000.0,0.5',
+            '2026-08-27,20.0,0.0,0.0,0.0,0.0,0,0,0,0,0,9100.0,0.5',
+            '2026-08-28,-5.0,0.0,0.0,0.0,0.0,0,0,0,0,0,9090.0,-0.1',
+        ]
+        mock_fetch.side_effect = lambda secid: sh if secid == '1.000001' else sz
         data = market.get_market_fund_flow_window(window)
 
         self.assertTrue(data['available'])
         self.assertEqual(data['summary']['days'], 2)
-        self.assertEqual(data['summary']['total_main_net'], 150.0)
+        # 沪深同日合计（DAT-05）：(200+20) + (-50-5)
+        self.assertEqual(data['summary']['total_main_net'], 165.0)
+        self.assertEqual(data['scope'], 'sh+sz')
         self.assertEqual(data['summary']['inflow_days'], 1)
         self.assertEqual(data['coverage_start'], '2026-08-26')  # 上游覆盖早于窗口起点
         self.assertFalse(data['truncated'])  # 覆盖范围完全包含窗口，未截断

@@ -944,10 +944,11 @@ class MarketFundFlowSnapshotTests(TestCase):
         from stocks.market.periods import PeriodWindow
 
         window = PeriodWindow('custom', _BASE - timedelta(days=1), _BASE)
-        with patch('stocks.market.etf_flow.fetch_flow_klines') as mock_fetch:
-            mock_fetch.return_value = [
-                f'{_BASE.isoformat()},100.0,0.0,0.0,0.0,0.0,0,0,0,0,0,3000.0,0.5',
-            ]
+        def fake_klines(secid):
+            main = 70.0 if secid == '1.000001' else 30.0  # 沪深同日合计 100
+            return [f'{_BASE.isoformat()},{main},0.0,0.0,0.0,0.0,0,0,0,0,0,3000.0,0.5']
+
+        with patch('stocks.market.etf_flow.fetch_flow_klines', side_effect=fake_klines):
             data = market.get_market_fund_flow_window(window)
 
         self.assertTrue(data['available'])
