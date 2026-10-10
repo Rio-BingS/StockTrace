@@ -68,7 +68,11 @@ def is_calm_price(ctx, params=None):
         m = _mean(win)
         if m and all(v is not None for v in win):
             cvs.append(_std(win) / m)
-    current_cv = _std(volumes[-k:]) / _mean(volumes[-k:]) if _mean(volumes[-k:]) else None
+    # 当前窗口同样要求 5 根量齐全：只剩 1 个非 None 时 _std 为 None，直接除会 TypeError（P0 ALG-01）
+    cur = volumes[-k:]
+    cur_mean, cur_std = _mean(cur), _std(cur)
+    current_cv = cur_std / cur_mean \
+        if len(cur) == k and all(v is not None for v in cur) and cur_mean and cur_std is not None else None
     if current_cv is None or not cvs:
         return False, {'reason': '量能样本不足，无法判定收窄'}
     if current_cv > _percentile(cvs, params['vol_cv_pct']):
@@ -123,12 +127,18 @@ def is_calm_sector(ctx, params=None):
     chg_std = _std(pcts[-window:]) if len(pcts) >= window else None
     if chg_std is None:
         return False, {'reason': '涨跌幅窗口不足'}
+    if any(v is None for v in pcts[-window:]):
+        return False, {'reason': '涨跌幅窗口存在缺失快照'}
     roll_std = [
         _std(pcts[i - window:i])
         for i in range(window, len(pcts) + 1)
         if all(v is not None for v in pcts[i - window:i])
     ]
-    if chg_std > _percentile(roll_std, params['chg_pct']):
+    # 回填后头几天每个滚动窗口都含 None → roll_std 为空、分位为 None，float > None 会 TypeError（P0 ALG-01）
+    chg_thr = _percentile(roll_std, params['chg_pct'])
+    if chg_thr is None:
+        return False, {'reason': '涨跌幅滚动样本不足'}
+    if chg_std > chg_thr:
         return False, {'reason': '涨跌幅波动非低位'}
 
     return True, {'flow': round(flow_now, 0), 'chg_std': round(chg_std, 3)}

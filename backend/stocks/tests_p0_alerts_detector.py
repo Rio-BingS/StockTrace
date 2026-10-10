@@ -5,13 +5,15 @@
 
 from datetime import datetime, time, timedelta
 from decimal import Decimal
+from types import SimpleNamespace
 from unittest.mock import patch
 
 from django.test import TestCase
 from django.utils import timezone
 
 from . import alerts
-from .models import AlertEvent, DailyQuote, MinuteBar, PriceAlert, Stock
+from .detector import calm, scan
+from .models import AlertEvent, DailyQuote, DetectorRun, MinuteBar, PriceAlert, Stock
 
 _TODAY = timezone.localdate()
 _YESTERDAY = _TODAY - timedelta(days=1)
@@ -149,3 +151,74 @@ class AlertStaleDataTests(TestCase):
         _make_bar(self.stock, datetime.combine(_TODAY, time(10, 0)), Decimal('11.30'))
         with patch('stocks.services.is_trading_day', return_value=False):
             self.assertEqual(alerts.evaluate_alerts(now=_at(10, 5)), [])
+
+
+def _after_close_clock():
+    """只替换 scan 模块里的 timezone：把「现在」固定在今天 16:00，绕过 15:30 前的守卫。"""
+    fixed = _at(16, 0)
+    return SimpleNamespace(localdate=lambda *a: fixed.date(), localtime=lambda *a: fixed)
+
+
+class CalmNoneHandlingTests(TestCase):
+    """ALG-01：序列含 None 时平静判定返回 (False, reason)，不抛异常。"""
+
+    def test_price_calm_with_mostly_none_recent_volumes(self):
+        volumes = [1000.0 + (i % 3) * 10 for i in range(30)] + [None, None, None, None, 1000.0]
+        closes = [10.0 + (i % 2) * 0.05 for i in range(35)]
+        ctx = {
+            'kind': 'stock', 'volume': volumes, 'close': closes,
+            'high': [c * 1.01 for c in closes], 'low': [c * 0.99 for c in closes],
+        }
+        ok, meta = calm.is_calm(ctx)
+        self.assertFalse(ok)
+        self.assertIn('reason', meta)
+
+    def test_sector_calm_when_every_rolling_window_has_none(self):
+        # 行业回填后的头几天：change_pct 每隔几天就是 None，滚动窗口全不完整
+        # （旧代码：roll_std 为空 → _percentile 返回 None → float > None 抛 TypeError）
+        pcts = [None if i % 4 == 0 else 0.1 + 0.05 * (i % 3) for i in range(17)]
+        ctx = {'kind': 'industry', 'net': [1e8 if i % 2 else -1e8 for i in range(len(pcts))],
+               'change_pct': pcts}
+        ok, meta = calm.is_calm(ctx)
+        self.assertFalse(ok)
+        self.assertIn(meta['reason'], ('涨跌幅窗口存在缺失快照', '涨跌幅滚动样本不足'))
+
+    def test_sector_calm_with_none_in_current_window(self):
+        pcts = [0.1, 0.2, 0.15, 0.12, 0.18] * 4 + [0.1, None, 0.2, 0.1, 0.1]
+        ctx = {'kind': 'industry', 'net': [1e8 if i % 2 else -1e8 for i in range(len(pcts))],
+               'change_pct': pcts}
+        ok, meta = calm.is_calm(ctx)
+        self.assertFalse(ok)
+        self.assertEqual(meta['reason'], '涨跌幅窗口存在缺失快照')
+
+
+class ScanTargetIsolationTests(TestCase):
+    """ALG-01：单对象平静判定异常只降级自己，扫描继续并写 DetectorRun。"""
+
+    def test_calm_exception_degrades_single_target(self):
+        targets = [
+            {'kind': 'stock', 'code': '000001', 'name': '坏对象'},
+            {'kind': 'stock', 'code': '000002', 'name': '好对象'},
+        ]
+
+        def fake_calm(ctx, params=None):
+            if ctx['code'] == '000001':
+                raise TypeError("unsupported operand type(s) for /: 'NoneType' and 'float'")
+            return False, {'reason': '不平静'}
+
+        with patch('stocks.services.is_trading_day', _trading_true), \
+                patch.object(scan, 'timezone', _after_close_clock()), \
+                patch.object(scan, 'save_margin_snapshot', return_value=0), \
+                patch.object(scan, '_collect_targets', return_value=targets), \
+                patch.object(scan, '_build_context',
+                             side_effect=lambda t: ({'kind': t['kind'], 'code': t['code']}, None)), \
+                patch.object(scan.calm_mod, 'is_calm', side_effect=fake_calm), \
+                self.assertLogs('stocks.detector.scan', level='ERROR'):
+            summary = scan.run_scan()
+        self.assertEqual(summary['status'], 'partial')
+        self.assertEqual(summary['targets_scanned'], 2)
+        run = DetectorRun.objects.get(trade_date=_TODAY)
+        reasons = {d['target']: d['reason'] for d in run.degraded}
+        self.assertIn('stock:000001', reasons)
+        self.assertIn('平静判定异常', reasons['stock:000001'])
+        self.assertNotIn('stock:000002', reasons)
