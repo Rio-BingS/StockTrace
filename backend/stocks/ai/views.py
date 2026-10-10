@@ -5,7 +5,7 @@ from rest_framework import viewsets, status
 from rest_framework.decorators import action, api_view
 from rest_framework.response import Response
 
-from ..models import Stock, AiProvider
+from ..models import AiCallLog, AiProvider, Stock
 from ..ai_serializers import AiProviderSerializer
 from .llm import LlmClient, LlmError
 from .prompts import (
@@ -15,7 +15,12 @@ from .prompts import (
     build_comment_messages,
 )
 from .screener import ConditionError, run_screener
-from .throttle import check_throttle, log_call
+from .throttle import (
+    PROVIDER_TEST_PURPOSE,
+    check_provider_test_throttle,
+    check_throttle,
+    log_call,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -27,21 +32,60 @@ class AiProviderViewSet(viewsets.ModelViewSet):
 
     @action(detail=True, methods=['post'], url_path='test')
     def test_connection(self, request, pk=None):
-        """用最小请求验证 Key 与连通性"""
+        """用最小请求验证 Key 与连通性。
+
+        只返回状态码与通用错误分类，不回显上游响应内容（防 SSRF 读取，SEC-01）。
+        """
         provider = self.get_object()
+        allowed, reason = check_provider_test_throttle()
+        if not allowed:
+            return Response({'detail': reason}, status=status.HTTP_429_TOO_MANY_REQUESTS)
+        # 先记流水再调用：频控按"预占"计，并发请求也会被计入
+        call_log = AiCallLog.objects.create(
+            purpose=PROVIDER_TEST_PURPOSE, provider=provider, success=False,
+        )
         try:
             client = LlmClient(provider)
-            text, _ = client.chat(
+            _, usage = client.chat(
                 [{'role': 'user', 'content': '回复"ok"两个字母即可'}],
                 max_tokens=10,
                 timeout=15,
             )
-        except (LlmError, ValueError) as exc:
-            return Response(
-                {'status': 'failed', 'message': str(exc)},
-                status=status.HTTP_502_BAD_GATEWAY,
-            )
-        return Response({'status': 'ok', 'reply': text.strip()[:50]})
+        except ValueError:
+            return _test_failed('config', None)
+        except LlmError as exc:
+            # 详情只进服务端日志（不含上游响应体），对外仅给分类
+            logger.warning('AI 服务商 %s 连通性测试失败：kind=%s status=%s',
+                           provider.pk, exc.kind, exc.status_code)
+            return _test_failed(exc.kind, exc.status_code)
+        call_log.success = True
+        call_log.prompt_tokens = (usage or {}).get('prompt_tokens')
+        call_log.completion_tokens = (usage or {}).get('completion_tokens')
+        call_log.save(update_fields=['success', 'prompt_tokens', 'completion_tokens'])
+        return Response({'status': 'ok'})
+
+
+_TEST_ERROR_TEXT = {
+    'config': '配置无效：接口地址不合规或 API Key 无法解密，请检查后重新录入',
+    'network': '无法连接到服务商',
+    'timeout': '连接服务商超时',
+    'redirect': '服务商返回重定向，已拒绝跟随，请填写最终接口地址',
+    'auth': '认证失败，请检查 API Key',
+    'rate_limit': '服务商限流，请稍后再试',
+    'bad_response': '服务商响应格式异常',
+    'upstream': '服务商返回错误',
+}
+
+
+def _test_failed(kind, status_code):
+    message = _TEST_ERROR_TEXT.get(kind, _TEST_ERROR_TEXT['upstream'])
+    if status_code is not None:
+        message = f'{message}（HTTP {status_code}）'
+    return Response(
+        {'status': 'failed', 'error': kind, 'upstream_status': status_code,
+         'detail': message, 'message': message},
+        status=status.HTTP_502_BAD_GATEWAY,
+    )
 
 
 def _get_active_provider():

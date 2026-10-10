@@ -50,6 +50,13 @@ socket.setdefaulttimeout(int(os.environ.get('STOCKTRACE_UPSTREAM_TIMEOUT', '30')
 # stocks/ai/ 可调参数（llm.py 与 throttle.py 经 settings 读取，必须在此接线环境变量）
 STOCKTRACE_LLM_TIMEOUT = int(os.environ.get('STOCKTRACE_LLM_TIMEOUT', '60'))
 STOCKTRACE_AI_DAILY_LIMIT = int(os.environ.get('STOCKTRACE_AI_DAILY_LIMIT', '100'))
+# AI 服务商 base_url 安全校验（SEC-01）：默认只允许 https 公网地址。
+# AI_ALLOW_HTTP_BASE_URL=1 放行 http（仅本地开发）；AI_BASE_URL_ALLOWED_HOSTS 逗号分隔的主机白名单，
+# 非空时只允许白名单主机，且白名单主机跳过内网地址检查（本地开发如 127.0.0.1）。
+AI_ALLOW_HTTP_BASE_URL = os.environ.get('AI_ALLOW_HTTP_BASE_URL', '').lower() in ('1', 'true', 'yes')
+AI_BASE_URL_ALLOWED_HOSTS = [
+    h.strip() for h in os.environ.get('AI_BASE_URL_ALLOWED_HOSTS', '').split(',') if h.strip()
+]
 
 # 价格提醒可选外发推送（Server酱兼容：POST {title, desp}）；留空则只记本地
 STOCKTRACE_PUSH_URL = os.environ.get('STOCKTRACE_PUSH_URL', '')

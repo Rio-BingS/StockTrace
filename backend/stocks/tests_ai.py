@@ -2,14 +2,17 @@
 import json
 from datetime import date, timedelta
 from decimal import Decimal
-from unittest.mock import patch
+import socket
+from unittest.mock import MagicMock, patch
 
-from django.test import SimpleTestCase, TestCase
+import requests
+
+from django.test import SimpleTestCase, TestCase, override_settings
 from django.utils import timezone
 
 from .models import AiCallLog, AiProvider, DailyQuote, Stock
 from .ai.crypto import decrypt_api_key, encrypt_api_key, mask_api_key
-from .ai.llm import LlmError
+from .ai.llm import LlmClient, LlmError, validate_base_url
 from .ai.screener import ConditionError, run_screener
 from .ai.throttle import DAILY_LIMIT, check_throttle, log_call
 
@@ -127,7 +130,40 @@ class ThrottleTests(TestCase):
         self.assertIn('上限', reason)
 
 
+def _fake_getaddrinfo(mapping):
+    """构造 socket.getaddrinfo 替身：host -> IP；未登记的主机视为解析失败（测试断网）"""
+    def _resolve(host, port, *args, **kwargs):
+        if host not in mapping:
+            raise socket.gaierror('not found')
+        ip = mapping[host]
+        family = socket.AF_INET6 if ':' in ip else socket.AF_INET
+        return [(family, socket.SOCK_STREAM, 6, '', (ip, port))]
+    return _resolve
+
+
+# 测试用公网 IP（文档里常见的 example.com 地址），避免依赖真实 DNS
+_PUBLIC_DNS = {
+    'a.com': '93.184.216.34', 'b.com': '93.184.216.35',
+    'api.deepseek.com': '93.184.216.36', 'mock.local': '93.184.216.37',
+    'evil-internal.example': '10.0.0.5', 'meta.example': '169.254.169.254',
+    'v6-loop.example': '::1',
+}
+
+
 class AiProviderApiTests(TestCase):
+    def setUp(self):
+        patcher = patch('stocks.ai.llm.socket.getaddrinfo',
+                        side_effect=_fake_getaddrinfo(_PUBLIC_DNS))
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def _create(self, base_url='https://a.com', key='sk-old-1111'):
+        response = self.client.post('/api/ai-providers/', {
+            'name': 'A', 'base_url': base_url, 'model': 'm', 'api_key': key,
+        }, content_type='application/json')
+        self.assertEqual(response.status_code, 201, response.data)
+        return AiProvider.objects.get(pk=response.data['id'])
+
     def test_create_masks_key_and_stores_encrypted(self):
         response = self.client.post('/api/ai-providers/', {
             'name': 'DeepSeek', 'base_url': 'https://api.deepseek.com',
@@ -152,6 +188,86 @@ class AiProviderApiTests(TestCase):
         provider = AiProvider.objects.get()
         self.assertEqual(decrypt_api_key(provider.api_key_encrypted), 'sk-old-1111')
         self.assertEqual(provider.model, 'm2')
+
+    def test_update_with_same_base_url_without_key_ok(self):
+        # 前端编辑表单总会带上原 base_url：未改动时不要求重新录入 Key
+        provider = self._create()
+        response = self.client.patch(
+            f'/api/ai-providers/{provider.id}/',
+            {'base_url': 'https://a.com/', 'name': 'A2'},
+            content_type='application/json')
+        self.assertEqual(response.status_code, 200, response.data)
+        provider.refresh_from_db()
+        self.assertEqual(decrypt_api_key(provider.api_key_encrypted), 'sk-old-1111')
+
+    def test_update_base_url_without_key_rejected(self):
+        # SEC-01：只改 base_url 不带 Key → 400，库里地址与 Key 都不变
+        provider = self._create()
+        response = self.client.patch(
+            f'/api/ai-providers/{provider.id}/', {'base_url': 'https://b.com'},
+            content_type='application/json')
+        self.assertEqual(response.status_code, 400)
+        self.assertIn('api_key', response.data)
+        provider.refresh_from_db()
+        self.assertEqual(provider.base_url, 'https://a.com')
+        self.assertEqual(decrypt_api_key(provider.api_key_encrypted), 'sk-old-1111')
+
+    def test_update_base_url_with_new_key_ok(self):
+        provider = self._create()
+        response = self.client.patch(
+            f'/api/ai-providers/{provider.id}/',
+            {'base_url': 'https://b.com', 'api_key': 'sk-new-5555'},
+            content_type='application/json')
+        self.assertEqual(response.status_code, 200, response.data)
+        provider.refresh_from_db()
+        self.assertEqual(provider.base_url, 'https://b.com')
+        self.assertEqual(decrypt_api_key(provider.api_key_encrypted), 'sk-new-5555')
+
+    def test_insecure_base_urls_rejected(self):
+        bad_urls = [
+            'http://a.com',                      # 非 https
+            'ftp://a.com',
+            'https://127.0.0.1:8000',            # 回环
+            'https://[::1]/v1',
+            'https://10.1.2.3',                  # 私网
+            'https://192.168.1.1',
+            'https://169.254.169.254/latest',    # 链路本地（云元数据）
+            'https://0.0.0.0',
+            'https://[::ffff:127.0.0.1]',        # IPv4 映射回环
+            'https://evil-internal.example',     # DNS 解析到私网
+            'https://meta.example',              # DNS 解析到链路本地
+            'https://v6-loop.example',           # DNS 解析到 ::1
+            'https://unresolvable.example',      # 解析失败也拒绝
+            'https://user:pw@a.com',
+            'https://a.com/v1?x=1',
+            'not a url',
+        ]
+        for url in bad_urls:
+            with self.subTest(url=url):
+                response = self.client.post('/api/ai-providers/', {
+                    'name': 'X', 'base_url': url, 'model': 'm', 'api_key': 'sk-x-0000',
+                }, content_type='application/json')
+                self.assertEqual(response.status_code, 400)
+                self.assertIn('base_url', response.data)
+        self.assertFalse(AiProvider.objects.exists())
+
+    def test_base_url_normalized_trailing_slash(self):
+        provider = self._create(base_url='https://api.deepseek.com/v1/')
+        self.assertEqual(provider.base_url, 'https://api.deepseek.com/v1')
+
+    @override_settings(AI_ALLOW_HTTP_BASE_URL=True, AI_BASE_URL_ALLOWED_HOSTS=['127.0.0.1'])
+    def test_local_dev_allowed_via_settings(self):
+        provider = self._create(base_url='http://127.0.0.1:11434/v1')
+        self.assertEqual(provider.base_url, 'http://127.0.0.1:11434/v1')
+
+    @override_settings(AI_BASE_URL_ALLOWED_HOSTS=['api.deepseek.com'])
+    def test_allowed_hosts_whitelist_enforced(self):
+        self._create(base_url='https://api.deepseek.com')
+        response = self.client.post('/api/ai-providers/', {
+            'name': 'X', 'base_url': 'https://a.com', 'model': 'm', 'api_key': 'sk-x-0000',
+        }, content_type='application/json')
+        self.assertEqual(response.status_code, 400)
+        self.assertIn('base_url', response.data)
 
     def test_list_never_leaks_plaintext(self):
         self.client.post('/api/ai-providers/', {
@@ -264,6 +380,147 @@ class AiEndpointTests(TestCase):
             'query': 'x', 'results': [],
         }, content_type='application/json')
         self.assertEqual(response.status_code, 400)
+
+
+def _fake_response(status_code, text='', json_data=None):
+    resp = MagicMock()
+    resp.status_code = status_code
+    resp.text = text
+    if json_data is None:
+        resp.json.side_effect = ValueError('no json')
+    else:
+        resp.json.return_value = json_data
+    return resp
+
+
+@patch('stocks.ai.llm.socket.getaddrinfo', side_effect=_fake_getaddrinfo(_PUBLIC_DNS))
+class LlmClientSecurityTests(TestCase):
+    """SEC-01：LlmClient 调用前再次校验地址、不跟随重定向"""
+
+    def _provider(self, base_url='https://mock.local'):
+        # 直接走 ORM 写库，模拟历史遗留的不合规地址（绕过序列化器校验）
+        return AiProvider.objects.create(
+            name='P', base_url=base_url, model='m',
+            api_key_encrypted=encrypt_api_key('sk-leak-7777'),
+        )
+
+    @patch('stocks.ai.llm.requests.post')
+    def test_redirect_not_followed(self, mock_post, _dns):
+        mock_post.return_value = _fake_response(
+            302, text='<a href="http://169.254.169.254/">moved</a>')
+        with self.assertRaises(LlmError) as ctx:
+            LlmClient(self._provider()).chat([{'role': 'user', 'content': 'x'}])
+        self.assertEqual(ctx.exception.kind, 'redirect')
+        self.assertEqual(ctx.exception.status_code, 302)
+        self.assertIs(mock_post.call_args.kwargs['allow_redirects'], False)
+
+    @patch('stocks.ai.llm.requests.post')
+    def test_success_passes_allow_redirects_false(self, mock_post, _dns):
+        mock_post.return_value = _fake_response(200, json_data={
+            'choices': [{'message': {'content': 'ok'}}], 'usage': {}})
+        text, _ = LlmClient(self._provider()).chat([{'role': 'user', 'content': 'x'}])
+        self.assertEqual(text, 'ok')
+        self.assertIs(mock_post.call_args.kwargs['allow_redirects'], False)
+
+    @patch('stocks.ai.llm.requests.post')
+    def test_legacy_internal_url_blocked_before_request(self, mock_post, _dns):
+        for url in ('http://mock.local', 'https://127.0.0.1:9000',
+                    'https://evil-internal.example'):
+            with self.subTest(url=url):
+                with self.assertRaises(LlmError) as ctx:
+                    LlmClient(self._provider(url)).chat([{'role': 'user', 'content': 'x'}])
+                self.assertEqual(ctx.exception.kind, 'config')
+        mock_post.assert_not_called()
+
+    @patch('stocks.ai.llm.requests.post')
+    def test_error_kinds_classified(self, mock_post, _dns):
+        cases = [(401, 'auth'), (403, 'auth'), (429, 'rate_limit'), (500, 'upstream')]
+        for code, kind in cases:
+            with self.subTest(code=code):
+                mock_post.return_value = _fake_response(code, text='body')
+                with self.assertRaises(LlmError) as ctx:
+                    LlmClient(self._provider()).chat([{'role': 'user', 'content': 'x'}])
+                self.assertEqual(ctx.exception.kind, kind)
+                self.assertEqual(ctx.exception.status_code, code)
+        mock_post.side_effect = requests.Timeout('slow')
+        with self.assertRaises(LlmError) as ctx:
+            LlmClient(self._provider()).chat([{'role': 'user', 'content': 'x'}])
+        self.assertEqual(ctx.exception.kind, 'timeout')
+
+    def test_validate_base_url_direct(self, _dns):
+        self.assertEqual(validate_base_url(' https://a.com/v1/ '), 'https://a.com/v1')
+        with self.assertRaises(ValueError):
+            validate_base_url('https://100.64.0.1')  # 运营商级 NAT 共享地址
+        with self.assertRaises(ValueError):
+            validate_base_url('https://224.0.0.1')   # 组播
+
+
+@patch('stocks.ai.llm.socket.getaddrinfo', side_effect=_fake_getaddrinfo(_PUBLIC_DNS))
+class ProviderTestEndpointTests(TestCase):
+    """SEC-01：test 端点不回显上游内容、纳入频控并记流水"""
+
+    def setUp(self):
+        self.provider = AiProvider.objects.create(
+            name='P', base_url='https://mock.local', model='m',
+            api_key_encrypted=encrypt_api_key('sk-test-8888'),
+        )
+        self.url = f'/api/ai-providers/{self.provider.id}/test/'
+
+    @patch('stocks.ai.llm.requests.post')
+    def test_upstream_body_not_echoed(self, mock_post, _dns):
+        secret_body = 'root:x:0:0:SECRET-INTERNAL-CONTENT'
+        mock_post.return_value = _fake_response(500, text=secret_body)
+        response = self.client.post(self.url)
+        self.assertEqual(response.status_code, 502)
+        body = json.dumps(response.json(), ensure_ascii=False)
+        self.assertNotIn('SECRET-INTERNAL-CONTENT', body)
+        self.assertEqual(response.data['error'], 'upstream')
+        self.assertEqual(response.data['upstream_status'], 500)
+
+    @patch('stocks.ai.llm.requests.post')
+    def test_success_does_not_echo_reply(self, mock_post, _dns):
+        mock_post.return_value = _fake_response(200, json_data={
+            'choices': [{'message': {'content': 'LEAKED-REPLY'}}],
+            'usage': {'prompt_tokens': 5, 'completion_tokens': 1}})
+        response = self.client.post(self.url)
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.data, {'status': 'ok'})
+        log = AiCallLog.objects.get(purpose='provider_test')
+        self.assertTrue(log.success)
+        self.assertEqual(log.prompt_tokens, 5)
+
+    @patch('stocks.ai.llm.requests.post')
+    def test_redirect_reported_generically(self, mock_post, _dns):
+        mock_post.return_value = _fake_response(301, text='Location: http://10.0.0.1/')
+        response = self.client.post(self.url)
+        self.assertEqual(response.status_code, 502)
+        self.assertEqual(response.data['error'], 'redirect')
+        self.assertNotIn('10.0.0.1', json.dumps(response.json()))
+
+    @patch('stocks.ai.llm.requests.post')
+    def test_internal_base_url_blocked(self, mock_post, _dns):
+        AiProvider.objects.filter(pk=self.provider.pk).update(
+            base_url='http://169.254.169.254/latest/meta-data')
+        response = self.client.post(self.url)
+        self.assertEqual(response.status_code, 502)
+        self.assertEqual(response.data['error'], 'config')
+        mock_post.assert_not_called()
+
+    @patch('stocks.ai.llm.requests.post')
+    def test_rate_limited_and_logged(self, mock_post, _dns):
+        mock_post.return_value = _fake_response(500, text='x')
+        from .ai.throttle import PROVIDER_TEST_PER_MINUTE
+        for _ in range(PROVIDER_TEST_PER_MINUTE):
+            self.assertEqual(self.client.post(self.url).status_code, 502)
+        response = self.client.post(self.url)
+        self.assertEqual(response.status_code, 429)
+        self.assertEqual(mock_post.call_count, PROVIDER_TEST_PER_MINUTE)
+        self.assertEqual(
+            AiCallLog.objects.filter(purpose='provider_test', success=False).count(),
+            PROVIDER_TEST_PER_MINUTE)
+        # test 调用不占用正式 AI 功能的每日额度
+        allowed, _ = check_throttle('screener_comment')
+        self.assertTrue(allowed)
 
 
 def _make_bars(stock, closes, volumes=None, start=date(2026, 6, 1)):
