@@ -13,7 +13,7 @@ import { CanvasRenderer } from 'echarts/renderers'
 import { marketApi } from '../api/stocks.js'
 import PeriodPicker from '../components/PeriodPicker.vue'
 import { formatPct, formatNum, pctClass } from '../utils/format.js'
-import { formatYi, formatTurnover, formatAmount } from '../utils/marketFormat.js'
+import { formatYi, formatYiAxis, formatTurnover, formatAmount } from '../utils/marketFormat.js'
 
 use([
   BarChart,
@@ -83,7 +83,10 @@ const fundChartOption = computed(() => {
   const items = mainHist.value.items || []
   if (!items.length) return {}
   const dates = items.map(i => String(i.date).slice(0, 10))
-  const main = items.map(i => i.main_net)
+  // 统一按"元"作图：东财 fflow / stock_market_fund_flow 主力净流入单位为元；
+  // 北向兜底源（stock_hsgt_hist_em 净买额）单位为亿元，换算回元
+  const factor = mainHist.value.source === 'eastmoney_hsgt_hist_north' ? 1e8 : 1
+  const main = items.map(i => (i.main_net == null ? null : i.main_net * factor))
   const colors = main.map(v => (v != null && v >= 0 ? '#e94560' : '#00c853'))
   return {
     backgroundColor: 'transparent',
@@ -92,6 +95,7 @@ const fundChartOption = computed(() => {
       backgroundColor: '#1a1a2e',
       borderColor: '#333',
       textStyle: { color: '#ddd', fontSize: 12 },
+      valueFormatter: (v) => formatAmount(v, { signed: true }),
     },
     grid: { left: '8%', right: '4%', top: '12%', bottom: '18%' },
     xAxis: {
@@ -102,7 +106,7 @@ const fundChartOption = computed(() => {
     },
     yAxis: {
       type: 'value',
-      axisLabel: { color: '#888', fontSize: 11 },
+      axisLabel: { color: '#888', fontSize: 11, formatter: formatYiAxis },
       splitLine: { lineStyle: { color: '#1a2744' } },
     },
     series: [{
@@ -375,7 +379,7 @@ onUnmounted(() => {
         <div v-if="flowError" class="error-box sm">{{ flowError }}</div>
         <div class="flow-summary" v-if="flowData?.available && flowSummary.days != null">
           <span>区间交易日 <b>{{ flowSummary.days }}</b></span>
-          <span>主力合计 <b :class="pctClass(flowSummary.total_main_net)">{{ formatYi(flowSummary.total_main_net) }} 亿</b></span>
+          <span>主力合计 <b :class="pctClass(flowSummary.total_main_net)">{{ formatAmount(flowSummary.total_main_net, { signed: true }) }}</b></span>
           <span>净流入 <b class="up">{{ flowSummary.inflow_days ?? '-' }} 天</b></span>
           <span>净流出 <b class="down">{{ flowSummary.outflow_days ?? '-' }} 天</b></span>
         </div>
