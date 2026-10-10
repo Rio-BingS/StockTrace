@@ -1,6 +1,6 @@
 <script setup>
 import { ref } from 'vue'
-import { formatPct, formatNum, pctClass } from '../utils/format.js'
+import { formatPct, formatNum, formatSigned, pctClass } from '../utils/format.js'
 import { stockApi } from '../api/stocks.js'
 
 defineProps({
@@ -126,12 +126,13 @@ async function handleDelete(e, item) {
             <td class="code">{{ item.code }}</td>
             <td class="name">{{ item.name }}</td>
             <td>{{ item.trade_date || '-' }}</td>
-            <td :class="pctClass(item.open_close_pct)">{{ formatNum(item.close_price) }}</td>
-            <td :class="pctClass(item.open_close_pct)">
-              {{ formatPct(item.open_close_pct) }}
+            <!-- 涨跌幅/涨跌价口径：相对昨收（change_pct/change_diff），无昨收时显示 '-' -->
+            <td :class="pctClass(item.change_pct)">{{ formatNum(item.close_price) }}</td>
+            <td :class="pctClass(item.change_pct)">
+              {{ formatPct(item.change_pct) }}
             </td>
-            <td :class="pctClass(item.open_close_diff)">
-              {{ formatNum(item.open_close_diff) }}
+            <td :class="pctClass(item.change_diff)">
+              {{ formatSigned(item.change_diff) }}
             </td>
             <td :class="pctClass(pnlOf(item))">
               {{ pnlOf(item) == null ? '-' : formatNum(pnlOf(item)) }}
@@ -149,6 +150,14 @@ async function handleDelete(e, item) {
                   <div class="expand-item">
                     <span class="elabel">振幅</span>
                     <span :class="pctClass(item.high_low_pct)">{{ formatPct(item.high_low_pct) }}</span>
+                  </div>
+                  <div class="expand-item">
+                    <span class="elabel">日内涨幅（较开盘）</span>
+                    <span :class="pctClass(item.open_close_pct)">{{ formatPct(item.open_close_pct) }}</span>
+                  </div>
+                  <div class="expand-item">
+                    <span class="elabel">昨收</span>
+                    <span>{{ formatNum(item.prev_close) }}</span>
                   </div>
                   <div class="expand-item">
                     <span class="elabel">开盘价</span>

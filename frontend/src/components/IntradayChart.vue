@@ -12,7 +12,7 @@ import {
   MarkLineComponent,
 } from 'echarts/components'
 import { CanvasRenderer } from 'echarts/renderers'
-import { formatPct, formatNum, pctClass } from '../utils/format.js'
+import { formatPct, formatNum, pctClass, pctFrom } from '../utils/format.js'
 
 use([
   LineChart,
@@ -31,6 +31,23 @@ const props = defineProps({
   date: { type: String, default: '' },
 })
 
+// 百分比基准：A 股惯例为昨收；拿不到昨收（如首个交易日）时才回退开盘价，并在界面注明基准
+const baseInfo = computed(() => {
+  const q = props.dailyQuote || {}
+  if (q.prev_close != null && Number(q.prev_close)) {
+    return { price: Number(q.prev_close), label: '较昨收', isPrevClose: true }
+  }
+  if (q.open_price != null && Number(q.open_price)) {
+    return { price: Number(q.open_price), label: '较开盘', isPrevClose: false }
+  }
+  return { price: null, label: '', isPrevClose: false }
+})
+
+// 相对基准的带符号百分比文本，基准缺失时返回 ''
+function signedPctText(price) {
+  const v = pctFrom(price, baseInfo.value.price)
+  return v == null ? '' : formatPct(v)
+}
 
 // 局部极值检测
 function findLocalExtrema(prices, windowSize = 20) {
@@ -82,6 +99,7 @@ const chartOption = computed(() => {
   const closePrice = props.dailyQuote?.close_price ? Number(props.dailyQuote.close_price) : null
   const highPrice = props.dailyQuote?.high_price ? Number(props.dailyQuote.high_price) : null
   const lowPrice = props.dailyQuote?.low_price ? Number(props.dailyQuote.low_price) : null
+  const { price: basePrice, isPrevClose } = baseInfo.value
 
   // 找最高/最低/现价在数据中的索引
   let highIdx = 0, lowIdx = 0
@@ -107,8 +125,8 @@ const chartOption = computed(() => {
       label: {
         show: true,
         formatter: () => {
-          const pct = openPrice ? ((prices[highIdx] - openPrice) / openPrice * 100).toFixed(2) : ''
-          return `高 ${prices[highIdx].toFixed(2)}${pct ? '\n+' + pct + '%' : ''}`
+          const pct = signedPctText(prices[highIdx])
+          return `高 ${prices[highIdx].toFixed(2)}${pct ? '\n' + pct : ''}`
         },
         fontSize: 10,
         color: '#e94560',
@@ -126,8 +144,8 @@ const chartOption = computed(() => {
       label: {
         show: true,
         formatter: () => {
-          const pct = openPrice ? ((prices[lowIdx] - openPrice) / openPrice * 100).toFixed(2) : ''
-          return `低 ${prices[lowIdx].toFixed(2)}${pct ? '\n' + pct + '%' : ''}`
+          const pct = signedPctText(prices[lowIdx])
+          return `低 ${prices[lowIdx].toFixed(2)}${pct ? '\n' + pct : ''}`
         },
         fontSize: 10,
         color: '#00c853',
@@ -137,7 +155,7 @@ const chartOption = computed(() => {
 
   // 现价（如果不是最高也不是最低时才单独标注）
   if (currentIdx !== highIdx && currentIdx !== lowIdx && prices.length > 0) {
-    const curPct = openPrice ? ((prices[currentIdx] - openPrice) / openPrice * 100).toFixed(2) : ''
+    const curPct = signedPctText(prices[currentIdx])
     markPointData.push({
       coord: [currentIdx, prices[currentIdx]],
       name: `现价 ${prices[currentIdx].toFixed(2)}`,
@@ -145,7 +163,7 @@ const chartOption = computed(() => {
       symbolOffset: [0, '-60%'],
       label: {
         show: true,
-        formatter: `现 ${prices[currentIdx].toFixed(2)}${curPct ? '\n' + (Number(curPct) >= 0 ? '+' : '') + curPct + '%' : ''}`,
+        formatter: `现 ${prices[currentIdx].toFixed(2)}${curPct ? '\n' + curPct : ''}`,
         fontSize: 10,
         color: '#ffd700',
       },
@@ -155,7 +173,7 @@ const chartOption = computed(() => {
   // 阶段峰
   peaks.forEach((peak, i) => {
     if (peak.index === highIdx) return // 已标注全日最高
-    const pct = openPrice ? ((peak.price - openPrice) / openPrice * 100).toFixed(2) : ''
+    const pct = signedPctText(peak.price)
     markPointData.push({
       coord: [peak.index, peak.price],
       name: `峰${i + 1}`,
@@ -165,7 +183,7 @@ const chartOption = computed(() => {
       symbolOffset: [0, '-100%'],
       label: {
         show: true,
-        formatter: `${peak.price.toFixed(2)}${pct ? '\n+' + pct + '%' : ''}`,
+        formatter: `${peak.price.toFixed(2)}${pct ? '\n' + pct : ''}`,
         fontSize: 9,
         color: '#ff9800',
       },
@@ -175,7 +193,7 @@ const chartOption = computed(() => {
   // 阶段谷
   valleys.forEach((valley, i) => {
     if (valley.index === lowIdx) return // 已标注全日最低
-    const pct = openPrice ? ((valley.price - openPrice) / openPrice * 100).toFixed(2) : ''
+    const pct = signedPctText(valley.price)
     markPointData.push({
       coord: [valley.index, valley.price],
       name: `谷${i + 1}`,
@@ -186,15 +204,23 @@ const chartOption = computed(() => {
       symbolOffset: [0, '100%'],
       label: {
         show: true,
-        formatter: `${valley.price.toFixed(2)}${pct ? '\n' + pct + '%' : ''}`,
+        formatter: `${valley.price.toFixed(2)}${pct ? '\n' + pct : ''}`,
         fontSize: 9,
         color: '#4fc3f7',
       },
     })
   })
 
-  // MarkLine：开盘价 + 收盘价水平线
+  // MarkLine：昨收（分时基准）+ 开盘价 + 收盘价水平线
   const markLineData = []
+  if (isPrevClose) {
+    markLineData.push({
+      yAxis: basePrice,
+      name: '昨收',
+      lineStyle: { color: '#ddd', type: 'solid', width: 1 },
+      label: { formatter: `昨收 ${basePrice.toFixed(2)}`, fontSize: 10, color: '#ddd' },
+    })
+  }
   if (openPrice != null) {
     markLineData.push({
       yAxis: openPrice,
@@ -226,10 +252,10 @@ const chartOption = computed(() => {
         const idx = p.dataIndex
         const bar = sorted[idx]
         if (!bar) return ''
-        const pct = openPrice ? ((Number(bar.close) - openPrice) / openPrice * 100).toFixed(2) : ''
+        const pct = signedPctText(bar.close)
         return `<div style="font-size:12px">
           <b>${p.axisValue}</b><br/>
-          价格: ${Number(bar.close).toFixed(2)}${pct ? ` (${Number(pct) >= 0 ? '+' : ''}${pct}%)` : ''}<br/>
+          价格: ${Number(bar.close).toFixed(2)}${pct ? ` (${baseInfo.value.label} ${pct})` : ''}<br/>
           成交量: ${bar.volume || '-'}
         </div>`
       },
@@ -247,6 +273,11 @@ const chartOption = computed(() => {
     },
     yAxis: {
       scale: true,
+      // 保证昨收线落在可视范围内
+      ...(isPrevClose ? {
+        min: v => Math.min(v.min, basePrice),
+        max: v => Math.max(v.max, basePrice),
+      } : {}),
       axisLine: { lineStyle: { color: '#444' } },
       axisLabel: { color: '#888', fontSize: 11 },
       splitLine: { lineStyle: { color: '#1a2744' } },
@@ -294,6 +325,8 @@ const tableData = computed(() => {
     current_price: props.minuteData.length
       ? props.minuteData[props.minuteData.length - 1].close
       : null,
+    prev_close: q.prev_close,
+    change_pct: q.change_pct,
     open_close_pct: q.open_close_pct,
     high_low_pct: q.high_low_pct,
   }
@@ -306,26 +339,25 @@ const extremaList = computed(() => {
     (a, b) => new Date(a.datetime) - new Date(b.datetime)
   )
   const prices = sorted.map(d => Number(d.close))
-  const openPrice = props.dailyQuote?.open_price ? Number(props.dailyQuote.open_price) : null
   const { peaks, valleys } = findLocalExtrema(prices)
 
   const list = []
   peaks.forEach(p => {
-    const pct = openPrice ? ((p.price - openPrice) / openPrice * 100).toFixed(2) : ''
+    const pct = signedPctText(p.price)
     list.push({
       type: '峰',
       time: sorted[p.index].datetime.slice(11, 16),
       price: p.price.toFixed(2),
-      pct: pct ? (Number(pct) >= 0 ? '+' : '') + pct + '%' : '',
+      pct,
     })
   })
   valleys.forEach(v => {
-    const pct = openPrice ? ((v.price - openPrice) / openPrice * 100).toFixed(2) : ''
+    const pct = signedPctText(v.price)
     list.push({
       type: '谷',
       time: sorted[v.index].datetime.slice(11, 16),
       price: v.price.toFixed(2),
-      pct: pct ? (Number(pct) >= 0 ? '+' : '') + pct + '%' : '',
+      pct,
     })
   })
   // 按时间排序
@@ -338,6 +370,7 @@ const extremaList = computed(() => {
   <div class="intraday-chart">
     <div class="chart-header">
       <h3>{{ date }} 当日走势</h3>
+      <span v-if="baseInfo.label" class="base-note">百分比{{ baseInfo.label }}</span>
     </div>
 
     <v-chart
@@ -366,8 +399,14 @@ const extremaList = computed(() => {
           </tr>
           <tr>
             <td class="tlabel">现价</td>
-            <td :class="pctClass(tableData.open_close_pct)">{{ formatNum(tableData.current_price) }}</td>
+            <td :class="pctClass(tableData.change_pct)">{{ formatNum(tableData.current_price) }}</td>
             <td class="tlabel">涨跌幅</td>
+            <td :class="pctClass(tableData.change_pct)">{{ formatPct(tableData.change_pct) }}</td>
+          </tr>
+          <tr>
+            <td class="tlabel">昨收</td>
+            <td>{{ formatNum(tableData.prev_close) }}</td>
+            <td class="tlabel">日内涨幅（较开盘）</td>
             <td :class="pctClass(tableData.open_close_pct)">{{ formatPct(tableData.open_close_pct) }}</td>
           </tr>
           <tr>
@@ -388,7 +427,7 @@ const extremaList = computed(() => {
               <th>类型</th>
               <th>时间</th>
               <th>价格</th>
-              <th>相对开盘</th>
+              <th>{{ baseInfo.label ? '涨跌（' + baseInfo.label + '）' : '涨跌' }}</th>
             </tr>
           </thead>
           <tbody>
@@ -419,6 +458,11 @@ const extremaList = computed(() => {
 .chart-header h3 {
   color: #eee;
   font-size: 16px;
+}
+
+.base-note {
+  color: #888;
+  font-size: 12px;
 }
 
 .no-data {
