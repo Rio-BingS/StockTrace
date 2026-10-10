@@ -46,7 +46,7 @@ def _current_price(stock):
     if bar is not None:
         return float(bar.close)
     daily = _latest_daily(stock)
-    return float(daily.close) if daily is not None else None
+    return float(daily.close_price) if daily is not None else None
 
 
 def _message(alert, price):
@@ -83,6 +83,24 @@ def _push(events):
     push_message('StockTrace 价格提醒', '\n'.join(event.message for event in events))
 
 
+def _evaluate_one(alert, today):
+    """评估单条规则；命中则落库并返回 AlertEvent，否则返回 None。"""
+    stock = alert.stock
+    price = _current_price(stock) \
+        if alert.rule_type in (PriceAlert.PRICE_ABOVE, PriceAlert.PRICE_BELOW) else None
+    daily = _latest_daily(stock) \
+        if alert.rule_type in (PriceAlert.DAILY_PCT_ABOVE, PriceAlert.DAILY_PCT_BELOW) else None
+    if not _hit(alert, price, daily):
+        return None
+    event = AlertEvent.objects.create(
+        alert=alert, stock=stock,
+        message=_message(alert, price), trade_date=today,
+    )
+    alert.last_triggered_at = timezone.now()
+    alert.save(update_fields=['last_triggered_at'])
+    return event
+
+
 def evaluate_alerts():
     """评估全部启用规则，返回本次新触发的 AlertEvent 列表。"""
     from .services import is_trading_day
@@ -98,20 +116,13 @@ def evaluate_alerts():
     for alert in PriceAlert.objects.filter(is_active=True).select_related('stock'):
         if alert.id in already:
             continue
-        stock = alert.stock
-        price = _current_price(stock) \
-            if alert.rule_type in (PriceAlert.PRICE_ABOVE, PriceAlert.PRICE_BELOW) else None
-        daily = _latest_daily(stock) \
-            if alert.rule_type in (PriceAlert.DAILY_PCT_ABOVE, PriceAlert.DAILY_PCT_BELOW) else None
-        if not _hit(alert, price, daily):
+        try:
+            event = _evaluate_one(alert, today)
+        except Exception:
+            logger.exception(f"价格提醒 #{alert.id} 评估失败（跳过该条，继续其余规则）")
             continue
-        event = AlertEvent.objects.create(
-            alert=alert, stock=stock,
-            message=_message(alert, price), trade_date=today,
-        )
-        alert.last_triggered_at = timezone.now()
-        alert.save(update_fields=['last_triggered_at'])
-        new_events.append(event)
+        if event is not None:
+            new_events.append(event)
 
     _push(new_events)
     if new_events:
