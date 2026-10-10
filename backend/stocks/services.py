@@ -544,7 +544,53 @@ _DAILY_UPDATE_FIELDS = [
 ]
 
 
-def fetch_daily_data(stock, start_date=None, end_date=None):
+# 复权基准变化判定容差（DAT-02）：相对 0.2%，绝对 0.006 元兜住库内 2 位小数的舍入误差
+_ADJ_REL_TOL = 0.002
+_ADJ_ABS_TOL = 0.006
+
+
+def _adjust_basis_changed(stock, df, today=None):
+    """比较重叠窗口新旧收盘价，返回偏差超出容差的交易日列表（升序）。
+
+    前复权以最新价为基准回溯调整全部历史：除权除息后，同一历史交易日的收盘价
+    会整体变化。只要重叠窗口内任一日偏差超出容差，就说明库内历史仍是旧基准，
+    只做增量会在拼接点留下断层。当日（盘中收盘价本就会变）不参与比较。
+    """
+    today = today or timezone.localdate()
+    new = {}
+    for d, c in zip(df['日期'], df['收盘']):
+        if pd.isna(c):
+            continue
+        day = pd.to_datetime(d).date()
+        if day < today:
+            new[day] = float(c)
+    if not new:
+        return []
+    old = DailyQuote.objects.filter(stock=stock, trade_date__in=list(new)).values_list(
+        'trade_date', 'close_price')
+    changed = []
+    for day, close in old:
+        if not close:
+            continue
+        old_close = float(close)
+        if abs(new[day] - old_close) > max(old_close * _ADJ_REL_TOL, _ADJ_ABS_TOL):
+            changed.append(day)
+    return sorted(changed)
+
+
+def _full_history_start(stock, bootstrap_days=365):
+    """全量重拉起点：库内最早一根与 bootstrap 起点取更早者，确保覆盖全部存量行"""
+    boot = timezone.localdate() - timedelta(days=bootstrap_days)
+    earliest = (
+        DailyQuote.objects.filter(stock=stock)
+        .order_by('trade_date')
+        .values_list('trade_date', flat=True)
+        .first()
+    )
+    return min(earliest, boot) if earliest else boot
+
+
+def fetch_daily_data(stock, start_date=None, end_date=None, full=False, sources=None):
     """
     获取日K线数据并保存到 DailyQuote 表（多数据源自动切换）
 
@@ -552,15 +598,22 @@ def fetch_daily_data(stock, start_date=None, end_date=None):
         stock: Stock 模型实例
         start_date: 开始日期 'YYYYMMDD'
         end_date: 结束日期 'YYYYMMDD'
+        full: True 时从库内最早日期（至少一年）全量重拉并重算 prev_close/change_pct
+        sources: 可选数据源列表（如存量修复时只用新浪单一源），默认 DATA_SOURCES
+
+    增量拉取时会比对重叠窗口的新旧收盘价，判定复权基准已变化（除权除息）就
+    自动改为全量重拉（DAT-02 短期方案）。
     """
     symbol = format_symbol(stock.code)
 
     if end_date is None:
-        end_date = timezone.now().strftime('%Y%m%d')
-    if start_date is None:
+        end_date = timezone.localdate().strftime('%Y%m%d')
+    if full:
+        start_date = _full_history_start(stock).strftime('%Y%m%d')
+    elif start_date is None:
         start_date = _daily_start_date(stock)
 
-    source, df = _try_sources('fetch_daily', symbol, start_date, end_date)
+    source, df = _try_sources('fetch_daily', symbol, start_date, end_date, sources=sources)
 
     if df is None or df.empty:
         logger.error(f"获取 {stock.code} 日K线失败：所有数据源均不可用")
@@ -568,6 +621,16 @@ def fetch_daily_data(stock, start_date=None, end_date=None):
 
     # 按日期正序排列，以便计算昨收价
     df = df.sort_values(by='日期').reset_index(drop=True)
+
+    if not full:
+        changed = _adjust_basis_changed(stock, df)
+        if changed:
+            # 增量结果不落库：若全量重拉失败，下次增量仍能再次检测到并重试
+            logger.warning(
+                f"[{source.name}] {stock.code} 复权基准已变化：重叠窗口 {len(changed)} 个交易日"
+                f"收盘价与库内不一致（{changed[0]}~{changed[-1]}），触发全量重拉"
+            )
+            return fetch_daily_data(stock, end_date=end_date, full=True, sources=sources)
     # 同时查库获取该股票最早的日K记录之前的最后一条，作为 prev_close 兜底
     first_date = pd.to_datetime(df.iloc[0]['日期']).date() if len(df) > 0 else None
     db_prev_close = None
@@ -644,6 +707,15 @@ def fetch_daily_data(stock, start_date=None, end_date=None):
                 update_fields=_DAILY_UPDATE_FIELDS,
             )
 
+    if full:
+        stale = DailyQuote.objects.filter(
+            stock=stock, trade_date__gte=min(objs), trade_date__lte=max(objs),
+        ).exclude(trade_date__in=list(objs)).count() if objs else 0
+        logger.warning(
+            f"[{source.name}] {stock.code} 日线全量重拉 {count} 条（{start_date}~{end_date}），"
+            f"prev_close/change_pct 已重算"
+            + (f"；区间内仍有 {stale} 条库内行源端未返回，保留旧值" if stale else '')
+        )
     logger.info(f"[{source.name}] 获取 {stock.code} 日K线数据 {count} 条")
     return count
 

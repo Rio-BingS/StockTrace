@@ -1,6 +1,6 @@
 """P0 数据入库修复回归测试（DAT-01 / PERF-01 / DAT-03 / DAT-02 / DAT-07）"""
 
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 from decimal import Decimal
 from io import StringIO
 from unittest.mock import patch
@@ -308,3 +308,87 @@ class MinuteFreqTests(_NoSleep, TestCase):
         self.assertEqual(set(MinuteBar.objects.values_list('freq', flat=True)), {1})
         q2 = DailyQuote.objects.get(pk=q.pk)
         self.assertEqual(q2.high_time, q.high_time)
+
+
+class AdjustBasisChangeTests(_NoSleep, TestCase):
+    """DAT-02：增量重叠窗口收盘价变化 → 判定复权基准变化，全量重拉并重算昨收。"""
+
+    def setUp(self):
+        super().setUp()
+        self.stock = Stock.objects.create(code='000001', name='平安银行')
+        self.today = timezone.localdate()
+        # 库内旧基准：10 个交易日（用自然日简化），收盘 10.00 起每日 +0.10
+        self.days = [self.today - timedelta(days=i) for i in range(10, 0, -1)]
+        for i, d in enumerate(self.days):
+            _make_quote(self.stock, d, close=Decimal('10.00') + Decimal('0.10') * i)
+
+    def _df(self, days, factor):
+        rows = []
+        for d in days:
+            i = self.days.index(d) if d in self.days else len(self.days)
+            c = round((10.0 + 0.1 * i) * factor, 2)
+            rows.append({'日期': d.isoformat(), '开盘': c, '收盘': c, '最高': c, '最低': c,
+                         '成交量': 100, '成交额': 1000.0})
+        return pd.DataFrame(rows)
+
+    def _fake_try(self, factor):
+        calls = []
+
+        def fake(method, symbol, start, end, sources=None):
+            calls.append(start)
+            start_d = datetime.strptime(start, '%Y%m%d').date()
+            days = [d for d in self.days + [self.today] if d >= start_d]
+            return services.SinaSource(), self._df(days, factor)
+        return fake, calls
+
+    def test_unchanged_basis_stays_incremental(self):
+        fake, calls = self._fake_try(1.0)
+        with patch('stocks.services._try_sources', side_effect=fake):
+            services.fetch_daily_data(self.stock)
+        self.assertEqual(len(calls), 1)
+
+    def test_dividend_triggers_full_refetch_and_recomputes_prev_close(self):
+        fake, calls = self._fake_try(0.97)  # 分红 3%：历史整体下调
+        with self.assertLogs('stocks.services', level='WARNING') as logs:
+            with patch('stocks.services._try_sources', side_effect=fake):
+                services.fetch_daily_data(self.stock)
+        self.assertEqual(len(calls), 2)
+        self.assertLessEqual(datetime.strptime(calls[1], '%Y%m%d').date(), self.days[0])
+        self.assertTrue(any('复权基准已变化' in m for m in logs.output))
+        first = DailyQuote.objects.get(stock=self.stock, trade_date=self.days[0])
+        self.assertEqual(first.close_price, Decimal('9.70'))
+        second = DailyQuote.objects.get(stock=self.stock, trade_date=self.days[1])
+        self.assertEqual(second.prev_close, Decimal('9.70'))
+        self.assertEqual(second.close_price, Decimal('9.80'))  # 10.10*0.97=9.797
+        # 拼接点无断层：每一行的昨收都等于前一行收盘
+        rows = list(DailyQuote.objects.filter(stock=self.stock).order_by('trade_date'))
+        for prev, cur in zip(rows, rows[1:]):
+            self.assertEqual(cur.prev_close, prev.close_price)
+
+    def test_rounding_noise_not_treated_as_basis_change(self):
+        df = self._df(self.days[-3:], 1.0)
+        df.loc[0, '收盘'] = float(df.loc[0, '收盘']) + 0.004  # 小数位舍入噪声
+        self.assertEqual(services._adjust_basis_changed(self.stock, df), [])
+
+    def test_full_refetch_failure_does_not_write_incremental(self):
+        state = {'n': 0}
+
+        def fake(method, symbol, start, end, sources=None):
+            state['n'] += 1
+            if state['n'] == 1:
+                return services.SinaSource(), self._df(self.days[-3:] + [self.today], 0.9)
+            return None, None
+        with patch('stocks.services._try_sources', side_effect=fake):
+            self.assertEqual(services.fetch_daily_data(self.stock), 0)
+        last = DailyQuote.objects.get(stock=self.stock, trade_date=self.days[-1])
+        self.assertEqual(last.close_price, Decimal('10.90'))  # 旧值未被新基准覆盖
+        self.assertFalse(DailyQuote.objects.filter(stock=self.stock, trade_date=self.today).exists())
+
+    def test_command_full_daily_single_source(self):
+        fake, calls = self._fake_try(1.0)
+        with patch('stocks.services._try_sources', side_effect=fake) as ts:
+            call_command('fetch_stock_data', '000001', '--full-daily', '--source', 'sina',
+                         stdout=StringIO())
+        sources = ts.call_args.kwargs['sources']
+        self.assertEqual([s.name for s in sources], ['sina'])
+        self.assertLessEqual(datetime.strptime(calls[0], '%Y%m%d').date(), self.days[0])
