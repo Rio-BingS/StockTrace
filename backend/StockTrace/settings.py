@@ -122,6 +122,11 @@ DATABASES = {
         },
     }
 }
+# 写事务一开始就拿写锁（BEGIN IMMEDIATE）：默认 DEFERRED 事务在「先读后写」时升级写锁
+# 会直接报 database is locked 且不走 timeout 等待；分钟线/日线入库现为每股一个
+# transaction.atomic。该选项需 Django >= 5.1，低版本传给 sqlite3.connect 会报错，故按版本开启
+if __import__('django').VERSION >= (5, 1):
+    DATABASES['default']['OPTIONS']['transaction_mode'] = 'IMMEDIATE'
 
 
 # Password validation

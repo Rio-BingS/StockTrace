@@ -21,6 +21,7 @@ from decimal import Decimal
 
 import akshare as ak
 import pandas as pd
+from django.db import transaction
 from django.utils import timezone
 
 from .models import Stock, DailyQuote, MinuteBar
@@ -513,6 +514,13 @@ def _daily_start_date(stock, bootstrap_days=365, overlap_days=5):
     return (latest - timedelta(days=overlap_days)).strftime('%Y%m%d')
 
 
+_DAILY_UPDATE_FIELDS = [
+    'open_price', 'close_price', 'high_price', 'low_price',
+    'open_close_diff', 'open_close_pct', 'high_low_diff', 'high_low_pct',
+    'prev_close', 'change_diff', 'change_pct', 'volume', 'turnover',
+]
+
+
 def fetch_daily_data(stock, start_date=None, end_date=None):
     """
     获取日K线数据并保存到 DailyQuote 表（多数据源自动切换）
@@ -548,7 +556,7 @@ def fetch_daily_data(stock, start_date=None, end_date=None):
             db_prev_close = prev_q.close_price
 
     prev_close_val = db_prev_close
-    count = 0
+    objs = {}
     for _, row in df.iterrows():
         try:
             trade_date = pd.to_datetime(row['日期']).date()
@@ -578,34 +586,106 @@ def fetch_daily_data(stock, start_date=None, end_date=None):
                 change_diff = None
                 change_pct = None
 
-            daily_quote, created = DailyQuote.objects.update_or_create(
+            # 同一日期重复出现时以后一条为准（bulk upsert 单条语句内不能重复键）
+            objs[trade_date] = DailyQuote(
                 stock=stock,
                 trade_date=trade_date,
-                defaults={
-                    'open_price': open_price,
-                    'close_price': close_price,
-                    'high_price': high_price,
-                    'low_price': low_price,
-                    'open_close_diff': open_close_diff,
-                    'open_close_pct': open_close_pct,
-                    'high_low_diff': high_low_diff,
-                    'high_low_pct': high_low_pct,
-                    'prev_close': prev_close,
-                    'change_diff': change_diff,
-                    'change_pct': change_pct,
-                    'volume': volume,
-                    'turnover': turnover,
-                }
+                open_price=open_price,
+                close_price=close_price,
+                high_price=high_price,
+                low_price=low_price,
+                open_close_diff=open_close_diff,
+                open_close_pct=open_close_pct,
+                high_low_diff=high_low_diff,
+                high_low_pct=high_low_pct,
+                prev_close=prev_close,
+                change_diff=change_diff,
+                change_pct=change_pct,
+                volume=volume,
+                turnover=turnover,
             )
-            count += 1
             # 当前条目的收盘价作为下一条的昨收
             prev_close_val = close_price
         except Exception as e:
             logger.warning(f"解析 {stock.code} 日K行数据失败: {e}")
             continue
 
+    count = len(objs)
+    if objs:
+        # 每股一个事务 + 批量 upsert（PERF-01）；high_time/low_time 由分钟线维护，不覆盖
+        with transaction.atomic():
+            DailyQuote.objects.bulk_create(
+                list(objs.values()), batch_size=500, update_conflicts=True,
+                unique_fields=['stock', 'trade_date'],
+                update_fields=_DAILY_UPDATE_FIELDS,
+            )
+
     logger.info(f"[{source.name}] 获取 {stock.code} 日K线数据 {count} 条")
     return count
+
+
+_PRICE_Q = Decimal('0.01')
+_MINUTE_UPDATE_FIELDS = ['open', 'close', 'high', 'low', 'volume', 'turnover']
+
+
+def _dec2(v):
+    """与 DecimalField(decimal_places=2) 入库精度一致，便于和库内值比较"""
+    return Decimal(str(v)).quantize(_PRICE_Q)
+
+
+def _save_minute_bars(stock, df, date_obj):
+    """把某交易日的分钟 bar 批量 upsert 进 MinuteBar，返回实际写入行数。
+
+    - 一个 transaction.atomic 内完成，避免逐行独立提交长期占用 SQLite 写锁；
+    - 先读出当日已有 bar，只写新增或数值有变化的 bar（盘中每轮通常只有几根）；
+    - bulk_create(update_conflicts=True) 依赖 (stock, datetime) 唯一约束。
+    """
+    day_start, day_end = _day_bounds(date_obj)
+    rows = {}
+    skipped = 0
+    for rec in df.to_dict('records'):
+        t = rec.get('时间')
+        if t is None or pd.isna(t):
+            continue
+        # 价格缺失（NaN）的行跳过：Decimal('nan') 不抛错会污染库
+        if not all(pd.notna(rec.get(k)) for k in ('开盘', '收盘', '最高', '最低')):
+            skipped += 1
+            continue
+        try:
+            dt = timezone.make_aware(pd.Timestamp(t).to_pydatetime())
+            vol = rec.get('成交量')
+            amt = rec.get('成交额')
+            rows[dt] = (
+                _dec2(rec['开盘']), _dec2(rec['收盘']), _dec2(rec['最高']), _dec2(rec['最低']),
+                int(vol) if vol is not None and pd.notna(vol) else 0,
+                _dec2(amt) if amt is not None and pd.notna(amt) else None,
+            )
+        except Exception as e:
+            logger.warning(f"解析 {stock.code} 分钟数据行失败: {e}")
+    if skipped:
+        logger.warning(f"{stock.code} {date_obj} 有 {skipped} 根分钟 bar 价格缺失，已跳过")
+    if not rows:
+        return 0
+
+    with transaction.atomic():
+        existing = {
+            r[0]: tuple(r[1:]) for r in MinuteBar.objects.filter(
+                stock=stock, datetime__gte=day_start, datetime__lt=day_end,
+            ).values_list('datetime', *_MINUTE_UPDATE_FIELDS)
+        }
+        objs = [
+            MinuteBar(stock=stock, datetime=dt, open=v[0], close=v[1], high=v[2],
+                      low=v[3], volume=v[4], turnover=v[5])
+            for dt, v in sorted(rows.items()) if existing.get(dt) != v
+        ]
+        if objs:
+            MinuteBar.objects.bulk_create(
+                objs, batch_size=500, update_conflicts=True,
+                unique_fields=['stock', 'datetime'],
+                update_fields=_MINUTE_UPDATE_FIELDS,
+            )
+    logger.debug(f"{stock.code} {date_obj} 分钟 bar 共 {len(rows)} 根，写入 {len(objs)} 根")
+    return len(objs)
 
 
 def fetch_minute_data(stock, trade_date=None):
@@ -640,30 +720,8 @@ def fetch_minute_data(stock, trade_date=None):
         logger.warning(f"[{source.name}] {stock.code} {trade_date} 无当日分钟数据")
         return None
 
-    # 保存分钟数据
-    for _, row in df.iterrows():
-        try:
-            dt = pd.to_datetime(row['时间'])
-            # 价格缺失（NaN）的行跳过：Decimal('nan') 不抛错会污染库
-            if not all(pd.notna(row[k]) for k in ('开盘', '收盘', '最高', '最低')):
-                logger.warning(f"{stock.code} {dt} 分钟价格缺失，跳过该行")
-                continue
-            MinuteBar.objects.update_or_create(
-                stock=stock,
-                datetime=dt,
-                defaults={
-                    'open': Decimal(str(row['开盘'])),
-                    'close': Decimal(str(row['收盘'])),
-                    'high': Decimal(str(row['最高'])),
-                    'low': Decimal(str(row['最低'])),
-                    'volume': int(row['成交量']) if pd.notna(row.get('成交量')) else 0,
-                    'turnover': (Decimal(str(row['成交额']))
-                                 if pd.notna(row.get('成交额')) else None),
-                }
-            )
-        except Exception as e:
-            logger.warning(f"解析 {stock.code} 分钟数据行失败: {e}")
-            continue
+    # 保存分钟数据：每股一个事务 + 批量 upsert，只写新增/变化的 bar（PERF-01）
+    _save_minute_bars(stock, df, date_obj)
 
     # 推算最高/最低点精确时间（只用当日 bar，并列取最早一根）
     try:

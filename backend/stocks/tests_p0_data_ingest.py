@@ -150,3 +150,57 @@ class RebuildHighLowTimesCommandTests(TestCase):
         self.assertEqual(self.q1.high_time, _aware('2026-09-01 09:31:00'))
 
 
+
+
+class MinuteBulkUpsertTests(_NoSleep, TestCase):
+    """PERF-01：分钟线批量 upsert、只写增量；日线批量 upsert 不覆盖高低点时间。"""
+
+    def setUp(self):
+        super().setUp()
+        self.stock = Stock.objects.create(code='600000', name='浦发银行')
+        _make_quote(self.stock, date(2026, 9, 2))
+
+    def _fetch(self, bars):
+        df = _sina_minute_df({'2026-09-02': bars})
+        with patch('stocks.services.DATA_SOURCES', [services.SinaSource()]), \
+                patch('akshare.stock_zh_a_minute', return_value=df):
+            return services.fetch_minute_data(self.stock, trade_date='2026-09-02')
+
+    def test_incremental_only_writes_new_or_changed(self):
+        self._fetch([('09:31', 10.0, 9.8), ('09:32', 10.1, 9.9)])
+        self.assertEqual(MinuteBar.objects.filter(stock=self.stock).count(), 2)
+        with patch.object(MinuteBar.objects, 'bulk_create',
+                          wraps=MinuteBar.objects.bulk_create) as bc:
+            # 第二轮：09:31 不变，09:32 最后一根更新，新增 09:33
+            self._fetch([('09:31', 10.0, 9.8), ('09:32', 10.2, 9.9), ('09:33', 10.3, 10.0)])
+        written = bc.call_args.args[0]
+        self.assertEqual([timezone.localtime(o.datetime).strftime('%H:%M') for o in written],
+                         ['09:32', '09:33'])
+        self.assertEqual(MinuteBar.objects.filter(stock=self.stock).count(), 3)
+        bar = MinuteBar.objects.get(stock=self.stock, datetime=_aware('2026-09-02 09:32:00'))
+        self.assertEqual(bar.high, Decimal('10.20'))
+
+    def test_unchanged_round_writes_nothing(self):
+        bars = [('09:31', 10.0, 9.8), ('09:32', 10.1, 9.9)]
+        self._fetch(bars)
+        with patch.object(MinuteBar.objects, 'bulk_create') as bc:
+            self._fetch(bars)
+        bc.assert_not_called()
+
+    def test_daily_upsert_keeps_high_low_times(self):
+        q = DailyQuote.objects.get(stock=self.stock, trade_date=date(2026, 9, 2))
+        q.high_time = _aware('2026-09-02 10:00:00')
+        q.save()
+        df = pd.DataFrame([
+            {'日期': '2026-09-01', '开盘': 9.5, '收盘': 9.9, '最高': 10, '最低': 9.4,
+             '成交量': 100, '成交额': 1000},
+            {'日期': '2026-09-02', '开盘': 9.9, '收盘': 10.0, '最高': 10.2, '最低': 9.8,
+             '成交量': 200, '成交额': 2000},
+        ])
+        with patch('stocks.services._try_sources', return_value=(services.SinaSource(), df)):
+            n = services.fetch_daily_data(self.stock, start_date='20260901', end_date='20260902')
+        self.assertEqual(n, 2)
+        q.refresh_from_db()
+        self.assertEqual(q.high_time, _aware('2026-09-02 10:00:00'))
+        self.assertEqual(q.close_price, Decimal('10.00'))
+        self.assertEqual(q.prev_close, Decimal('9.90'))
