@@ -9,8 +9,9 @@
 
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import datetime, timedelta
 
+from django.utils import timezone
 from rest_framework import status
 from rest_framework.decorators import api_view
 from rest_framework.response import Response
@@ -112,7 +113,8 @@ def detector_signals(request):
         qs = qs.filter(trade_date=trade_date)
     elif all_dates:
         # 历史视图固定 30 天窗：防全表倒出（SQLite 单机 + 1H2G 的习惯约束）
-        qs = qs.order_by('-trade_date')[:300]
+        # 只在这里加日期窗；300 行上限的切片放到所有 filter 之后（先切片再 filter 会 500，P0 ALG-03）
+        qs = qs.filter(trade_date__gte=timezone.localdate() - timedelta(days=30))
     elif latest_run is not None:
         qs = qs.filter(trade_date=latest_run.trade_date)
     else:
@@ -137,6 +139,8 @@ def detector_signals(request):
                 )
             qs = qs.filter(**{field: value})
 
+    if all_dates and trade_date is None:
+        qs = qs.order_by('-trade_date')[:300]
     rows = [_signal_row(s) for s in qs]
     if not all_dates and trade_date is None and latest_run is not None:
         rows.sort(key=lambda r: r['score'], reverse=True)

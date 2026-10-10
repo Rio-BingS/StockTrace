@@ -9,11 +9,20 @@ from types import SimpleNamespace
 from unittest.mock import patch
 
 from django.test import TestCase
+from django.urls import reverse
 from django.utils import timezone
 
 from . import alerts
 from .detector import calm, scan
-from .models import AlertEvent, DailyQuote, DetectorRun, MinuteBar, PriceAlert, Stock
+from .models import (
+    AlertEvent,
+    DailyQuote,
+    DetectorRun,
+    DetectorSignal,
+    MinuteBar,
+    PriceAlert,
+    Stock,
+)
 
 _TODAY = timezone.localdate()
 _YESTERDAY = _TODAY - timedelta(days=1)
@@ -222,3 +231,25 @@ class ScanTargetIsolationTests(TestCase):
         self.assertIn('stock:000001', reasons)
         self.assertIn('平静判定异常', reasons['stock:000001'])
         self.assertNotIn('stock:000002', reasons)
+
+
+class DetectorSignalsAllDatesTests(TestCase):
+    """ALG-03（额外修复）：all_dates=1 与筛选参数同用不再 500，且历史窗是近 30 天。"""
+
+    def _signal(self, code, day, severity):
+        return DetectorSignal.objects.create(
+            target_kind='industry', target_code=code, target_name=code,
+            trade_date=day, direction='up', cycles=1, score=40,
+            severity=severity, status=DetectorSignal.STATUS_WATCHING, dimensions={},
+        )
+
+    def test_all_dates_with_filter_and_30_day_window(self):
+        self._signal('半导体', _TODAY, DetectorSignal.SEVERITY_HIGH)
+        self._signal('银行', _TODAY - timedelta(days=5), DetectorSignal.SEVERITY_LOW)
+        self._signal('旧信号', _TODAY - timedelta(days=45), DetectorSignal.SEVERITY_HIGH)
+        resp = self.client.get(reverse('detector-signals'), {'all_dates': '1', 'severity': 'high'})
+        self.assertEqual(resp.status_code, 200)
+        codes = [row['target_code'] for row in resp.json()['items']]
+        self.assertEqual(codes, ['半导体'])
+        resp = self.client.get(reverse('detector-signals'), {'all_dates': '1'})
+        self.assertEqual(resp.json()['summary']['total'], 2)
