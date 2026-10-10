@@ -292,6 +292,63 @@ def market_ff_snapshot_rows(start_date=None, end_date=None):
         return []
 
 
+# 量级巡检阈值：两市合计主力净流入（元）日常在 1e9~1e11 量级；绝对值不足 1e6 元
+# 基本可判定是「亿元」口径（北向兜底源）误写进来的污染行（DAT-06）。
+MARKET_FF_SUSPECT_ABS_LT = 1e6
+_MARKET_FF_TRUSTED_SRCS = (MARKET_FF_SRC_FFLOW, 'eastmoney_market_fund_flow')
+
+
+def audit_market_ff_snapshots(start_date=None, end_date=None):
+    """巡检 market_ff 快照，返回疑似污染行列表（只读，不改库）。
+
+    每项 {'trade_date', 'id', 'reasons': [...], 'main_net', 'src', 'unit'}；
+    reasons 取值：
+    - empty_payload：payload 为空或无 date；
+    - main_net_missing：主力净流入为 None；
+    - magnitude：0 < |main_net| < MARKET_FF_SUSPECT_ABS_LT（疑似亿元口径）；
+    - untrusted_src / bad_unit：payload 自带的来源/单位标注与本表口径不符；
+    - parts_all_none：主力有值但小/中/大/超大单全为 None（DS-02 撞名症状，仅提示）。
+    """
+    qs = MarketDailySnapshot.objects.filter(kind=MarketDailySnapshot.KIND_MARKET_FF)
+    if start_date is not None:
+        qs = qs.filter(trade_date__gte=start_date)
+    if end_date is not None:
+        qs = qs.filter(trade_date__lte=end_date)
+    suspects = []
+    for snap in qs.order_by('trade_date'):
+        items = [i for i in (snap.payload or []) if isinstance(i, dict) and i.get('date')]
+        item = items[0] if items else {}
+        reasons = []
+        main = item.get('main_net')
+        if not items:
+            reasons.append('empty_payload')
+        elif main is None:
+            reasons.append('main_net_missing')
+        else:
+            try:
+                main = float(main)
+            except (TypeError, ValueError):
+                main = None
+                reasons.append('main_net_missing')
+            if main is not None and 0 < abs(main) < MARKET_FF_SUSPECT_ABS_LT:
+                reasons.append('magnitude')
+        src, unit = item.get('src'), item.get('unit')
+        if src is not None and src not in _MARKET_FF_TRUSTED_SRCS:
+            reasons.append('untrusted_src')
+        if unit is not None and unit != MARKET_FF_UNIT:
+            reasons.append('bad_unit')
+        if items and main is not None and all(
+            item.get(k) is None for k in MARKET_FF_FLOW_KEYS if k != 'main_net'
+        ):
+            reasons.append('parts_all_none')
+        if reasons:
+            suspects.append({
+                'trade_date': snap.trade_date, 'id': snap.pk, 'reasons': reasons,
+                'main_net': item.get('main_net'), 'src': src, 'unit': unit,
+            })
+    return suspects
+
+
 def _recent_trading_days(n, end_date=None):
     """截止 end_date（含）往前数 n 个已完成交易日；不足时返回 None（含日历不可用）。"""
     from ..services import is_trading_day

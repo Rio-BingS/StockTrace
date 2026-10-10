@@ -22,7 +22,7 @@ REPRESENTATIVE_ETFS = (
 
 
 class Command(BaseCommand):
-    help = '人工校验 ETF/板块上游字段、覆盖率与研究用 ETF 范围规则（只读）'
+    help = '人工校验 ETF/板块/大盘资金流上游字段、覆盖率与口径（只读）'
 
     def add_arguments(self, parser):
         parser.add_argument(
@@ -153,10 +153,50 @@ class Command(BaseCommand):
             ))
             self.stdout.write(f'字段：{list(frame.columns)}')
 
+    def _validate_market_flow(self):
+        """大盘主力资金流：akshare 主源列映射 + 与自采沪深合计的同日口径/量级对照（只读）。"""
+        from stocks.market import flows
+        from stocks.market.snapshots import fetch_market_ff_merged_rows
+
+        self._section('大盘主力资金流（口径/单位）')
+        try:
+            frame = ak.stock_market_fund_flow()
+        except Exception as exc:
+            self._report_frame_error('东财 stock_market_fund_flow', exc)
+            return
+        self.stdout.write(f'字段：{list(frame.columns)}')
+        parsed = flows._normalize_market_fund_hist(frame, 30, flows.MARKET_FUND_SOURCE_EM)
+        items = (parsed or {}).get('items', [])
+        if not items:
+            self.stdout.write(self.style.ERROR('规范化结果为空（列名可能变化）'))
+            return
+        for key in ('main_net', 'super_net', 'large_net', 'mid_net', 'small_net'):
+            non_null = sum(1 for i in items if i.get(key) is not None)
+            self.stdout.write(f'{key}: 非空 {non_null}/{len(items)}')
+        try:
+            merged, errors = fetch_market_ff_merged_rows()
+        except Exception as exc:
+            self._report_frame_error('自采沪深 fflow', exc)
+            return
+        if errors:
+            self.stdout.write(self.style.WARNING(f'自采沪深 fflow 部分失败：{errors}'))
+        common = [i for i in items if i['date'] in merged]
+        if not common:
+            self.stdout.write(self.style.WARNING('主源与自采沪深合计无同日数据，无法对照'))
+            return
+        last = common[-1]
+        ours = merged[last['date']]
+        ratio = (last['main_net'] / ours['main_net']) if ours.get('main_net') else None
+        self.stdout.write(
+            f"{last['date']} 主源 main_net={last['main_net']}，自采沪深合计={ours.get('main_net')}，"
+            f'比值={ratio}（应约等于 1；偏离很大说明口径/单位不一致，勿回填）'
+        )
+
     def handle(self, *args, **options):
         self.stdout.write('本命令只读取上游数据：不写数据库、不修改市场缓存、不注册定时任务。')
         self._validate_etf_spot()
         self._validate_sectors()
         self._validate_history(options.get('history_codes'))
+        self._validate_market_flow()
         self.stdout.write('')
         self.stdout.write(self.style.SUCCESS('校验流程结束；请同时检查上方的失败/缺失警告。'))
