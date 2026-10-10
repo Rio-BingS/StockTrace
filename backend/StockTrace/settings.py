@@ -14,6 +14,7 @@ from pathlib import Path
 import os
 import socket
 
+from cryptography.fernet import Fernet
 from django.core.exceptions import ImproperlyConfigured
 
 # Build paths inside the project like this: BASE_DIR / 'subdir'.
@@ -38,6 +39,32 @@ if not SECRET_KEY:
         raise ImproperlyConfigured(
             'DJANGO_SECRET_KEY 未设置：生产环境必须在环境变量中提供密钥'
         )
+# 生产拒绝公开示例占位符与过短的 key（SEC-04）：照抄 env.example 也能启动等于签名可伪造。
+# 生成：python -c "import secrets; print(secrets.token_urlsafe(64))"
+_PLACEHOLDER_SECRET_KEYS = {
+    'change-me-to-a-long-random-string',
+    'django-insecure-dev-only-key',
+}
+if not DEBUG and (SECRET_KEY in _PLACEHOLDER_SECRET_KEYS or len(SECRET_KEY) < 50):
+    raise ImproperlyConfigured(
+        'DJANGO_SECRET_KEY 过短（< 50 字符）或为示例占位符：请生成长随机字符串'
+    )
+
+# API Key 加密密钥（SEC-04）：与 SECRET_KEY 解耦，便于独立轮换。
+# 逗号分隔的 Fernet key 列表，第一个用于加密，其余仅用于解密（轮换期保留旧 key）；
+# 生成：python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"
+# 未配置时回退为由 SECRET_KEY 派生的旧密钥（兼容旧数据，启动时记 WARNING）；
+# 无论是否配置，旧派生密钥始终参与解密，旧密文不会因此失效。轮换步骤见 deploy/DEPLOY.md。
+STOCKTRACE_FERNET_KEYS = [
+    k.strip() for k in os.environ.get('STOCKTRACE_FERNET_KEY', '').split(',') if k.strip()
+]
+for _k in STOCKTRACE_FERNET_KEYS:
+    try:
+        Fernet(_k)
+    except (ValueError, TypeError) as _exc:
+        raise ImproperlyConfigured(
+            'STOCKTRACE_FERNET_KEY 含无效的 Fernet key（应为 32 字节 urlsafe base64）'
+        ) from _exc
 
 _allowed = os.environ.get('DJANGO_ALLOWED_HOSTS', '')
 ALLOWED_HOSTS = [h.strip() for h in _allowed.split(',') if h.strip()]

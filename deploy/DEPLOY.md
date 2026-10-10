@@ -423,3 +423,43 @@ curl -s http://127.0.0.1:8000/api/health/ | python3 -m json.tool
 ```
 
 也可以用 uptime-kuma 等工具探测 `http://127.0.0.1:8000/api/health/`（关键字 `"status": "ok"`）。
+
+---
+
+## 9. 密钥管理（SEC-04）
+
+- `DJANGO_SECRET_KEY`：生产（`DJANGO_DEBUG=False`）拒绝 env.example 占位符和短于 50 字符的值，
+  启动直接报 `ImproperlyConfigured`。生成：`python3 -c "import secrets; print(secrets.token_urlsafe(64))"`。
+- `STOCKTRACE_FERNET_KEY`：AI 服务商 API Key 的加密密钥，与 SECRET_KEY 解耦。逗号分隔多个，
+  **第一个用于加密，其余只用于解密**。未配置时回退为由 SECRET_KEY 派生的旧密钥（日志有 WARNING）。
+  旧派生密钥始终参与解密，所以配置新密钥不会让旧密文失效。
+
+### 9.1 首次切换到独立加密密钥
+
+```bash
+cd /opt/stocktrace/backend
+sudo -u www /opt/stocktrace/deploy/stocktrace-backup.sh          # 先备份
+python3 -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"
+sudo nano /etc/stocktrace/env      # STOCKTRACE_FERNET_KEY=<上面生成的值>；SECRET_KEY 先不要动
+set -a; source /etc/stocktrace/env; set +a
+venv/bin/python manage.py rotate_api_keys --dry-run   # 确认全部能解开
+sudo -u www -E venv/bin/python manage.py rotate_api_keys
+sudo systemctl restart stocktrace stocktrace-scheduler
+```
+
+完成后已存密文只依赖 `STOCKTRACE_FERNET_KEY`，此后可以独立轮换 `DJANGO_SECRET_KEY`
+（轮换 SECRET_KEY 只会让现有会话/签名失效）。**务必把 `STOCKTRACE_FERNET_KEY` 另存一份到密码管理器**：
+丢了它，数据库备份里的 API Key 就无法还原，只能在设置页重新录入。
+
+### 9.2 轮换加密密钥
+
+```bash
+# 1) 新 key 放在最前，旧 key 保留在后面：STOCKTRACE_FERNET_KEY=<新>,<旧>
+sudo nano /etc/stocktrace/env
+set -a; source /etc/stocktrace/env; set +a
+sudo -u www -E venv/bin/python manage.py rotate_api_keys
+sudo systemctl restart stocktrace stocktrace-scheduler
+# 2) 确认设置页 AI 服务商能正常测试后，从 env 删掉旧 key，再重启一次
+```
+
+命令只在内存中解密、不输出明文；任一条解不开会整体回滚并列出服务商 id，可在设置页重新录入后重跑。
