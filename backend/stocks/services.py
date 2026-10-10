@@ -36,11 +36,20 @@ logger = logging.getLogger(__name__)
 _stock_list_cache = {'df': None, 'expires': 0}
 _STOCK_LIST_TTL = 1800
 
-# 交易日缓存：date -> bool，避免盘中反复打日历接口
+# 交易日历缓存（DAT-07）：
+# - 整表（新浪）带 TTL，过期后刷新失败继续沿用旧表（日历极少变化），只在表覆盖
+#   范围内给出确定结论；范围外不再一律判为非交易日
+# - 单日结论（BaoStock 兜底）按 date 缓存且带 TTL：date -> (bool, expires_at)
+# - 上游失败做负缓存（冷却期内不再请求），避免日历故障时逐日重复打接口
+# - 全部不可用时返回 None（未知），不再把「仅排除周末」的猜测结果永久缓存
 _trade_day_cache = {}
 _trade_calendar_set = None
+_trade_calendar_range = None   # (min_date, max_date)
 _trade_calendar_expires = 0
 _TRADE_CAL_TTL = 6 * 3600
+_TRADE_DAY_TTL = 6 * 3600
+_CALENDAR_FAIL_TTL = 300
+_calendar_fail_until = {'sina': 0, 'baostock': 0}
 
 # ============================================================
 # 工具函数
@@ -450,62 +459,94 @@ def is_trading_time(dt=None):
     return False
 
 
-def is_trading_day(date=None):
-    """判断是否为交易日（排除周末和节假日），多源备用 + 缓存"""
-    global _trade_calendar_set, _trade_calendar_expires
+def _reset_trade_calendar_cache():
+    """清空交易日历全部缓存（测试 / 运维用）"""
+    global _trade_calendar_set, _trade_calendar_range, _trade_calendar_expires
+    _trade_day_cache.clear()
+    _trade_calendar_set = None
+    _trade_calendar_range = None
+    _trade_calendar_expires = 0
+    for k in _calendar_fail_until:
+        _calendar_fail_until[k] = 0
 
-    if date is None:
-        date = timezone.now().date()
 
-    if date in _trade_day_cache:
-        return _trade_day_cache[date]
-
-    if date.weekday() >= 5:
-        _trade_day_cache[date] = False
-        return False
-
-    now = time.time()
+def _refresh_trade_calendar(now):
+    """按需刷新新浪整表交易日历；失败进入冷却，保留旧表"""
+    global _trade_calendar_set, _trade_calendar_range, _trade_calendar_expires
     if _trade_calendar_set is not None and now < _trade_calendar_expires:
-        result = date in _trade_calendar_set
-        _trade_day_cache[date] = result
-        return result
-
-    date_str = date.strftime('%Y-%m-%d')
-
-    # 方式1: 新浪交易日历（AkShare）— 成功则缓存整表
+        return
+    if now < _calendar_fail_until['sina']:
+        return
     try:
         trade_dates = ak.tool_trade_date_hist_sina()
-        _trade_calendar_set = set(pd.to_datetime(trade_dates['trade_date']).dt.date)
+        days = set(pd.to_datetime(trade_dates['trade_date']).dt.date)
+        if not days:
+            raise ValueError('交易日历为空')
+        _trade_calendar_set = days
+        _trade_calendar_range = (min(days), max(days))
         _trade_calendar_expires = now + _TRADE_CAL_TTL
-        result = date in _trade_calendar_set
-        _trade_day_cache[date] = result
-        return result
     except Exception as e:
-        logger.debug(f"新浪交易日历获取失败: {e}")
+        _calendar_fail_until['sina'] = now + _CALENDAR_FAIL_TTL
+        logger.warning(
+            f"新浪交易日历获取失败（{_CALENDAR_FAIL_TTL}s 内不再重试）"
+            f"{'，沿用旧表' if _trade_calendar_set is not None else ''}: {e}"
+        )
 
-    # 方式2: BaoStock 交易日历
+
+def _baostock_is_trading_day(date, now):
+    """BaoStock 单日查询；返回 True/False，失败或无结果返回 None（失败进入冷却）"""
+    if now < _calendar_fail_until['baostock']:
+        return None
+    date_str = date.strftime('%Y-%m-%d')
     try:
         import baostock as bs
         bs.login()
         try:
-            rs = bs.query_trade_dates(
-                start_date=date_str, end_date=date_str
-            )
+            rs = bs.query_trade_dates(start_date=date_str, end_date=date_str)
             while rs.next():
                 row = rs.get_row_data()
-                result = row[1] == '1'
-                _trade_day_cache[date] = result
-                return result
+                return row[1] == '1'
         finally:
             bs.logout()
     except Exception as e:
-        logger.debug(f"BaoStock交易日历获取失败: {e}")
+        _calendar_fail_until['baostock'] = now + _CALENDAR_FAIL_TTL
+        logger.warning(f"BaoStock交易日历获取失败（{_CALENDAR_FAIL_TTL}s 内不再重试）: {e}")
+    return None
 
-    # 兜底: 仅排除周末
-    logger.warning("所有交易日历源不可用，仅排除周末")
-    result = date.weekday() < 5
-    _trade_day_cache[date] = result
-    return result
+
+def is_trading_day(date=None):
+    """判断是否为交易日（排除周末和节假日），三态：True / False / None（未知）
+
+    多源备用 + 带 TTL 的缓存。日历全部不可用、或日期超出日历覆盖范围且兜底源
+    也查不到时返回 None：写库类调用方（`if not is_trading_day()`）会保守跳过，
+    只读类调用方可用 `is False` 只排除明确的非交易日。
+    """
+    if date is None:
+        # 本地交易日（timezone.now() 是 UTC，凌晨会落到前一天）
+        date = timezone.localdate()
+
+    if date.weekday() >= 5:
+        return False
+
+    now = time.time()
+
+    # 方式1: 新浪交易日历（AkShare）整表，只在表覆盖范围内下结论
+    _refresh_trade_calendar(now)
+    if _trade_calendar_set is not None and _trade_calendar_range[0] <= date <= _trade_calendar_range[1]:
+        return date in _trade_calendar_set
+
+    # 方式2: BaoStock 单日查询（结论带 TTL 缓存）
+    cached = _trade_day_cache.get(date)
+    if cached is not None and now < cached[1]:
+        return cached[0]
+    result = _baostock_is_trading_day(date, now)
+    if result is not None:
+        _trade_day_cache[date] = (result, now + _TRADE_DAY_TTL)
+        return result
+
+    # 兜底: 未知（不缓存结论；上游失败已有冷却，不会逐日重复请求）
+    logger.debug(f"交易日历无法判定 {date}，返回未知")
+    return None
 
 
 def fetch_stock_info(code):
@@ -901,7 +942,8 @@ def fetch_stock_all_data(stock, days_back=5, light=False):
         if fetched >= max_trading_days:
             break
         date = today - timedelta(days=i)
-        if not is_trading_day(date):
+        # 日历未知（None）时照常尝试：分钟线已按日期过滤，非交易日只会拿到空结果
+        if is_trading_day(date) is False:
             continue
         date_str = date.strftime('%Y-%m-%d')
         fetch_minute_data(stock, trade_date=date_str)
@@ -932,8 +974,9 @@ def fetch_intraday_update():
         logger.debug("非交易时段，跳过盘中更新")
         return
 
+    # 三态：日历未知（None）时写库任务保守跳过
     if not is_trading_day():
-        logger.debug("非交易日，跳过盘中更新")
+        logger.debug("非交易日或交易日历未知，跳过盘中更新")
         return
 
     stocks = Stock.objects.filter(is_active=True)
@@ -948,7 +991,7 @@ def fetch_intraday_update():
 def fetch_daily_summary():
     """收盘后汇总：拉取当日完整数据并计算"""
     if not is_trading_day():
-        logger.debug("非交易日，跳过收盘汇总")
+        logger.debug("非交易日或交易日历未知，跳过收盘汇总")
         return
 
     stocks = Stock.objects.filter(is_active=True)

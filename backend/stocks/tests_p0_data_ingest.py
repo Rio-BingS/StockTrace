@@ -1,5 +1,6 @@
 """P0 数据入库修复回归测试（DAT-01 / PERF-01 / DAT-03 / DAT-02 / DAT-07）"""
 
+import time
 from datetime import date, datetime, timedelta
 from decimal import Decimal
 from io import StringIO
@@ -7,7 +8,7 @@ from unittest.mock import patch
 
 import pandas as pd
 from django.core.management import call_command
-from django.test import TestCase
+from django.test import SimpleTestCase, TestCase
 from django.utils import timezone
 
 from . import services
@@ -392,3 +393,58 @@ class AdjustBasisChangeTests(_NoSleep, TestCase):
         sources = ts.call_args.kwargs['sources']
         self.assertEqual([s.name for s in sources], ['sina'])
         self.assertLessEqual(datetime.strptime(calls[0], '%Y%m%d').date(), self.days[0])
+
+
+class TradeCalendarTests(SimpleTestCase):
+    """DAT-07：日历三态 + 带 TTL 缓存 + 失败负缓存。"""
+
+    def setUp(self):
+        services._reset_trade_calendar_cache()
+        self.addCleanup(services._reset_trade_calendar_cache)
+        self.cal = pd.DataFrame({'trade_date': ['2026-09-30', '2026-10-09', '2026-12-31']})
+
+    def test_calendar_hit_and_holiday(self):
+        with patch('akshare.tool_trade_date_hist_sina', return_value=self.cal) as cal:
+            self.assertTrue(services.is_trading_day(date(2026, 10, 9)))
+            self.assertFalse(services.is_trading_day(date(2026, 10, 1)))  # 国庆
+            self.assertFalse(services.is_trading_day(date(2026, 10, 10)))  # 周六
+        cal.assert_called_once()  # 整表缓存
+
+    def test_out_of_range_is_unknown_not_false(self):
+        with patch('akshare.tool_trade_date_hist_sina', return_value=self.cal), \
+                patch('stocks.services._baostock_is_trading_day', return_value=None):
+            self.assertIsNone(services.is_trading_day(date(2027, 1, 4)))
+
+    def test_out_of_range_uses_baostock_with_ttl(self):
+        with patch('akshare.tool_trade_date_hist_sina', return_value=self.cal), \
+                patch('stocks.services._baostock_is_trading_day', return_value=True) as bs:
+            self.assertTrue(services.is_trading_day(date(2027, 1, 4)))
+            self.assertTrue(services.is_trading_day(date(2027, 1, 4)))
+        bs.assert_called_once()
+        # TTL 过期后重新查询
+        with patch('stocks.services.time.time', return_value=time.time() + services._TRADE_DAY_TTL + 10), \
+                patch('akshare.tool_trade_date_hist_sina', return_value=self.cal), \
+                patch('stocks.services._baostock_is_trading_day', return_value=False) as bs2:
+            self.assertFalse(services.is_trading_day(date(2027, 1, 4)))
+        bs2.assert_called_once()
+
+    def test_all_down_returns_none_and_negative_caches(self):
+        with patch('akshare.tool_trade_date_hist_sina', side_effect=RuntimeError('down')) as cal, \
+                patch('baostock.login', side_effect=RuntimeError('down')) as bs:
+            for d in range(5, 10):  # 逐日查询
+                self.assertIsNone(services.is_trading_day(date(2026, 10, d)))
+        self.assertEqual(cal.call_count, 1)
+        self.assertEqual(bs.call_count, 1)
+        # 冷却期过后恢复：不再沿用「未知」，也没有永久缓存旧的猜测
+        with patch('stocks.services.time.time', return_value=time.time() + services._CALENDAR_FAIL_TTL + 1), \
+                patch('akshare.tool_trade_date_hist_sina', return_value=self.cal):
+            self.assertFalse(services.is_trading_day(date(2026, 10, 8)))
+            self.assertTrue(services.is_trading_day(date(2026, 10, 9)))
+
+    def test_refresh_failure_keeps_stale_table(self):
+        with patch('akshare.tool_trade_date_hist_sina', return_value=self.cal):
+            self.assertTrue(services.is_trading_day(date(2026, 10, 9)))
+        with patch('stocks.services.time.time', return_value=time.time() + services._TRADE_CAL_TTL + 10), \
+                patch('akshare.tool_trade_date_hist_sina', side_effect=RuntimeError('down')):
+            self.assertTrue(services.is_trading_day(date(2026, 10, 9)))
+            self.assertFalse(services.is_trading_day(date(2026, 10, 1)))
