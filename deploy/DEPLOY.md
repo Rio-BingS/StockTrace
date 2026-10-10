@@ -59,7 +59,7 @@ sudo chown -R www:www /opt/stocktrace
 cd /opt/stocktrace
 python3.12 -m venv backend/venv
 source backend/venv/bin/activate
-pip install -r backend/requirements.txt
+pip install -r backend/requirements.lock   # 锁文件，全量精确版本（OPS-02）
 
 # 环境变量
 sudo cp deploy/env.example /etc/stocktrace/env
@@ -118,8 +118,9 @@ sudo systemctl stop stocktrace
 
 cd /opt/stocktrace
 source backend/venv/bin/activate
-pip install -r backend/requirements.txt
-# ⚠️ akshare 版本已在 requirements.txt 钉死（==1.18.64）：其接口频繁变动，
+pip install -r backend/requirements.lock   # 锁文件，全量精确版本（OPS-02）
+# ⚠️ 一律装 requirements.lock，不要装 requirements.txt、不要 pip install -U（见第 7 节）。
+# ⚠️ akshare 版本已钉死（==1.18.64）：其接口频繁变动，
 #    同花顺板块资金流解析由 stocks/market/sectors.py 自实现——勿随手
 #    pip install -U akshare（2026-09 曾因静默升级破坏解析导致快照断供）。
 cd backend
@@ -306,3 +307,47 @@ rm -rf "$D"
 
 期望：`integrity_check` 为 `ok`，最新快照日期是最近一个交易日（或前一交易日），行数与线上同量级。
 演练结果记到运维记录里；连续两次失败要排查脚本/磁盘。
+
+---
+
+## 7. 依赖锁定与升级（OPS-02）
+
+- `backend/requirements.txt`：顶层依赖的**允许范围**（关键包有上界：`django>=6.0,<6.2`、
+  `apscheduler>=3.10,<4`、`pandas>=2.2,<4`、`akshare==1.18.64` 等）。只在升级时用来重新解析。
+- `backend/requirements.lock`：全量精确版本（含传递依赖），**生产只装它**：
+  `pip install -r backend/requirements.lock`。
+- `backend/requirements-dev.txt`：`-r requirements.txt` + 开发工具（ruff）。
+
+为什么必须锁：APScheduler 4.x 删掉了 `apscheduler.schedulers.background`，一旦漂移过去，调度器
+ImportError 不启动；akshare 曾因静默升级导致快照断供；pandas 大版本会改默认 dtype/拷贝语义。
+
+**首次切换到锁文件前**先记录线上实际版本，与锁文件比对（尤其 Django / pandas / numpy）：
+
+```bash
+/opt/stocktrace/backend/venv/bin/pip freeze > /tmp/vps-freeze.txt
+diff <(sort -f /tmp/vps-freeze.txt) <(grep -v '^#' /opt/stocktrace/backend/requirements.lock | sort -f)
+```
+
+有差异时：要么在测试环境装线上版本跑通测试后把锁文件改成线上版本，要么按下面流程升级线上。
+
+**升级流程**（在开发机/测试机，不在生产机上做）：
+
+```bash
+cd backend
+# 1) 改 requirements.txt 中的范围（例如放开某个上界），然后在全新 venv 里解析
+python3.12 -m venv /tmp/lockenv
+/tmp/lockenv/bin/pip install -U pip
+/tmp/lockenv/bin/pip install -r requirements.txt
+# 2) 跑全量测试（断网）+ validate_market_sources（联网只读校验上游字段/单位）
+/tmp/lockenv/bin/pip install -r requirements-dev.txt
+/tmp/lockenv/bin/python manage.py test stocks
+/tmp/lockenv/bin/python manage.py validate_market_sources
+# 3) 通过后重新生成锁文件（全新 venv 里只有运行时依赖，freeze 即全集）
+{ head -3 requirements.lock; /tmp/lockenv/bin/pip freeze --exclude-editable | grep -viE '^(ruff|pip|setuptools|wheel)=='; } > requirements.lock.new
+mv requirements.lock.new requirements.lock
+git add requirements.txt requirements.lock && git commit -m "chore(deps): ..."
+```
+
+注：第 3 步 freeze 是在装过 requirements-dev 的 venv 里做的，所以要过滤掉开发工具；如果 dev
+依赖变多，改为在第 1 步之后（装 dev 之前）先 freeze。akshare 升级必须单独一个提交，并在 VPS 上
+用 `validate_market_sources` 实测全集可用后再合入。

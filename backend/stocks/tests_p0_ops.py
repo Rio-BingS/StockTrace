@@ -1,6 +1,7 @@
 """P0 运维与调度修复的回归测试（OPS-01 / OPS-02 / REL-01 / REL-02）。"""
 
 import gzip
+import importlib.util
 import os
 import shutil
 import sqlite3
@@ -66,3 +67,42 @@ class BackupScriptTests(SimpleTestCase):
     def test_bad_keep_rejected(self):
         r = self._run(BACKUP_KEEP='0')
         self.assertNotEqual(r.returncode, 0)
+
+
+@unittest.skipUnless(importlib.util.find_spec('packaging'), '需要 packaging（开发依赖）')
+class DependencyPinTests(SimpleTestCase):
+    """OPS-02：关键依赖有上界、锁文件全量精确钉版本且与顶层范围一致。"""
+
+    def _reqs(self, name):
+        from packaging.requirements import Requirement
+
+        out = {}
+        for line in (REPO_ROOT / 'backend' / name).read_text(encoding='utf-8').splitlines():
+            line = line.split('#')[0].strip()
+            if line and not line.startswith('-'):
+                r = Requirement(line)
+                out[r.name.lower()] = r
+        return out
+
+    def test_top_level_upper_bounds(self):
+        reqs = self._reqs('requirements.txt')
+        for name in ('django', 'apscheduler', 'pandas', 'djangorestframework', 'gunicorn'):
+            ops = {s.operator for s in reqs[name].specifier}
+            self.assertTrue(ops & {'<', '=='}, f'{name} 缺上界: {reqs[name]}')
+        self.assertFalse(reqs['apscheduler'].specifier.contains('4.0.0'))
+
+    def test_lock_is_exact_and_satisfies_ranges(self):
+        lock = self._reqs('requirements.lock')
+        for name, r in lock.items():
+            specs = list(r.specifier)
+            self.assertEqual(len(specs), 1, name)
+            self.assertEqual(specs[0].operator, '==', name)
+        for name, r in self._reqs('requirements.txt').items():
+            self.assertIn(name, lock, f'{name} 未进锁文件')
+            pinned = next(iter(lock[name].specifier)).version
+            self.assertTrue(r.specifier.contains(pinned, prereleases=True), f'{name}=={pinned} 不满足 {r}')
+
+    def test_installed_apscheduler_is_3x(self):
+        import apscheduler
+
+        self.assertEqual(apscheduler.__version__.split('.')[0], '3')
