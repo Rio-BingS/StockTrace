@@ -55,12 +55,12 @@ class Command(BaseCommand):
             if since:
                 bars = bars.filter(datetime__gte=timezone.make_aware(
                     datetime.combine(since, datetime.min.time())))
-            # 按本地交易日分组
+            # 按本地交易日分组；同一天若混有 1 分钟与 5 分钟 bar，只用最细周期
             by_day = {}
-            for dt, high, low in bars.order_by('datetime').values_list(
-                    'datetime', 'high', 'low').iterator():
+            for dt, high, low, freq in bars.order_by('datetime').values_list(
+                    'datetime', 'high', 'low', 'freq').iterator():
                 day = timezone.localtime(dt).date()
-                by_day.setdefault(day, []).append((dt, high, low))
+                by_day.setdefault(day, []).append((dt, high, low, freq))
 
             stock_changed = 0
             for qid, trade_date, old_high, old_low in quotes:
@@ -69,7 +69,10 @@ class Command(BaseCommand):
                 if not day_bars:
                     no_bars += 1
                     continue
-                hl = compute_high_low_times(day_bars)
+                min_freq = min(b[3] for b in day_bars)
+                hl = compute_high_low_times(
+                    (dt, high, low) for dt, high, low, freq in day_bars if freq == min_freq
+                )
                 if hl is None:
                     no_bars += 1
                     continue

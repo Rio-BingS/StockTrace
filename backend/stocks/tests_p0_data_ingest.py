@@ -204,3 +204,107 @@ class MinuteBulkUpsertTests(_NoSleep, TestCase):
         self.assertEqual(q.high_time, _aware('2026-09-02 10:00:00'))
         self.assertEqual(q.close_price, Decimal('10.00'))
         self.assertEqual(q.prev_close, Decimal('9.90'))
+
+
+class VolumeUnitTests(_NoSleep, TestCase):
+    """DAT-03：成交量统一为股、成交额统一为元，并记录来源与周期。"""
+
+    def setUp(self):
+        super().setUp()
+        self.stock = Stock.objects.create(code='000001', name='平安银行')
+
+    def _daily(self, source):
+        with patch('stocks.services.DATA_SOURCES', [source]):
+            services.fetch_daily_data(self.stock, start_date='20260901', end_date='20260901')
+        return DailyQuote.objects.get(stock=self.stock, trade_date=date(2026, 9, 1))
+
+    def test_eastmoney_daily_lots_to_shares(self):
+        df = pd.DataFrame([{'日期': '2026-09-01', '开盘': 10, '收盘': 10.5, '最高': 10.6,
+                            '最低': 9.9, '成交量': 1234, '成交额': 1300000.0}])
+        with patch('akshare.stock_zh_a_hist', return_value=df):
+            q = self._daily(services.EastMoneySource())
+        self.assertEqual(q.volume, 123400)
+        self.assertEqual(q.turnover, Decimal('1300000.00'))
+        self.assertEqual(q.source, 'eastmoney')
+
+    def test_tencent_amount_is_volume_lots_not_turnover(self):
+        # akshare stock_zh_a_hist_tx 的列：date,open,close,high,low,amount(=成交量，手)
+        df = pd.DataFrame([{'date': date(2026, 9, 1), 'open': 10, 'close': 10.5,
+                            'high': 10.6, 'low': 9.9, 'amount': 5678}])
+        with patch('akshare.stock_zh_a_hist_tx', return_value=df):
+            q = self._daily(services.TencentSource())
+        self.assertEqual(q.volume, 567800)
+        self.assertIsNone(q.turnover)
+        self.assertEqual(q.source, 'tencent')
+
+    def test_sina_daily_shares_unchanged(self):
+        df = pd.DataFrame([{'date': '2026-09-01', 'open': 10, 'high': 10.6, 'low': 9.9,
+                            'close': 10.5, 'volume': 123400, 'amount': 1300000.0}])
+        with patch('akshare.stock_zh_a_daily', return_value=df):
+            q = self._daily(services.SinaSource())
+        self.assertEqual(q.volume, 123400)
+        self.assertEqual(q.turnover, Decimal('1300000.00'))
+        self.assertEqual(q.source, 'sina')
+
+    def test_em_minute_lots_to_shares_and_sina_amount_kept(self):
+        _make_quote(self.stock, date(2026, 9, 2))
+        em_df = pd.DataFrame([{'时间': '2026-09-02 09:31:00', '开盘': 10, '收盘': 10,
+                               '最高': 10.1, '最低': 9.9, '成交量': 12, '成交额': 12000.0}])
+        with patch('stocks.services.DATA_SOURCES', [services.EastMoneySource()]), \
+                patch('akshare.stock_zh_a_hist_min_em', return_value=em_df):
+            services.fetch_minute_data(self.stock, trade_date='2026-09-02')
+        bar = MinuteBar.objects.get(stock=self.stock)
+        self.assertEqual((bar.volume, bar.turnover, bar.source, bar.freq),
+                         (1200, Decimal('12000.00'), 'eastmoney', 1))
+
+        sina_df = _sina_minute_df({'2026-09-02': [('09:31', 10.1, 9.9)]})
+        with patch('stocks.services.DATA_SOURCES', [services.SinaSource()]), \
+                patch('akshare.stock_zh_a_minute', return_value=sina_df):
+            services.fetch_minute_data(self.stock, trade_date='2026-09-02')
+        bar.refresh_from_db()
+        self.assertEqual((bar.volume, bar.turnover, bar.source), (1000, Decimal('10000.00'), 'sina'))
+
+
+class MinuteFreqTests(_NoSleep, TestCase):
+    """DAT-03：同一交易日只保留一种 bar 周期，1 分钟优先。"""
+
+    def setUp(self):
+        super().setUp()
+        self.stock = Stock.objects.create(code='000001', name='平安银行')
+        _make_quote(self.stock, date(2026, 9, 2))
+
+    class _Bs5(services.DataSource):
+        name = 'baostock'
+        minute_freq = 5
+
+        def fetch_minute(self, symbol, start_dt, end_dt):
+            return pd.DataFrame([
+                {'时间': pd.Timestamp('2026-09-02 09:35:00'), '开盘': 10, '收盘': 10,
+                 '最高': 10.3, '最低': 9.7, '成交量': 500, '成交额': 5000.0},
+                {'时间': pd.Timestamp('2026-09-02 09:40:00'), '开盘': 10, '收盘': 10,
+                 '最高': 10.1, '最低': 9.9, '成交量': 500, '成交额': 5000.0},
+            ])
+
+    def _fetch(self, source, patcher=None):
+        with patch('stocks.services.DATA_SOURCES', [source]):
+            if patcher:
+                with patcher:
+                    return services.fetch_minute_data(self.stock, trade_date='2026-09-02')
+            return services.fetch_minute_data(self.stock, trade_date='2026-09-02')
+
+    def test_one_minute_replaces_five_minute_bars(self):
+        self._fetch(self._Bs5())
+        self.assertEqual(set(MinuteBar.objects.values_list('freq', flat=True)), {5})
+        sina_df = _sina_minute_df({'2026-09-02': [('09:31', 10.0, 9.95), ('09:32', 10.05, 9.9)]})
+        self._fetch(services.SinaSource(), patch('akshare.stock_zh_a_minute', return_value=sina_df))
+        self.assertEqual(set(MinuteBar.objects.values_list('freq', flat=True)), {1})
+        self.assertEqual(MinuteBar.objects.count(), 2)
+
+    def test_five_minute_not_written_over_one_minute_day(self):
+        sina_df = _sina_minute_df({'2026-09-02': [('09:31', 10.0, 9.95), ('09:32', 10.05, 9.9)]})
+        self._fetch(services.SinaSource(), patch('akshare.stock_zh_a_minute', return_value=sina_df))
+        q = DailyQuote.objects.get(stock=self.stock, trade_date=date(2026, 9, 2))
+        self.assertIsNone(self._fetch(self._Bs5()))
+        self.assertEqual(set(MinuteBar.objects.values_list('freq', flat=True)), {1})
+        q2 = DailyQuote.objects.get(pk=q.pk)
+        self.assertEqual(q2.high_time, q.high_time)

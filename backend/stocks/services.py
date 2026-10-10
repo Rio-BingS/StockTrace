@@ -12,6 +12,10 @@
 2. 获取分钟K线数据 → 推算最高/最低点的精确时间
 3. 计算差值和百分比
 4. 存入数据库
+
+入库单位约定（DAT-03）：成交量统一为「股」，成交额统一为「元」，由各数据源适配器
+在返回前换算（东财 手→股 ×100；新浪/BaoStock 原生为股；腾讯日线只有成交量(手)、
+无成交额）。DailyQuote/MinuteBar.source 记录实际来源，MinuteBar.freq 记录 bar 周期。
 """
 
 import logging
@@ -47,6 +51,26 @@ def _to_shsz_prefix(code):
     code = code.zfill(6)
     prefix = 'sh' if code.startswith(('6', '9')) else 'sz'
     return f'{prefix}{code}'
+
+
+def _to_numeric_cols(df, cols=('开盘', '收盘', '最高', '最低', '成交量', '成交额')):
+    """把行情数值列转为数值（部分接口返回字符串）"""
+    if df is None or not isinstance(df, pd.DataFrame) or df.empty:
+        return df
+    for col in cols:
+        if col in df.columns:
+            df[col] = pd.to_numeric(df[col], errors='coerce')
+    return df
+
+
+def _volume_lots_to_shares(df):
+    """成交量「手」→「股」（×100）"""
+    if df is None or not isinstance(df, pd.DataFrame) or df.empty:
+        return df
+    df = _to_numeric_cols(df.copy())
+    if '成交量' in df.columns:
+        df['成交量'] = df['成交量'] * 100
+    return df
 
 
 def _filter_minute_range(df, start_dt, end_dt):
@@ -92,8 +116,14 @@ def compute_high_low_times(bars):
 # ============================================================
 
 class DataSource:
-    """数据源基类"""
+    """数据源基类
+
+    约定：fetch_daily/fetch_minute 返回前须把成交量换算为「股」、成交额换算为「元」
+    （拿不到的列置 None），入库层不再做单位假设。
+    """
     name = 'base'
+    # 分钟 bar 周期（分钟）；BaoStock 只有 5 分钟线
+    minute_freq = 1
 
     def fetch_daily(self, symbol, start_date, end_date):
         """获取日K线，返回 DataFrame[日期,开盘,收盘,最高,最低,成交量,成交额]"""
@@ -117,21 +147,16 @@ class EastMoneySource(DataSource):
             symbol=symbol, period="daily",
             start_date=start_date, end_date=end_date, adjust="qfq"
         )
-        # 标准化列名
-        return df.rename(columns={
-            '日期': '日期', '开盘': '开盘', '收盘': '收盘',
-            '最高': '最高', '最低': '最低', '成交量': '成交量', '成交额': '成交额',
-        })
+        # 东财成交量单位为「手」，统一换算为「股」；成交额为元
+        return _volume_lots_to_shares(df)
 
     def fetch_minute(self, symbol, start_dt, end_dt):
         df = ak.stock_zh_a_hist_min_em(
             symbol=symbol, period="1",
             start_date=start_dt, end_date=end_dt, adjust="qfq"
         )
-        return df.rename(columns={
-            '时间': '时间', '开盘': '开盘', '收盘': '收盘',
-            '最高': '最高', '最低': '最低', '成交量': '成交量', '成交额': '成交额',
-        })
+        # 东财分钟线成交量同为「手」
+        return _volume_lots_to_shares(df)
 
     def fetch_stock_name(self, code):
         df = ak.stock_zh_a_spot_em()
@@ -196,9 +221,12 @@ class SinaSource(DataSource):
                 col_map[col] = '最低'
             elif 'volume' in col_lower or '成交量' in col:
                 col_map[col] = '成交量'
+            elif 'amount' in col_lower or '成交额' in col:
+                col_map[col] = '成交额'
         if col_map:
             df = df.rename(columns=col_map)
-        return df
+        # 新浪分钟线成交量为「股」、成交额为「元」，原样保留；值为字符串，转数值
+        return _to_numeric_cols(df)
 
     def fetch_stock_name(self, code):
         try:
@@ -226,25 +254,16 @@ class TencentSource(DataSource):
             symbol=bs_code, period="daily",
             start_date=start_date, end_date=end_date, adjust="qfq"
         )
-        col_map = {}
-        for col in df.columns:
-            col_lower = str(col).lower()
-            if 'date' in col_lower or '日期' in col:
-                col_map[col] = '日期'
-            elif 'open' in col_lower or '开盘' in col:
-                col_map[col] = '开盘'
-            elif 'close' in col_lower or '收盘' in col:
-                col_map[col] = '收盘'
-            elif 'high' in col_lower or '最高' in col:
-                col_map[col] = '最高'
-            elif 'low' in col_lower or '最低' in col:
-                col_map[col] = '最低'
-            elif 'volume' in col_lower or '成交量' in col:
-                col_map[col] = '成交量'
-            elif 'amount' in col_lower or '成交额' in col:
-                col_map[col] = '成交额'
-        if col_map:
-            df = df.rename(columns=col_map)
+        if df is None or df.empty:
+            return df
+        # akshare 1.18.64 的列为 date,open,close,high,low,amount，其中 amount 实际是
+        # 成交量（手），并不是成交额：映射为成交量并换算为股，成交额如实置 None
+        df = df.rename(columns={
+            'date': '日期', 'open': '开盘', 'close': '收盘',
+            'high': '最高', 'low': '最低', 'amount': '成交量',
+        })
+        df = _volume_lots_to_shares(df)
+        df['成交额'] = None
         return df
 
     def fetch_minute(self, symbol, start_dt, end_dt):
@@ -256,8 +275,12 @@ class TencentSource(DataSource):
 
 
 class BaoStockSource(DataSource):
-    """BaoStock 数据源 - 独立服务器，不受东方财富网络限制"""
+    """BaoStock 数据源 - 独立服务器，不受东方财富网络限制
+
+    成交量为「股」、成交额为「元」，无需换算；分钟线只有 5 分钟周期。
+    """
     name = 'baostock'
+    minute_freq = 5
 
     @staticmethod
     def _format_code(code):
@@ -517,7 +540,7 @@ def _daily_start_date(stock, bootstrap_days=365, overlap_days=5):
 _DAILY_UPDATE_FIELDS = [
     'open_price', 'close_price', 'high_price', 'low_price',
     'open_close_diff', 'open_close_pct', 'high_low_diff', 'high_low_pct',
-    'prev_close', 'change_diff', 'change_pct', 'volume', 'turnover',
+    'prev_close', 'change_diff', 'change_pct', 'volume', 'turnover', 'source',
 ]
 
 
@@ -603,6 +626,7 @@ def fetch_daily_data(stock, start_date=None, end_date=None):
                 change_pct=change_pct,
                 volume=volume,
                 turnover=turnover,
+                source=source.name,
             )
             # 当前条目的收盘价作为下一条的昨收
             prev_close_val = close_price
@@ -625,7 +649,8 @@ def fetch_daily_data(stock, start_date=None, end_date=None):
 
 
 _PRICE_Q = Decimal('0.01')
-_MINUTE_UPDATE_FIELDS = ['open', 'close', 'high', 'low', 'volume', 'turnover']
+_MINUTE_VALUE_FIELDS = ['open', 'close', 'high', 'low', 'volume', 'turnover']
+_MINUTE_UPDATE_FIELDS = _MINUTE_VALUE_FIELDS + ['source', 'freq']
 
 
 def _dec2(v):
@@ -633,12 +658,14 @@ def _dec2(v):
     return Decimal(str(v)).quantize(_PRICE_Q)
 
 
-def _save_minute_bars(stock, df, date_obj):
+def _save_minute_bars(stock, df, date_obj, source_name='', freq=1):
     """把某交易日的分钟 bar 批量 upsert 进 MinuteBar，返回实际写入行数。
 
     - 一个 transaction.atomic 内完成，避免逐行独立提交长期占用 SQLite 写锁；
     - 先读出当日已有 bar，只写新增或数值有变化的 bar（盘中每轮通常只有几根）；
-    - bulk_create(update_conflicts=True) 依赖 (stock, datetime) 唯一约束。
+    - bulk_create(update_conflicts=True) 依赖 (stock, datetime) 唯一约束；
+    - 同一交易日只保留一种周期（DAT-03）：写 1 分钟 bar 时清掉当日的 5 分钟 bar；
+      当日已有 1 分钟 bar 时不再写入更粗的 5 分钟 bar，避免两种周期混在一张表里。
     """
     day_start, day_end = _day_bounds(date_obj)
     rows = {}
@@ -668,15 +695,21 @@ def _save_minute_bars(stock, df, date_obj):
         return 0
 
     with transaction.atomic():
+        day_qs = MinuteBar.objects.filter(stock=stock, datetime__gte=day_start, datetime__lt=day_end)
+        if freq > 1 and day_qs.filter(freq__lt=freq).exists():
+            logger.info(f"{stock.code} {date_obj} 已有更细周期分钟 bar，不写入 {freq} 分钟 bar")
+            return 0
+        if day_qs.filter(freq__gt=freq).exists():
+            removed, _ = day_qs.filter(freq__gt=freq).delete()
+            logger.info(f"{stock.code} {date_obj} 用 {freq} 分钟 bar 替换 {removed} 根更粗周期 bar")
         existing = {
-            r[0]: tuple(r[1:]) for r in MinuteBar.objects.filter(
-                stock=stock, datetime__gte=day_start, datetime__lt=day_end,
-            ).values_list('datetime', *_MINUTE_UPDATE_FIELDS)
+            r[0]: tuple(r[1:]) for r in day_qs.values_list(
+                'datetime', *_MINUTE_VALUE_FIELDS, 'source')
         }
         objs = [
             MinuteBar(stock=stock, datetime=dt, open=v[0], close=v[1], high=v[2],
-                      low=v[3], volume=v[4], turnover=v[5])
-            for dt, v in sorted(rows.items()) if existing.get(dt) != v
+                      low=v[3], volume=v[4], turnover=v[5], source=source_name, freq=freq)
+            for dt, v in sorted(rows.items()) if existing.get(dt) != v + (source_name,)
         ]
         if objs:
             MinuteBar.objects.bulk_create(
@@ -721,7 +754,13 @@ def fetch_minute_data(stock, trade_date=None):
         return None
 
     # 保存分钟数据：每股一个事务 + 批量 upsert，只写新增/变化的 bar（PERF-01）
-    _save_minute_bars(stock, df, date_obj)
+    freq = getattr(source, 'minute_freq', 1)
+    written = _save_minute_bars(stock, df, date_obj, source.name, freq)
+    if freq > 1 and not written and MinuteBar.objects.filter(
+            stock=stock, datetime__date=date_obj, freq__lt=freq).exists():
+        # 粗周期兜底不覆盖已由 1 分钟 bar 算出的更精确高低点时间
+        logger.info(f"[{source.name}] {stock.code} {trade_date} 保留已有 1 分钟 bar 的高低点时间")
+        return None
 
     # 推算最高/最低点精确时间（只用当日 bar，并列取最早一根）
     try:
