@@ -1,0 +1,12 @@
+[Unit]
+Description=Daily StockTrace SQLite backup (22:00 Asia/Shanghai, after all post-close jobs)
+
+[Timer]
+# 22:00：收盘后 15:30–21:00 预热/快照与 17:15 探测器都已结束
+OnCalendar=*-*-* 22:00:00 Asia/Shanghai
+# 关机错过时开机后补跑一次
+Persistent=true
+RandomizedDelaySec=120
+
+[Install]
+WantedBy=timers.target

@@ -1,0 +1,15 @@
+[Unit]
+Description=StockTrace SQLite online backup (sqlite3 .backup + rotate)
+After=network-online.target
+
+[Service]
+Type=oneshot
+User=www
+Group=www
+# 可选：STOCKTRACE_DB / BACKUP_DIR / BACKUP_KEEP / BACKUP_RSYNC_TARGET / BACKUP_POST_HOOK
+EnvironmentFile=-/etc/stocktrace/backup.env
+ExecStart=/opt/stocktrace/deploy/stocktrace-backup.sh
+# 备份是 IO 密集的低优先级任务，别和 Web/调度抢资源
+Nice=10
+IOSchedulingClass=best-effort
+IOSchedulingPriority=7

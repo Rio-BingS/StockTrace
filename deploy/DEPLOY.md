@@ -103,9 +103,9 @@ sudo nginx -t && sudo systemctl reload nginx
 ## 2. 从旧版升级到 v1.02
 
 ```bash
-# 备份
+# 备份（升级前务必先做一次在线一致性备份，见第 6 节；不要直接 cp，WAL 模式下会丢数据）
+sudo -u www /opt/stocktrace/deploy/stocktrace-backup.sh
 sudo systemctl stop stocktrace
-cp /opt/stocktrace/backend/db.sqlite3 /opt/stocktrace/backend/db.sqlite3.bak.$(date +%Y%m%d)
 
 # 同步代码（按你习惯：scp / git / tar）
 # 保证 gunicorn_config.py、stocks/tasks.py、scheduler.py 等到位
@@ -224,3 +224,85 @@ sudo tail -f /var/log/nginx/access.log            # 日志里的 IP 应是真实
 
 注意：Origin 证书只被 Cloudflare 信任，浏览器直连源站 IP 会报证书错误——
 这正是预期（源站不该被绕过 CF 直接访问）。
+
+---
+
+## 6. 数据库备份与恢复演练（OPS-01）
+
+`db.sqlite3` 里的市场日度快照、ETF 份额快照、探测器调参流水**只能向前积累、无法重新拉取**，
+丢了就永久缺口。库开着 WAL，**禁止用 `cp` 备份**（会丢 `-wal` 里未 checkpoint 的写入，
+或拷到撕裂文件）。统一用 `deploy/stocktrace-backup.sh`（`sqlite3 .backup` 在线备份 →
+`integrity_check` 校验 → gzip → 保留最近 N 份 → 可选异地）。
+
+### 6.1 安装
+
+```bash
+sudo apt install -y sqlite3            # 脚本优先用 CLI；没有时自动退回 python3 标准库
+sudo mkdir -p /var/backups/stocktrace
+sudo chown www:www /var/backups/stocktrace
+sudo chmod 750 /var/backups/stocktrace
+sudo chmod +x /opt/stocktrace/deploy/stocktrace-backup.sh
+
+# 可选参数（不建文件则全用默认：每日一份、保留 14 份、不异地）
+sudo tee /etc/stocktrace/backup.env >/dev/null <<'ENV'
+# STOCKTRACE_DB=/opt/stocktrace/backend/db.sqlite3
+# BACKUP_DIR=/var/backups/stocktrace
+BACKUP_KEEP=14
+# 异地（强烈建议至少每周一份到另一台机器/对象存储）：
+# BACKUP_RSYNC_TARGET=backup@nas.example:/srv/stocktrace/
+# BACKUP_RSYNC_OPTS=-a -e "ssh -i /home/www/.ssh/backup_ed25519"
+# BACKUP_POST_HOOK=rclone copy "$1" crypt-remote:stocktrace/
+ENV
+
+sudo cp /opt/stocktrace/deploy/stocktrace-backup.service /opt/stocktrace/deploy/stocktrace-backup.timer /etc/systemd/system/
+sudo systemctl daemon-reload
+sudo systemctl enable --now stocktrace-backup.timer
+
+# 立即手动跑一次并确认
+sudo systemctl start stocktrace-backup.service
+sudo journalctl -u stocktrace-backup -n 20 --no-pager
+ls -lh /var/backups/stocktrace/
+systemctl list-timers stocktrace-backup.timer
+```
+
+定时：每天 **22:00（Asia/Shanghai）**，此时 15:30–21:00 的收盘后预热/快照与 17:15 探测器扫描都已结束；
+`Persistent=true` 保证关机错过时开机补跑。脚本任一步失败都以非 0 退出，unit 会变为 `failed`
+（`systemctl --failed` 可见）。异地 rsync / 钩子失败同样视为失败——异地副本是防整机丢失的唯一手段，不能静默。
+
+### 6.2 恢复步骤
+
+```bash
+# 1. 停掉所有会写库的进程（Web + 调度）
+sudo systemctl stop stocktrace stocktrace-scheduler
+
+# 2. 把现有库挪开（连同 WAL/SHM，别删，以防恢复错了还能回退）
+cd /opt/stocktrace/backend
+sudo -u www mkdir -p /var/backups/stocktrace/pre-restore
+sudo -u www mv db.sqlite3 db.sqlite3-wal db.sqlite3-shm /var/backups/stocktrace/pre-restore/ 2>/dev/null || true
+
+# 3. 解压选定的备份
+sudo -u www sh -c 'gunzip -c /var/backups/stocktrace/db-YYYYMMDD-HHMMSS.sqlite3.gz > db.sqlite3'
+sudo -u www sqlite3 db.sqlite3 'PRAGMA integrity_check;'      # 必须输出 ok
+
+# 4. 迁移（备份若早于当前代码版本，补齐新迁移）后启动
+set -a; source /etc/stocktrace/env; set +a
+sudo -u www -E venv/bin/python manage.py migrate
+sudo systemctl start stocktrace stocktrace-scheduler
+curl -s http://127.0.0.1:8000/api/health/ | python3 -m json.tool
+```
+
+### 6.3 每月恢复演练（不碰线上库）
+
+备份没恢复过就不算备份。每月挑最新一份在临时目录里恢复并抽查：
+
+```bash
+D=$(mktemp -d)
+gunzip -c "$(ls -1 /var/backups/stocktrace/db-*.sqlite3.gz | tail -1)" > "$D/db.sqlite3"
+sqlite3 "$D/db.sqlite3" 'PRAGMA integrity_check;'
+sqlite3 "$D/db.sqlite3" "SELECT MAX(trade_date), COUNT(*) FROM stocks_marketdailysnapshot;"
+sqlite3 "$D/db.sqlite3" "SELECT COUNT(*) FROM stocks_dailyquote;"
+rm -rf "$D"
+```
+
+期望：`integrity_check` 为 `ok`，最新快照日期是最近一个交易日（或前一交易日），行数与线上同量级。
+演练结果记到运维记录里；连续两次失败要排查脚本/磁盘。
