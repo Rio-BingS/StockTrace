@@ -6,7 +6,7 @@
 import json
 
 import pandas as pd
-from datetime import date, datetime, timedelta
+from datetime import date, datetime, time as dt_time, timedelta
 from decimal import Decimal
 from unittest.mock import patch
 
@@ -392,13 +392,18 @@ def _make_quote(stock, close, change_pct, day=_BASE):
     )
 
 
+# P0 DAT-08 后提醒只认当日数据且盘前/午休不评估：测试数据落在「今天」，评估时刻固定为盘中
+_ALERT_DAY = timezone.localdate()
+_ALERT_NOW = timezone.make_aware(datetime.combine(_ALERT_DAY, dt_time(10, 35)))
+
+
 class AlertEvaluationTests(TestCase):
     def setUp(self):
         self.stock = Stock.objects.create(code='600000', name='浦发银行')
 
     def test_price_above_triggers_once_per_day(self):
         MinuteBar.objects.create(
-            stock=self.stock, datetime=timezone.make_aware(datetime(2026, 9, 4, 10, 30)),
+            stock=self.stock, datetime=timezone.make_aware(datetime.combine(_ALERT_DAY, dt_time(10, 30))),
             open=Decimal('10'), close=Decimal('10.50'), high=Decimal('10.6'),
             low=Decimal('9.9'), volume=100,
         )
@@ -406,19 +411,19 @@ class AlertEvaluationTests(TestCase):
             stock=self.stock, rule_type=PriceAlert.PRICE_ABOVE, threshold=Decimal('9.5'),
         )
         with patch('stocks.services.is_trading_day', _trading_true):
-            events = alerts.evaluate_alerts()
+            events = alerts.evaluate_alerts(now=_ALERT_NOW)
             self.assertEqual(len(events), 1)
             self.assertIn('上穿', events[0].message)
             # 同日不重复触发
-            self.assertEqual(len(alerts.evaluate_alerts()), 0)
+            self.assertEqual(len(alerts.evaluate_alerts(now=_ALERT_NOW)), 0)
 
     def test_daily_pct_below_uses_positive_threshold(self):
-        _make_quote(self.stock, Decimal('9.0'), -10.0)
+        _make_quote(self.stock, Decimal('9.0'), -10.0, day=_ALERT_DAY)
         PriceAlert.objects.create(
             stock=self.stock, rule_type=PriceAlert.DAILY_PCT_BELOW, threshold=Decimal('5'),
         )
         with patch('stocks.services.is_trading_day', _trading_true):
-            events = alerts.evaluate_alerts()
+            events = alerts.evaluate_alerts(now=_ALERT_NOW)
         self.assertEqual(len(events), 1)
         self.assertIn('跌幅', events[0].message)
 
@@ -430,7 +435,7 @@ class AlertEvaluationTests(TestCase):
             stock=self.stock, rule_type=PriceAlert.DAILY_PCT_ABOVE, threshold=Decimal('3'),
         )
         with patch('stocks.services.is_trading_day', _trading_true):
-            events = alerts.evaluate_alerts()
+            events = alerts.evaluate_alerts(now=_ALERT_NOW)
         self.assertEqual(events, [])  # 无行情就不触发，绝不拿 0 凑数
 
 
