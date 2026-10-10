@@ -418,8 +418,8 @@ curl -s http://127.0.0.1:8000/api/health/ | python3 -m json.tool
 ### 8.3 本机探测与告警（建议）
 
 ```bash
-# /etc/cron.d/stocktrace-health   每 5 分钟；失败写 syslog，配置了 STOCKTRACE_PUSH_URL 时顺带推送
-*/5 * * * * www curl -fsS -m 10 http://127.0.0.1:8000/api/health/ >/dev/null || { logger -t stocktrace "health degraded"; . /etc/stocktrace/env; [ -n "$STOCKTRACE_PUSH_URL" ] && curl -fsS -m 10 -d "title=StockTrace 健康检查失败" -d "desp=$(curl -s -m 10 http://127.0.0.1:8000/api/health/ | head -c 1500)" "$STOCKTRACE_PUSH_URL" >/dev/null; }
+# /etc/cron.d/stocktrace-health   每 5 分钟（root：需读取 /etc/stocktrace/env）；失败写 syslog，配置了 STOCKTRACE_PUSH_URL 时顺带推送
+*/5 * * * * root curl -fsS -m 10 http://127.0.0.1:8000/api/health/ >/dev/null || { logger -t stocktrace "health degraded"; . /etc/stocktrace/env; [ -n "$STOCKTRACE_PUSH_URL" ] && curl -fsS -m 10 -d "title=StockTrace 健康检查失败" -d "desp=$(curl -s -m 10 http://127.0.0.1:8000/api/health/ | head -c 1500)" "$STOCKTRACE_PUSH_URL" >/dev/null; }
 ```
 
 也可以用 uptime-kuma 等工具探测 `http://127.0.0.1:8000/api/health/`（关键字 `"status": "ok"`）。
