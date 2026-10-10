@@ -689,11 +689,13 @@ class EtfHistSourceRoutingTests(SimpleTestCase):
         def em_boom(**kwargs):
             raise RuntimeError('502')
 
+        # 日期相对今天：'1w' 区间按 today 回看 12 天截取，写死日期会随时间变红
+        today = timezone.localdate()
         sina_df = pd.DataFrame([
-            {'date': '2026-09-01', 'open': 4.0, 'high': 4.2, 'low': 3.9,
-             'close': 4.1, 'volume': 1000},
-            {'date': '2026-09-02', 'open': 4.1, 'high': 4.3, 'low': 4.0,
-             'close': 4.2, 'volume': 1100},
+            {'date': (today - timedelta(days=3)).isoformat(), 'open': 4.0, 'high': 4.2,
+             'low': 3.9, 'close': 4.1, 'volume': 1000},
+            {'date': (today - timedelta(days=2)).isoformat(), 'open': 4.1, 'high': 4.3,
+             'low': 4.0, 'close': 4.2, 'volume': 1100},
         ])
         with patch('akshare.fund_etf_hist_em', em_boom), patch(
             'akshare.fund_etf_hist_sina', return_value=sina_df,
