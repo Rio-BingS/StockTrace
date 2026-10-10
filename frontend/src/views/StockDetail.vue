@@ -25,9 +25,12 @@ const intradayQuote = ref(null)
 
 async function loadMargin() {
   margin.value = null
-  if (!code.value) return
+  const c = code.value
+  if (!c) return
   try {
-    margin.value = (await marketApi.getStockMargin(code.value)).data
+    const data = (await marketApi.getStockMargin(c)).data
+    // 切换股票后旧请求晚到时丢弃
+    if (code.value === c) margin.value = data
   } catch (e) {
     console.error(e)
   }
@@ -104,12 +107,17 @@ function resetAndLoad() {
 
 onMounted(() => {
   loadData()
-  loadMargin()
 })
 
 watch(stockId, () => {
   resetAndLoad()
-  loadMargin()
+})
+
+// 两融依赖 code：code 在 loadData 拉到股票信息后才赋值，
+// 因此监听 code 变化再加载（首次进入和切换股票都会触发）
+watch(code, (c) => {
+  if (c) loadMargin()
+  else margin.value = null
 })
 </script>
 
