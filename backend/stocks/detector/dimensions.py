@@ -279,13 +279,18 @@ def eval_vol_ratio_slope(ctx, params):
     )
 
 
-def _rolling_mean_series(vals, k):
+def _rolling_mean_series(vals, k, strict=False):
+    """滚动均值；strict=True 时窗口内任一值为 None 该点即为 None（窗口不齐不算）。"""
     out = []
     for i in range(len(vals)):
         if i + 1 < k:
             out.append(None)
             continue
-        m = _mean(vals[i + 1 - k:i + 1])
+        window = vals[i + 1 - k:i + 1]
+        if strict and any(v is None for v in window):
+            out.append(None)
+            continue
+        m = _mean(window)
         out.append(round(m, 2) if m is not None else None)
     return out
 
@@ -481,10 +486,19 @@ def _sector_price_series(ctx):
 
     这不是伪造价格——是对真实涨跌幅的可加变换（与计算 MA 同类），用于
     让板块也有「价格与均线关系」维度；基期任意，只影响水平不影响形态。
+
+    缺口处理（ALG-06）：某天涨跌幅缺失时该点输出 None，level 保持上一个
+    值继续链乘，而不是把 level 清成 None（旧实现下一天会 None * float
+    抛异常，整个 45 日窗口内该维度都不可用）。缺口前后的水平因少乘一天
+    而不可比，所以 eval_ma_relation 要求均线窗口内无缺失点——窗口全部
+    落在缺口之后时，链条连续，结果与无缺口时一致。
     """
     level, out = 100.0, []
     for p in ctx.get('change_pct') or []:
-        level = level * (1 + p / 100) if p is not None else None
+        if p is None:
+            out.append(None)
+            continue
+        level = level * (1 + p / 100)
         out.append(level)
     return out
 
@@ -507,7 +521,8 @@ def eval_ma_relation(ctx, params):
     if any(v is None for v in closes[-(ma_days + slope_days + 1):]):
         return _unavailable('均线窗口存在缺失数据')
 
-    ma = _rolling_mean_series(closes, ma_days)
+    # 严格窗口：板块伪价格缺口前后水平不可比，跨缺口的均线不能算（ALG-06）
+    ma = _rolling_mean_series(closes, ma_days, strict=True)
     dist = [
         (closes[i] / ma[i] - 1) * 100 if ma[i] and closes[i] is not None else None
         for i in range(len(closes))

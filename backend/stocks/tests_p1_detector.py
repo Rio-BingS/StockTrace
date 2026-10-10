@@ -9,7 +9,7 @@ from unittest.mock import patch
 
 from django.test import TestCase
 
-from .detector import scan, signals
+from .detector import dimensions, scan, signals
 from .models import DetectorDimConfig, DetectorSignal
 from .tests_detector import _TODAY, _trading_true, _vote_config
 
@@ -47,3 +47,45 @@ class DimensionEnabledTests(TestCase):
         self.assertNotIn('ma_relation', dims)
         # 注册表中无实现的停用维度同样不出现（不会以「维度计算异常」冒出来）
         self.assertNotIn('order_imbalance', dims)
+
+
+class SectorPriceGapTests(TestCase):
+    """ALG-06：板块涨跌幅缺一天不再让 ma_relation 整窗失效。"""
+
+    def _ctx(self, pcts):
+        dates = [(_TODAY - timedelta(days=len(pcts) - 1 - i)).isoformat() for i in range(len(pcts))]
+        return {'kind': 'industry', 'code': '测试行业', 'name': '测试行业', 'dates': dates,
+                'net': [1e8] * len(pcts), 'change_pct': pcts, 'as_of': dates[-1]}
+
+    def _pcts(self, n=45):
+        return [0.3 if i % 2 == 0 else -0.25 for i in range(n)]
+
+    def test_gap_before_window_keeps_dimension_available(self):
+        params = registry_params('ma_relation')
+        pcts = self._pcts()
+        pcts[5] = None  # 缺口在均线窗口之前
+        res = dimensions.eval_ma_relation(self._ctx(pcts), params)
+        self.assertTrue(res['available'], res['note'])
+        # level 跨缺口保持：窗口全在缺口之后时，结果与该日涨跌 0% 的完整序列一致
+        filled = list(pcts)
+        filled[5] = 0.0
+        clean = dimensions.eval_ma_relation(self._ctx(filled), params)
+        self.assertAlmostEqual(res['value'], clean['value'], places=6)
+
+    def test_price_series_keeps_level_across_gap(self):
+        out = dimensions._sector_price_series({'change_pct': [1.0, None, 1.0]})
+        self.assertIsNone(out[1])
+        self.assertAlmostEqual(out[2], 100 * 1.01 * 1.01)
+
+    def test_gap_inside_window_is_honestly_unavailable(self):
+        pcts = self._pcts()
+        pcts[-3] = None
+        res = dimensions.eval_ma_relation(self._ctx(pcts), registry_params('ma_relation'))
+        self.assertFalse(res['available'])
+        self.assertNotIn('异常', res['note'])
+
+
+def registry_params(key):
+    from .detector import registry
+
+    return dict(registry.DIMENSION_MAP[key]['defaults'])
