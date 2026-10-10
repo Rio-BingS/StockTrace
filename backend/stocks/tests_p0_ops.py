@@ -106,3 +106,136 @@ class DependencyPinTests(SimpleTestCase):
         import apscheduler
 
         self.assertEqual(apscheduler.__version__.split('.')[0], '3')
+
+
+class SchedulerConfigTests(SimpleTestCase):
+    """REL-01：任务注册带时区、coalesce 与合理 misfire 宽限；Web 内默认不启动。"""
+
+    def test_jobs_have_timezone_coalesce_and_grace(self):
+        from zoneinfo import ZoneInfo
+
+        from stocks import scheduler as sch
+
+        s = sch.build_scheduler()
+        jobs = {j.id: j for j in s.get_jobs()}
+        self.assertEqual(
+            set(jobs),
+            {'preopen_incremental', 'intraday_fetch', 'daily_summary', 'post_close_lagging', 'detector_scan'},
+        )
+        for job in jobs.values():
+            self.assertTrue(job.coalesce, job.id)
+            self.assertEqual(job.max_instances, 1, job.id)
+            self.assertGreaterEqual(job.misfire_grace_time, 60, job.id)
+            self.assertEqual(job.trigger.timezone, ZoneInfo('Asia/Shanghai'), job.id)
+        self.assertEqual(str(s.timezone), 'Asia/Shanghai')
+        # 盘中 5 分钟任务的宽限必须短于 5 分钟，避免和下一轮叠加
+        self.assertLess(jobs['intraday_fetch'].misfire_grace_time, 300)
+
+    def test_ready_does_not_start_scheduler_by_default(self):
+        from unittest import mock
+
+        from django.apps import apps
+
+        cfg = apps.get_app_config('stocks')
+        with mock.patch.dict(os.environ, {}, clear=False), mock.patch('stocks.scheduler.start') as m:
+            os.environ.pop('STOCKTRACE_RUN_SCHEDULER_IN_WEB', None)
+            cfg.ready()
+            m.assert_not_called()
+            os.environ['STOCKTRACE_RUN_SCHEDULER_IN_WEB'] = '1'
+            cfg.ready()
+            m.assert_called_once()
+
+    def test_ready_logs_exception_when_start_fails(self):
+        from unittest import mock
+
+        from django.apps import apps
+
+        cfg = apps.get_app_config('stocks')
+        with mock.patch.dict(os.environ, {'STOCKTRACE_RUN_SCHEDULER_IN_WEB': '1'}), \
+                mock.patch('stocks.scheduler.start', side_effect=ImportError('apscheduler 4')), \
+                self.assertLogs('stocks.apps', level='ERROR'):
+            cfg.ready()
+
+    def test_run_scheduler_command_skipped_by_ready(self):
+        from stocks import scheduler as sch
+
+        self.assertIn('run_scheduler', sch._SKIP_COMMANDS)
+
+    def test_lock_path_configurable(self):
+        from unittest import mock
+
+        from stocks import scheduler as sch
+
+        tmp = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, tmp, True)
+        lock = tmp / 'run' / 'scheduler.lock'
+        with self.settings(STOCKTRACE_SCHEDULER_LOCK=lock), mock.patch.object(sch, '_lock_fh', None):
+            self.assertTrue(sch._acquire_lock())
+            try:
+                self.assertTrue(lock.exists())
+                self.assertEqual(lock.read_text().strip(), str(os.getpid()))
+            finally:
+                sch._release_lock()
+
+
+class RunForeverTests(SimpleTestCase):
+    """REL-01：独立调度进程启动、等待退出信号、优雅关闭并释放锁；拿不到锁时重试。"""
+
+    def setUp(self):
+        self.tmp = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, self.tmp, True)
+        self.lock = self.tmp / 'scheduler.lock'
+
+    def test_starts_and_stops_cleanly(self):
+        import threading
+        from unittest import mock
+
+        from stocks import scheduler as sch
+
+        ev = threading.Event()
+        started = {}
+
+        real_build = sch.build_scheduler
+
+        def fake_build(*a, **k):
+            s = real_build(*a, **k)
+            started['s'] = s
+            # 启动后立刻请求退出
+            threading.Timer(0.2, ev.set).start()
+            return s
+
+        with self.settings(STOCKTRACE_SCHEDULER_LOCK=self.lock), \
+                mock.patch.object(sch, 'build_scheduler', side_effect=fake_build):
+            self.assertTrue(sch.run_forever(ev, lock_retry_seconds=1))
+        self.assertFalse(started['s'].running)
+        self.assertIsNone(sch.scheduler)
+        self.assertIsNone(sch._lock_fh)
+
+    def test_retries_when_lock_held_and_exits_on_signal(self):
+        import threading
+        from unittest import mock
+
+        from stocks import scheduler as sch
+
+        ev = threading.Event()
+        threading.Timer(0.3, ev.set).start()
+        with self.settings(STOCKTRACE_SCHEDULER_LOCK=self.lock), \
+                mock.patch.object(sch, '_acquire_lock', return_value=False) as acq, \
+                mock.patch.object(sch, 'build_scheduler') as build, \
+                self.assertLogs('stocks.scheduler', level='WARNING'):
+            self.assertFalse(sch.run_forever(ev, lock_retry_seconds=0.1))
+        self.assertGreaterEqual(acq.call_count, 2)
+        build.assert_not_called()
+
+    def test_command_respects_global_switch(self):
+        from io import StringIO
+        from unittest import mock
+
+        from django.core.management import call_command
+
+        err = StringIO()
+        with mock.patch.dict(os.environ, {'STOCKTRACE_SCHEDULER': '0'}), \
+                mock.patch('stocks.scheduler.run_forever') as rf:
+            call_command('run_scheduler', stderr=err)
+        rf.assert_not_called()
+        self.assertIn('STOCKTRACE_SCHEDULER', err.getvalue())

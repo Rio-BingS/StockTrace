@@ -191,3 +191,9 @@ REST_FRAMEWORK = {
 
 # APScheduler
 SCHEDULER_AUTOSTART = True
+# 调度运行时目录（锁文件/心跳文件）。生产设为 /run/stocktrace（stocktrace-scheduler.service
+# 的 RuntimeDirectory=），本地开发缺省放在 backend/ 下。
+STOCKTRACE_RUN_DIR = Path(os.environ.get('STOCKTRACE_RUN_DIR') or BASE_DIR)
+STOCKTRACE_SCHEDULER_LOCK = Path(
+    os.environ.get('STOCKTRACE_SCHEDULER_LOCK') or STOCKTRACE_RUN_DIR / 'scheduler.lock'
+)

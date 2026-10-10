@@ -80,10 +80,10 @@ cd /opt/stocktrace/frontend
 npm ci
 npm run build
 
-# systemd
-sudo cp deploy/stocktrace.service /etc/systemd/system/
+# systemd：Web（gunicorn）与调度器（run_scheduler）是两个独立单元（REL-01）
+sudo cp deploy/stocktrace.service deploy/stocktrace-scheduler.service /etc/systemd/system/
 sudo systemctl daemon-reload
-sudo systemctl enable --now stocktrace
+sudo systemctl enable --now stocktrace stocktrace-scheduler
 
 # Nginx + Basic Auth
 sudo htpasswd -c /etc/nginx/.htpasswd_stocktrace stocktrace
@@ -132,16 +132,22 @@ python manage.py collectstatic --noinput
 cd /opt/stocktrace/frontend
 npm ci && npm run build
 
-# 若尚未使用本仓库 gunicorn_config，更新 systemd ExecStart 指向它
-sudo cp /path/to/StockTrace\ v1.02/deploy/stocktrace.service /etc/systemd/system/
+# 同步 systemd 单元（Web + 独立调度进程）；/etc/stocktrace/env 里若有
+# STOCKTRACE_RUN_SCHEDULER_IN_WEB=1 要删掉，否则 Web 会继续在进程内跑调度
+sudo cp /opt/stocktrace/deploy/stocktrace.service /opt/stocktrace/deploy/stocktrace-scheduler.service /etc/systemd/system/
+sudo cp /opt/stocktrace/deploy/gunicorn_config.py /opt/stocktrace/backend/gunicorn_config.py   # 若两份不同
 sudo systemctl daemon-reload
-sudo systemctl start stocktrace
+sudo systemctl enable stocktrace-scheduler
+sudo systemctl start stocktrace stocktrace-scheduler
 
-# 确认调度只启动一次
-sudo journalctl -u stocktrace -n 50 --no-pager | grep -i APScheduler
+# 确认调度只在独立进程里启动一次、Web 里没有
+sudo journalctl -u stocktrace-scheduler -n 50 --no-pager | grep -i APScheduler
+sudo journalctl -u stocktrace -n 200 --no-pager | grep -i APScheduler    # 应无输出
+curl -s http://127.0.0.1:8000/api/health/ | python3 -m json.tool
 ```
 
-期望日志：`APScheduler 已启动` 出现一次；其它 worker 日志可有「其他进程已持有调度锁」（单 worker 时通常只有启动成功）。
+期望：`stocktrace-scheduler` 日志里 `APScheduler 已启动 ...，独立进程 pid=NNN` 出现一次；
+`/api/health/` 返回 `"status": "ok"`、`scheduler.alive: true`、各 job 的 `next_run_time`。
 
 ---
 
@@ -160,9 +166,31 @@ python manage.py fetch_stock_data --all
 # 只读校验 ETF/板块上游字段与单位；不写数据库、不修改缓存
 python manage.py validate_market_sources
 
-# 临时关闭调度
-# 在 /etc/stocktrace/env 加：STOCKTRACE_SCHEDULER=0 后 restart
+# 调度器（独立进程，REL-01）
+sudo systemctl status stocktrace-scheduler
+sudo journalctl -u stocktrace-scheduler -f
+# 临时关闭调度：直接停调度单元（Web 不受影响）
+sudo systemctl stop stocktrace-scheduler
+# 或在 /etc/stocktrace/env 加 STOCKTRACE_SCHEDULER=0（全局总开关，run_scheduler 会直接退出）
 ```
+
+### 调度器运行方式说明（REL-01）
+
+- 调度器不再寄生在 Gunicorn worker 里：worker 被 `max_requests` 回收或重启时会在
+  `graceful_timeout` 后强杀进行中的任务，并让落在重启窗口里的 15:10 / 17:15 定时点被判 misfire 跳过。
+- 现在由 `python manage.py run_scheduler`（`stocktrace-scheduler.service`）前台运行；停止时 SIGTERM，
+  等正在执行的任务结束再退出（`TimeoutStopSec=300`）。重启 Web（发版、改 nginx）不再影响调度。
+- 所有任务显式 `timezone=Asia/Shanghai`、`coalesce=True`、`max_instances=1`，并设置 misfire 宽限
+  （盘中 5 分钟任务 240s，08:50 预热 1800s，15:10 汇总 / 17:15 探测器 3600s，收盘后预热 900s）。
+  宽限内晚到的任务仍会执行（各任务自带交易日 / 收盘时间守卫）。
+- 锁文件与心跳文件在 `/run/stocktrace/`（`RuntimeDirectory=`，属主 www，开机清空，不会残留 root 属主的锁）。
+  拿不到锁时 run_scheduler 每 60s 重试并记 WARNING。
+- 兼容旧部署：`STOCKTRACE_RUN_SCHEDULER_IN_WEB=1` 时仍在 Web 进程内启动（同一把锁，二者不会同时跑）。
+  本地开发 `runserver` 想要定时任务时也用这个变量，或另开终端跑 `python manage.py run_scheduler`。
+- Gunicorn `max_requests` 由 500 调到 20000（`GUNICORN_MAX_REQUESTS`，0 = 不回收），仅作内存泄漏兜底。
+- 局限：任务存储仍是内存（MemoryJobStore），调度进程**停机期间**错过的时间点不会在启动后补跑
+  （超出宽限）。发版尽量避开 15:00–17:30；若错过 15:10 / 17:15，手动执行
+  `python manage.py fetch_stock_data --all` / `python manage.py run_detector_scan`。
 
 ---
 
@@ -172,6 +200,7 @@ python manage.py validate_market_sources
 |----|------|
 | 自选数量 | 尽量 ≤ 20，盘中任务按股串行 |
 | Gunicorn workers | 保持 1；内存仍紧再降 threads |
+| 调度进程 | `stocktrace-scheduler` 单独计内存（`MemoryMax=700M`），与 Web 互不拖累 |
 | 勿在 VPS 上 `npm run dev` | 只用 `dist` |
 | 勿提交 | `db.sqlite3`、`.env`、htpasswd、真实 SECRET_KEY |
 
