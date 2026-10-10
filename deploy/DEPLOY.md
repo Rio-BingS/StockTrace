@@ -380,3 +380,46 @@ git add requirements.txt requirements.lock && git commit -m "chore(deps): ..."
 注：第 3 步 freeze 是在装过 requirements-dev 的 venv 里做的，所以要过滤掉开发工具；如果 dev
 依赖变多，改为在第 1 步之后（装 dev 之前）先 freeze。akshare 升级必须单独一个提交，并在 VPS 上
 用 `validate_market_sources` 实测全集可用后再合入。
+
+---
+
+## 8. 日志与健康检查（REL-02）
+
+### 8.1 日志
+
+`settings.LOGGING` 已配置：所有日志带时间/级别/模块/进程号/线程名输出到 **stdout**，由 systemd 收进 journald：
+
+```bash
+sudo journalctl -u stocktrace -f              # Web：请求错误、行情兜底失败（带堆栈）
+sudo journalctl -u stocktrace-scheduler -f    # 调度：任务启动/结果、清理条数、job 失败/错过
+sudo journalctl -u stocktrace-scheduler --since today | grep -E "ERROR|WARNING"
+```
+
+| 环境变量 | 默认 | 说明 |
+|---|---|---|
+| `STOCKTRACE_LOGLEVEL` | `INFO` | `stocks.*` 业务日志级别（排障时可设 `DEBUG`） |
+| `STOCKTRACE_LOG_FILE` | 空 | 另写一份文件（`WatchedFileHandler`，配合 logrotate）。Web 与调度是两个进程，建议分开：在各自 unit 里用 `Environment=STOCKTRACE_LOG_FILE=/var/log/stocktrace/web.log` / `scheduler.log`，并 `mkdir -p /var/log/stocktrace && chown www:www` |
+
+`apscheduler` 只输出 WARNING 以上（job 抛异常、错过执行时间都会出现）。
+
+### 8.2 健康检查 `GET /api/health/`
+
+返回 DB 可用性、调度器心跳（调度进程每 60s 写 `/run/stocktrace/scheduler_heartbeat.json`）、
+各 job 的 `next_run_time`、各 job 最近一次结果（`last_runs`：ok / error / missed + 时间）、最近一次市场快照日期。
+
+- 200 `{"status": "ok"}`：DB 可用，且调度心跳在 `STOCKTRACE_HEARTBEAT_STALE_SECONDS`（默认 180s）内；
+- 503 `{"status": "degraded"}`：DB 不可用，或调度进程没在跑 / 心跳过期（`STOCKTRACE_SCHEDULER=0` 时不计调度）。
+- Nginx 只放行 127.0.0.1；本机直接打 Gunicorn：
+
+```bash
+curl -s http://127.0.0.1:8000/api/health/ | python3 -m json.tool
+```
+
+### 8.3 本机探测与告警（建议）
+
+```bash
+# /etc/cron.d/stocktrace-health   每 5 分钟；失败写 syslog，配置了 STOCKTRACE_PUSH_URL 时顺带推送
+*/5 * * * * www curl -fsS -m 10 http://127.0.0.1:8000/api/health/ >/dev/null || { logger -t stocktrace "health degraded"; . /etc/stocktrace/env; [ -n "$STOCKTRACE_PUSH_URL" ] && curl -fsS -m 10 -d "title=StockTrace 健康检查失败" -d "desp=$(curl -s -m 10 http://127.0.0.1:8000/api/health/ | head -c 1500)" "$STOCKTRACE_PUSH_URL" >/dev/null; }
+```
+
+也可以用 uptime-kuma 等工具探测 `http://127.0.0.1:8000/api/health/`（关键字 `"status": "ok"`）。

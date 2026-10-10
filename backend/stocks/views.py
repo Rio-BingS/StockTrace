@@ -3,6 +3,7 @@ from rest_framework.decorators import action, api_view
 from rest_framework.response import Response
 from django.utils import timezone
 from datetime import date, datetime, timedelta
+import logging
 
 from .models import Stock, DailyQuote, MinuteBar
 from .serializers import (
@@ -26,6 +27,8 @@ from .market import (
     get_institution_holdings,
 )
 from .market.periods import FULL_PRESETS, resolve_period
+
+logger = logging.getLogger(__name__)
 
 
 class StockViewSet(viewsets.ModelViewSet):
@@ -284,6 +287,7 @@ def _market_response(loader, label):
     try:
         return Response(loader())
     except Exception as e:
+        logger.exception(f'获取{label}失败')
         return Response(
             {'detail': f'获取{label}失败: {e}'},
             status=status.HTTP_502_BAD_GATEWAY,
@@ -369,6 +373,7 @@ def _market_bad_request(loader):
     except ValueError as e:
         return Response({'detail': str(e)}, status=status.HTTP_400_BAD_REQUEST)
     except Exception as e:
+        logger.exception('获取市场数据失败')
         return Response({'detail': f'获取市场数据失败: {e}'}, status=status.HTTP_502_BAD_GATEWAY)
 
 
@@ -469,6 +474,7 @@ def market_institutions(request):
     except ValueError as e:
         return Response({'detail': str(e)}, status=status.HTTP_400_BAD_REQUEST)
     except Exception as e:
+        logger.exception('获取机构持仓失败')
         return Response(
             {'detail': f'获取机构持仓失败: {e}'},
             status=status.HTTP_502_BAD_GATEWAY,

@@ -17,15 +17,19 @@ APScheduler 集成到 Django
 """
 
 import atexit
+import json
 import logging
 import os
 import sys
+import threading
 from datetime import time as dt_time
 
 from zoneinfo import ZoneInfo
 
+from apscheduler.events import EVENT_JOB_ERROR, EVENT_JOB_EXECUTED, EVENT_JOB_MISSED
 from apscheduler.schedulers.background import BackgroundScheduler
 from apscheduler.triggers.cron import CronTrigger
+from apscheduler.triggers.interval import IntervalTrigger
 from django.conf import settings
 from django.utils import timezone
 
@@ -291,6 +295,114 @@ def register_jobs(sched):
     return sched
 
 
+# ---------------------------------------------------------------------------
+# 心跳（REL-02）：调度进程把存活时间、各 job 下次运行时间、最近一次结果写到 JSON 文件，
+# Web 进程的 /api/health/ 读取它判断调度是否在跑——两者是不同进程，不能用进程内缓存。
+# ---------------------------------------------------------------------------
+
+HEARTBEAT_JOB_ID = 'scheduler_heartbeat'
+HEARTBEAT_INTERVAL_SECONDS = 60
+
+_hb_lock = threading.Lock()
+_hb_state = {'started_at': None, 'mode': None, 'last_runs': {}}
+
+
+def heartbeat_path():
+    return str(getattr(
+        settings, 'STOCKTRACE_SCHEDULER_HEARTBEAT',
+        os.path.join(settings.BASE_DIR, 'scheduler_heartbeat.json'),
+    ))
+
+
+def read_heartbeat():
+    """读取心跳文件；不存在/损坏返回 None。"""
+    try:
+        with open(heartbeat_path(), encoding='utf-8') as fh:
+            return json.load(fh)
+    except (OSError, ValueError):
+        return None
+
+
+def _iso(dt):
+    return dt.isoformat() if dt is not None else None
+
+
+def write_heartbeat(sched, running=True):
+    """原子写入心跳文件（tmp + os.replace，读方永远看不到半个 JSON）。失败只记日志。"""
+    jobs = []
+    try:
+        for job in sched.get_jobs():
+            if job.id == HEARTBEAT_JOB_ID:
+                continue
+            jobs.append({'id': job.id, 'next_run_time': _iso(getattr(job, 'next_run_time', None))})
+    except Exception:
+        logger.exception('读取调度任务列表失败')
+    with _hb_lock:
+        payload = {
+            'pid': os.getpid(),
+            'mode': _hb_state['mode'],
+            'running': bool(running),
+            'started_at': _hb_state['started_at'],
+            'updated_at': timezone.now().isoformat(),
+            'jobs': jobs,
+            'last_runs': dict(_hb_state['last_runs']),
+        }
+        path = heartbeat_path()
+        tmp = f'{path}.{os.getpid()}.tmp'
+        try:
+            os.makedirs(os.path.dirname(path) or '.', exist_ok=True)
+            with open(tmp, 'w', encoding='utf-8') as fh:
+                json.dump(payload, fh, ensure_ascii=False)
+            os.replace(tmp, path)
+        except Exception as e:
+            logger.warning(f'调度心跳写入失败 {path}: {e}')
+
+
+def _make_job_listener(sched):
+    def _on_job_event(event):
+        if event.job_id == HEARTBEAT_JOB_ID:
+            return
+        if event.code == EVENT_JOB_ERROR:
+            status = 'error'
+            # APScheduler 自身已在 apscheduler.executors.* 记录带堆栈的 ERROR，这里补一条业务口径
+            logger.error(f'定时任务 {event.job_id} 执行失败: {event.exception!r}')
+        elif event.code == EVENT_JOB_MISSED:
+            status = 'missed'
+            logger.warning(f'定时任务 {event.job_id} 错过执行时间 {event.scheduled_run_time}（超出 misfire 宽限）')
+        else:
+            status = 'ok'
+        with _hb_lock:
+            _hb_state['last_runs'][event.job_id] = {
+                'status': status,
+                'scheduled_run_time': _iso(getattr(event, 'scheduled_run_time', None)),
+                'finished_at': timezone.now().isoformat(),
+                'error': repr(event.exception)[:300] if getattr(event, 'exception', None) else None,
+            }
+        write_heartbeat(sched)
+    return _on_job_event
+
+
+def attach_heartbeat(sched, mode):
+    """给调度器挂上心跳任务与 job 结果监听；沿用旧心跳文件里的最近结果（重启后不丢"最近任务时间"）。"""
+    prev = read_heartbeat() or {}
+    with _hb_lock:
+        _hb_state['started_at'] = timezone.now().isoformat()
+        _hb_state['mode'] = mode
+        _hb_state['last_runs'] = dict(prev.get('last_runs') or {})
+    sched.add_listener(_make_job_listener(sched), EVENT_JOB_EXECUTED | EVENT_JOB_ERROR | EVENT_JOB_MISSED)
+    sched.add_job(
+        write_heartbeat,
+        IntervalTrigger(seconds=HEARTBEAT_INTERVAL_SECONDS, timezone=SCHEDULER_TZ),
+        args=[sched],
+        id=HEARTBEAT_JOB_ID,
+        replace_existing=True,
+        misfire_grace_time=30,
+        coalesce=True,
+        max_instances=1,
+    )
+    return sched
+
+
 def build_scheduler(scheduler_cls=BackgroundScheduler):
     """构造带时区与任务默认值的调度器并注册任务（不启动、不加锁）。"""
     sched = scheduler_cls(timezone=SCHEDULER_TZ, job_defaults=dict(JOB_DEFAULTS))
@@ -318,8 +430,9 @@ def start():
         logger.info("APScheduler 未启动：其他进程已持有调度锁")
         return
 
-    scheduler = build_scheduler()
+    scheduler = attach_heartbeat(build_scheduler(), mode='web')
     scheduler.start()
+    write_heartbeat(scheduler)
     atexit.register(stop)
     logger.info(_STARTED_MSG + "，运行于 Web 进程（兼容模式）")
 
@@ -331,6 +444,7 @@ def stop():
             scheduler.shutdown(wait=False)
         except Exception:
             pass
+        write_heartbeat(scheduler, running=False)
         scheduler = None
     _release_lock()
 
@@ -350,10 +464,11 @@ def run_forever(stop_event, lock_retry_seconds=60):
         if stop_event.wait(lock_retry_seconds):
             return False
 
-    sched = build_scheduler()
+    sched = attach_heartbeat(build_scheduler(), mode='process')
     scheduler = sched
     try:
         sched.start()
+        write_heartbeat(sched)
         logger.info(_STARTED_MSG + f"，独立进程 pid={os.getpid()}")
         stop_event.wait()
         logger.info("收到退出信号，等待正在执行的任务结束后关闭调度器")
@@ -363,6 +478,7 @@ def run_forever(stop_event, lock_retry_seconds=60):
                 sched.shutdown(wait=True)
         except Exception:
             logger.exception("调度器关闭异常")
+        write_heartbeat(sched, running=False)
         scheduler = None
         _release_lock()
     logger.info("APScheduler 已停止")

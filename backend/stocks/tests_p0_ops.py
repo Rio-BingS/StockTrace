@@ -185,6 +185,9 @@ class RunForeverTests(SimpleTestCase):
         self.tmp = Path(tempfile.mkdtemp())
         self.addCleanup(shutil.rmtree, self.tmp, True)
         self.lock = self.tmp / 'scheduler.lock'
+        ctx = self.settings(STOCKTRACE_SCHEDULER_HEARTBEAT=self.tmp / 'hb.json')
+        ctx.enable()
+        self.addCleanup(ctx.disable)
 
     def test_starts_and_stops_cleanly(self):
         import threading
@@ -208,6 +211,9 @@ class RunForeverTests(SimpleTestCase):
                 mock.patch.object(sch, 'build_scheduler', side_effect=fake_build):
             self.assertTrue(sch.run_forever(ev, lock_retry_seconds=1))
         self.assertFalse(started['s'].running)
+        from stocks.scheduler import read_heartbeat
+
+        self.assertFalse(read_heartbeat()['running'])  # 正常退出时心跳标记为已停止
         self.assertIsNone(sch.scheduler)
         self.assertIsNone(sch._lock_fh)
 
@@ -239,3 +245,148 @@ class RunForeverTests(SimpleTestCase):
             call_command('run_scheduler', stderr=err)
         rf.assert_not_called()
         self.assertIn('STOCKTRACE_SCHEDULER', err.getvalue())
+
+
+class HeartbeatAndHealthTests(SimpleTestCase):
+    """REL-02：调度心跳文件 + /api/health/ 报告 DB 与调度器状态。"""
+
+    databases = {'default'}
+
+    def setUp(self):
+        self.tmp = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, self.tmp, True)
+        self.hb = self.tmp / 'run' / 'scheduler_heartbeat.json'
+        ctx = self.settings(STOCKTRACE_SCHEDULER_HEARTBEAT=self.hb, STOCKTRACE_HEARTBEAT_STALE_SECONDS=180)
+        ctx.enable()
+        self.addCleanup(ctx.disable)
+
+    def _sched_with_heartbeat(self):
+        from stocks import scheduler as sch
+
+        return sch.attach_heartbeat(sch.build_scheduler(), mode='process')
+
+    def test_write_and_read_heartbeat(self):
+        from stocks import scheduler as sch
+
+        s = self._sched_with_heartbeat()
+        self.assertIn(sch.HEARTBEAT_JOB_ID, {j.id for j in s.get_jobs()})
+        sch.write_heartbeat(s)
+        hb = sch.read_heartbeat()
+        self.assertTrue(hb['running'])
+        self.assertEqual(hb['mode'], 'process')
+        ids = {j['id'] for j in hb['jobs']}
+        self.assertIn('daily_summary', ids)
+        self.assertNotIn(sch.HEARTBEAT_JOB_ID, ids)
+        self.assertEqual(list(self.hb.parent.glob('*.tmp')), [])
+
+    def test_job_events_recorded_and_logged(self):
+        from datetime import datetime as dt
+
+        from apscheduler.events import EVENT_JOB_ERROR, EVENT_JOB_MISSED, JobExecutionEvent
+
+        from stocks import scheduler as sch
+
+        s = self._sched_with_heartbeat()
+        listener = sch._make_job_listener(s)
+        now = dt.now(sch.SCHEDULER_TZ)
+        with self.assertLogs('stocks.scheduler', level='WARNING') as cm:
+            listener(JobExecutionEvent(EVENT_JOB_ERROR, 'daily_summary', 'default', now, exception=RuntimeError('boom')))
+            listener(JobExecutionEvent(EVENT_JOB_MISSED, 'detector_scan', 'default', now))
+        self.assertTrue(any('daily_summary' in m for m in cm.output))
+        runs = sch.read_heartbeat()['last_runs']
+        self.assertEqual(runs['daily_summary']['status'], 'error')
+        self.assertIn('boom', runs['daily_summary']['error'])
+        self.assertEqual(runs['detector_scan']['status'], 'missed')
+        # 重启后沿用最近结果
+        sch.attach_heartbeat(sch.build_scheduler(), mode='process')
+        self.assertIn('daily_summary', sch._hb_state['last_runs'])
+
+    def test_health_ok_with_fresh_heartbeat(self):
+        from unittest import mock
+
+        from stocks import scheduler as sch
+
+        sch.write_heartbeat(self._sched_with_heartbeat())
+        with mock.patch.dict(os.environ, {'STOCKTRACE_SCHEDULER': '1'}):
+            r = self.client.get('/api/health/')
+        self.assertEqual(r.status_code, 200, r.content)
+        body = r.json()
+        self.assertEqual(body['status'], 'ok')
+        self.assertTrue(body['db']['ok'])
+        self.assertTrue(body['scheduler']['alive'])
+        self.assertTrue(body['scheduler']['jobs'])
+
+    def test_health_degraded_without_or_with_stale_heartbeat(self):
+        import json
+        from datetime import timedelta
+        from unittest import mock
+
+        from django.utils import timezone
+
+        with mock.patch.dict(os.environ, {'STOCKTRACE_SCHEDULER': '1'}):
+            r = self.client.get('/api/health/')
+            self.assertEqual(r.status_code, 503)
+            self.assertEqual(r.json()['scheduler']['error'], 'no heartbeat')
+
+            self.hb.parent.mkdir(parents=True, exist_ok=True)
+            old = (timezone.now() - timedelta(minutes=10)).isoformat()
+            self.hb.write_text(json.dumps({'running': True, 'updated_at': old}), encoding='utf-8')
+            r = self.client.get('/api/health/')
+            self.assertEqual(r.status_code, 503)
+            self.assertFalse(r.json()['scheduler']['alive'])
+            self.assertGreaterEqual(r.json()['scheduler']['heartbeat_age_seconds'], 590)
+
+    def test_health_ok_when_scheduler_disabled(self):
+        from unittest import mock
+
+        with mock.patch.dict(os.environ, {'STOCKTRACE_SCHEDULER': '0'}):
+            r = self.client.get('/api/health/')
+        self.assertEqual(r.status_code, 200)
+        self.assertFalse(r.json()['scheduler']['enabled'])
+
+    def test_health_db_failure_is_503_without_detail(self):
+        from unittest import mock
+
+        with mock.patch('stocks.health.connection') as conn, self.assertLogs('stocks.health', level='ERROR'):
+            conn.cursor.side_effect = RuntimeError('disk I/O error /secret/path')
+            r = self.client.get('/api/health/')
+        self.assertEqual(r.status_code, 503)
+        self.assertNotIn('secret', r.content.decode())
+
+
+class LoggingConfigTests(SimpleTestCase):
+    """REL-02：LOGGING 已配置，stocks.* 的 INFO 不再丢；行情兜底出错写 logger.exception。"""
+
+    def test_stocks_info_reaches_handler(self):
+        import logging
+
+        from django.conf import settings
+
+        self.assertIn('stocks', settings.LOGGING['loggers'])
+        lg = logging.getLogger('stocks.scheduler')
+        self.assertTrue(lg.isEnabledFor(logging.INFO))
+        self.assertTrue(logging.getLogger().handlers, 'root 无 handler')
+
+    def test_market_fallback_logs_exception(self):
+        from unittest import mock
+
+        from rest_framework.test import APIRequestFactory
+
+        from stocks import views
+
+        req = APIRequestFactory().get('/api/market/')
+        with mock.patch.object(views, 'get_market_overview', side_effect=RuntimeError('upstream down')), \
+                self.assertLogs('stocks.views', level='ERROR') as cm:
+            r = views.market_overview(req)
+        self.assertEqual(r.status_code, 502)
+        self.assertTrue(any('Traceback' in m or 'upstream down' in m for m in cm.output))
+
+        req = APIRequestFactory().get('/api/market/sectors/')
+        with mock.patch.object(views, 'get_sector_rotation', side_effect=RuntimeError('x')), \
+                self.assertLogs('stocks.views', level='ERROR'):
+            self.assertEqual(views.market_sectors(req).status_code, 502)
+
+        req = APIRequestFactory().get('/api/market/institutions/')
+        with mock.patch.object(views, 'get_institution_holdings', side_effect=RuntimeError('x')), \
+                self.assertLogs('stocks.views', level='ERROR'):
+            self.assertEqual(views.market_institutions(req).status_code, 502)

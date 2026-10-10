@@ -30,6 +30,7 @@ from .ai.views import (
     screener_ai,
     screener_ai_comment,
 )
+from .health import health
 from .detector.views import (
     detector_config,
     detector_heatmap,
@@ -42,6 +43,7 @@ router.register(r'stocks', StockViewSet, basename='stock')
 router.register(r'ai-providers', AiProviderViewSet, basename='ai-provider')
 
 urlpatterns = [
+    path('health/', health, name='health'),
     path('', include(router.urls)),
     path('stocks/<int:pk>/ai-analysis/', stock_ai_analysis, name='stock-ai-analysis'),
     path('screener/', screener, name='screener'),
