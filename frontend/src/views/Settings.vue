@@ -168,7 +168,8 @@ onMounted(load)
         </div>
         <div class="field">
           <label>API Key {{ form.id ? '（留空则不修改）' : '' }}</label>
-          <input v-model="form.api_key" type="password" placeholder="sk-..." />
+          <!-- new-password：防止浏览器把站点登录密码自动填进来一并提交（FEF-17） -->
+          <input v-model="form.api_key" type="password" autocomplete="new-password" placeholder="sk-..." />
         </div>
         <div class="field row">
           <label class="checkbox">
