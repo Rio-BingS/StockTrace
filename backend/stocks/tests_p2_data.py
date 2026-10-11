@@ -201,9 +201,9 @@ class MetaAccuracyTests(SimpleTestCase):
     """DAT-19：data_as_of 跟数据走；ETF 历史 items 与来源同一缓存值；份额曲线 meta 不再恒为 unavailable。"""
 
     def test_data_as_of_prefers_source_data_date(self):
-        from .market._cache import _cache_meta, _cache_set
+        from .market._cache import _cache_meta, cache_set
 
-        _cache_set('k_meta', [1])
+        cache_set('k_meta', [1])
         meta = _cache_meta('k_meta', 60, 'src', True, source_data_date='2026-09-04')
         self.assertEqual(meta['data_as_of'], '2026-09-04')
         meta = _cache_meta('k_meta', 60, 'src', True)

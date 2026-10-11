@@ -96,7 +96,7 @@ def _etf_spot_fresh_for(trade_date):
     """确保 ETF 现货缓存是 trade_date 收盘（15:00）后写入的新数据（DAT-09）。
 
     缓存过旧或不存在时 force 重拉；重拉失败时 _fetch_etf_spot_df 会退回旧缓存
-    （_stale_or），写入时间早于该交易日 15:00 就判为不新鲜，调用方不得落库。
+    （stale_or），写入时间早于该交易日 15:00 就判为不新鲜，调用方不得落库。
     """
     from . import etf
     from ._cache import _cache_written_at

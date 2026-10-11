@@ -248,10 +248,3 @@ def _now_str():
 
     return timezone.localtime().strftime('%Y-%m-%d %H:%M:%S')
 
-
-# 旧私有名保留一版（ARC-01）：market 包内部与既有测试仍在用；
-# 包外（ai/valuation 等）请用公开名 cache_get / cache_set / is_fresh / stale_or
-_cache_get = cache_get
-_cache_set = cache_set
-_is_fresh = is_fresh
-_stale_or = stale_or

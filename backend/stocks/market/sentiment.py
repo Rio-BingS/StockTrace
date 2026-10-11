@@ -9,7 +9,7 @@ import akshare as ak
 import pandas as pd
 from django.utils import timezone
 
-from ._cache import _cache_get, _cache_meta, _cache_set, _stale_or, _to_float
+from ._cache import cache_get, _cache_meta, cache_set, stale_or, _to_float
 from ._sources import _safe_df_call
 from .. import trading_calendar
 
@@ -61,7 +61,7 @@ def fetch_zt_sentiment(ttl=600, force=False):
     并在 message 中如实标注；封板率 = 涨停 / (涨停 + 炸板)。
     """
     if not force:
-        cached = _cache_get('zt_sentiment', ttl)
+        cached = cache_get('zt_sentiment', ttl)
         if cached is not None:
             return cached
 
@@ -83,7 +83,7 @@ def fetch_zt_sentiment(ttl=600, force=False):
         break
 
     if chosen is None:
-        return _stale_or('zt_sentiment', {
+        return stale_or('zt_sentiment', {
             'available': False,
             'message': '涨停池数据暂不可用（非交易时段或上游异常），稍后再试',
             'meta': _cache_meta('zt_sentiment', ttl, '东方财富涨停/跌停/炸板股池', False),
@@ -116,7 +116,7 @@ def fetch_zt_sentiment(ttl=600, force=False):
             disclaimer='盘中共为实时池口径，收盘后为全天口径；封板率 = 涨停/(涨停+炸板)。',
         ),
     }
-    _cache_set('zt_sentiment', data)
+    cache_set('zt_sentiment', data)
     return data
 
 
@@ -207,7 +207,7 @@ def fetch_margin_balance(ttl=21600, force=False):
     深市整体不可用时降级为沪市口径并如实标注。
     """
     if not force:
-        cached = _cache_get('margin_balance', ttl)
+        cached = cache_get('margin_balance', ttl)
         if cached is not None:
             return cached
 
@@ -240,11 +240,11 @@ def fetch_margin_balance(ttl=21600, force=False):
         if data['chg_1d'] is None:
             data['message'] += '；前一日数据缺失，未计算日变化'
     else:
-        return _stale_or('margin_balance', {
+        return stale_or('margin_balance', {
             'available': False,
             'message': '两融余额数据暂不可用（交易所披露延迟或上游异常）',
             'meta': _cache_meta('margin_balance', ttl, '上交所/深交所两融汇总披露', False),
         })
 
-    _cache_set('margin_balance', data)
+    cache_set('margin_balance', data)
     return data

@@ -9,7 +9,7 @@ from __future__ import annotations
 import logging
 import akshare as ak
 
-from ._cache import _cache_get, _cache_meta, _cache_set, _stale_or, _to_float
+from ._cache import cache_get, _cache_meta, cache_set, stale_or, _to_float
 from ..trading_calendar import prev_trading_day as _prev_trading_day
 from ..trading_calendar import recent_day_candidates as _recent_day_candidates
 
@@ -71,7 +71,7 @@ _SOURCES = {'sse': ('stock_margin_detail_sse', '上交所两融明细'),
 def _day_detail(kind, date_obj):
     """某交易所某日全市场明细（进程缓存 key：margin_detail_{kind}_{date}）。"""
     key = f'margin_detail_{kind}_{date_obj.strftime("%Y%m%d")}'
-    cached = _cache_get(key, 21600)
+    cached = cache_get(key, 21600)
     if cached is not None:
         return cached
     fn_name, label = _SOURCES[kind]
@@ -84,7 +84,7 @@ def _day_detail(kind, date_obj):
         return None
     detail = _PARSERS[kind](df)
     if detail:
-        _cache_set(key, detail)
+        cache_set(key, detail)
     return detail
 
 
@@ -104,7 +104,7 @@ def fetch_stock_margin(code, ttl=21600, force=False):
 
     key = f'stock_margin_{code}'
     if not force:
-        cached = _cache_get(key, ttl)
+        cached = cache_get(key, ttl)
         if cached is not None:
             return cached
 
@@ -118,7 +118,7 @@ def fetch_stock_margin(code, ttl=21600, force=False):
             latest = (d, detail[code])
             break
     if latest is None:
-        return _stale_or(key, {
+        return stale_or(key, {
             'available': False,
             'message': '未查到该股两融明细（可能非两融标的或披露延迟）',
             'meta': _cache_meta(key, ttl, '上交所/深交所两融明细', False),
@@ -151,5 +151,5 @@ def fetch_stock_margin(code, ttl=21600, force=False):
             data['chg_pct_1d'] = round(chg / prev_row['rz'] * 100, 2) if prev_row['rz'] else None
     except Exception as e:  # noqa: BLE001 边界：前一日明细只影响 chg_1d，其拉取/解析异常类型不固定
         logger.warning("个股两融前一日明细获取失败（%s）: %s", code, e)
-    _cache_set(key, data)
+    cache_set(key, data)
     return data

@@ -4,7 +4,7 @@
 - @api_view 函数视图 + 统一 meta（available/source/data_as_of/cache_status/
   disclaimer），前端 MarketDataStatus 组件直接可读；
 - 上游/快照不足不报 500，而是在 meta 与 message 里如实降级；
-- 分页复用 market._query 的 _paginate（page/page_size，默认 50 上限 100）。
+- 分页复用 common.pagination.paginate（page/page_size，默认 50 上限 100）。
 """
 
 from __future__ import annotations
@@ -18,7 +18,7 @@ from rest_framework.decorators import api_view
 from rest_framework.response import Response
 
 from ..common.envelope import envelope
-from ..common.pagination import paginate as _paginate
+from ..common.pagination import paginate
 from ..common.params import parse_bool, parse_date, positive_int
 from ..trading_calendar import expected_latest_date
 from ..models import DetectorDimConfig, DetectorRun, DetectorSignal
@@ -155,7 +155,7 @@ def detector_signals(request):
     rows = [_signal_row(s) for s in qs]
     if not all_dates and trade_date is None and latest_run is not None:
         rows.sort(key=lambda r: r['score'], reverse=True)
-    items, pagination = _paginate(
+    items, pagination = paginate(
         rows,
         positive_int(request.query_params, 'page', 1),
         # page_size 小于 1 钳到 1（不是回退 50），上限 100：保持接入前的口径

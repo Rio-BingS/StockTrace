@@ -100,9 +100,9 @@ class ProcessCacheResetTests(SimpleTestCase):
         from stocks import trading_calendar
         from stocks.ai import valuation
         from stocks.market import _sources
-        from stocks.market._cache import _cache, _cache_set
+        from stocks.market._cache import _cache, cache_set
 
-        _cache_set('k', 1)
+        cache_set('k', 1)
         _sources._source_state['src'] = {'fails': 9, 'cool_until': 9e18}
         trading_calendar._trade_day_cache['d'] = (True, 9e18)
         trading_calendar._trade_calendar_set = {1}

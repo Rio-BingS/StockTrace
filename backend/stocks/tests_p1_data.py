@@ -280,9 +280,9 @@ class NegativeCacheTests(SimpleTestCase):
     def test_empty_result_negative_cached_60s_only(self):
         c = self.c
         with patch('stocks.market._cache.time.time', return_value=1000.0):
-            c._cache_set('k', {'available': False, 'items': []})
-            self.assertEqual(c._cache_get('k', 600), {'available': False, 'items': []})
-            self.assertEqual(c._stale_or('k', 'default'), 'default')
+            c.cache_set('k', {'available': False, 'items': []})
+            self.assertEqual(c.cache_get('k', 600), {'available': False, 'items': []})
+            self.assertEqual(c.stale_or('k', 'default'), 'default')
             self.assertEqual(c._cache_meta('k', 600, 's', False)['cache_status'], 'unavailable')
         # 61 秒后即失效，即使收盘后保鲜条件成立也不算新鲜
         with patch('stocks.market._cache.time.time', return_value=1061.0), \
@@ -290,23 +290,23 @@ class NegativeCacheTests(SimpleTestCase):
                 patch('stocks.market._cache._data_changing_now', return_value=False), \
                 patch('stocks.market._cache._last_session_close') as close:
             close.return_value = timezone.make_aware(datetime(1970, 1, 1))
-            self.assertIsNone(c._cache_get('k', 600))
+            self.assertIsNone(c.cache_get('k', 600))
 
     def test_empty_does_not_overwrite_good_data(self):
         c = self.c
         with patch('stocks.market._cache.time.time', return_value=1000.0):
-            c._cache_set('k', [1, 2])
+            c.cache_set('k', [1, 2])
         with patch('stocks.market._cache.time.time', return_value=1200.0):
-            self.assertIsNone(c._cache_get('k', 60))  # 好数据已过期
-            c._cache_set('k', [])                    # 重拉失败
-            self.assertEqual(c._cache_get('k', 60), [1, 2])  # 60s 内沿用旧数据
-            self.assertEqual(c._stale_or('k', None), [1, 2])
+            self.assertIsNone(c.cache_get('k', 60))  # 好数据已过期
+            c.cache_set('k', [])                    # 重拉失败
+            self.assertEqual(c.cache_get('k', 60), [1, 2])  # 60s 内沿用旧数据
+            self.assertEqual(c.stale_or('k', None), [1, 2])
             self.assertEqual(c._cache_meta('k', 60, 's', True)['cache_status'], 'stale')
         with patch('stocks.market._cache.time.time', return_value=1300.0):
-            self.assertIsNone(c._cache_get('k', 60))
-            self.assertEqual(c._stale_or('k', None), [1, 2])
-            c._cache_set('k', [3])
-            self.assertEqual(c._cache_get('k', 60), [3])
+            self.assertIsNone(c.cache_get('k', 60))
+            self.assertEqual(c.stale_or('k', None), [1, 2])
+            c.cache_set('k', [3])
+            self.assertEqual(c.cache_get('k', 60), [3])
 
     def test_safe_df_call_empty_ok(self):
         from .market import _sources
@@ -357,11 +357,11 @@ class CacheConcurrencyTests(SimpleTestCase):
 
     def test_hit_moves_to_end(self):
         c = self.c
-        c._cache_set('hot', 1)
+        c.cache_set('hot', 1)
         for i in range(255):
-            c._cache_set(f'k{i}', i)
-        self.assertEqual(c._cache_get('hot', 60), 1)  # 命中提升为最近使用
-        c._cache_set('new', 2)                         # 超限淘汰最旧的 k0
+            c.cache_set(f'k{i}', i)
+        self.assertEqual(c.cache_get('hot', 60), 1)  # 命中提升为最近使用
+        c.cache_set('new', 2)                         # 超限淘汰最旧的 k0
         self.assertIn('hot', c._cache)
         self.assertNotIn('k0', c._cache)
 
@@ -470,7 +470,7 @@ class SnapshotEtfFreshnessTests(TestCase):
         from .models import MarketDailySnapshot
         # 上一轮 14:00 写入的缓存（盘中数据），本轮重拉失败 → 退回旧缓存，不能落库
         with patch('stocks.market._cache.time.time', return_value=self._ts('14:00').timestamp()):
-            self.c._cache_set('etf_spot_df', self._df('2026-09-04'))
+            self.c.cache_set('etf_spot_df', self._df('2026-09-04'))
         with patch('stocks.market.snapshots.time.time', return_value=self._ts('16:00').timestamp()), \
                 patch('stocks.market._cache.time.time', return_value=self._ts('16:00').timestamp()):
             saved, spot = self._save(RuntimeError('em down'))
@@ -482,7 +482,7 @@ class SnapshotEtfFreshnessTests(TestCase):
     def test_fresh_cache_after_close_no_refetch(self):
         from .models import MarketDailySnapshot
         with patch('stocks.market._cache.time.time', return_value=self._ts('15:50').timestamp()):
-            self.c._cache_set('etf_spot_df', self._df('2026-09-04'))
+            self.c.cache_set('etf_spot_df', self._df('2026-09-04'))
         with patch('stocks.market.snapshots.time.time', return_value=self._ts('15:51').timestamp()), \
                 patch('stocks.market._cache.time.time', return_value=self._ts('15:51').timestamp()):
             saved, spot = self._save(RuntimeError('should not be called'))

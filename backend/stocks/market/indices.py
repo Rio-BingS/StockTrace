@@ -5,7 +5,7 @@ from __future__ import annotations
 import akshare as ak
 import pandas as pd
 
-from ._cache import _cache_get, _cache_meta, _cache_set, _stale_or, _to_float
+from ._cache import cache_get, _cache_meta, cache_set, stale_or, _to_float
 from ._sources import _safe_df_call
 
 MAJOR_INDICES = [
@@ -30,13 +30,13 @@ TREND_INDICES = [
 
 
 def fetch_major_indices(ttl=60):
-    cached = _cache_get('indices', ttl)
+    cached = cache_get('indices', ttl)
     if cached is not None:
         return cached
 
     df = _safe_df_call(ak.stock_zh_index_spot_sina, source_name='sina_index_spot')
     if df is None or df.empty:
-        return _stale_or('indices', [])
+        return stale_or('indices', [])
 
     by_code = {str(r['代码']): r for _, r in df.iterrows()}
     result = []
@@ -70,7 +70,7 @@ def fetch_major_indices(ttl=60):
             'volume': _to_float(row.get('成交量')),
             'turnover': _to_float(row.get('成交额')),
         })
-    _cache_set('indices', result)
+    cache_set('indices', result)
     return result
 
 
@@ -81,7 +81,7 @@ def fetch_index_trend(days=120, ttl=300, start=None, end=None):
     只传 end 时取截至 end 的最近 N 个交易日。
     """
     cache_key = f'trend_{days}_{start or ""}_{end or ""}'
-    cached = _cache_get(cache_key, ttl)
+    cached = cache_get(cache_key, ttl)
     if cached is not None:
         return cached
 
@@ -134,7 +134,7 @@ def fetch_index_trend(days=120, ttl=300, start=None, end=None):
         'series': series,
         'message': '' if series else '指数日线暂不可用',
     }
-    _cache_set(cache_key, data)
+    cache_set(cache_key, data)
     return data
 
 
@@ -148,7 +148,7 @@ def fetch_index_daily_series(code, days=70, ttl=300):
     上游失败如实 available=False，由探测器把该指数当天跳过。
     """
     cache_key = f'idx_series_{code}_{days}'
-    cached = _cache_get(cache_key, ttl)
+    cached = cache_get(cache_key, ttl)
     if cached is not None:
         return cached
 
@@ -175,7 +175,7 @@ def fetch_index_daily_series(code, days=70, ttl=300):
         'message': '' if items else '指数日线暂不可用',
     }
     if items:
-        _cache_set(cache_key, data)
+        cache_set(cache_key, data)
     return data
 
 # 乐咕乐股滚动市盈率覆盖的宽基（创业板指/科创50 该源未提供，如实缺席）
@@ -189,7 +189,7 @@ def fetch_index_valuations(ttl=21600, force=False):
     单只失败跳过，全部失败如实不可用。
     """
     if not force:
-        cached = _cache_get('index_valuations', ttl)
+        cached = cache_get('index_valuations', ttl)
         if cached is not None:
             return cached
 
@@ -226,5 +226,5 @@ def fetch_index_valuations(ttl=21600, force=False):
         ),
     }
     if items:
-        _cache_set('index_valuations', data)
+        cache_set('index_valuations', data)
     return data

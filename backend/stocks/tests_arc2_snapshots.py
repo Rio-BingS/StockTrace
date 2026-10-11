@@ -272,8 +272,8 @@ class PeriodSnapshotTests(SnapshotMixin, SimpleTestCase):
         rows = _flow_rows()
         out = []
         with mock.patch.object(etf_flow, 'flow_history', return_value=rows), \
-                mock.patch.object(etf_flow, '_cache_get', return_value=None), \
-                mock.patch.object(etf_flow, '_cache_set'), \
+                mock.patch.object(etf_flow, 'cache_get', return_value=None), \
+                mock.patch.object(etf_flow, 'cache_set'), \
                 mock.patch.object(etf_flow, '_cache_meta', side_effect=_meta_stub), \
                 mock.patch.object(etf_flow.time, 'sleep'):
             for q in _FLOW_QUERIES:

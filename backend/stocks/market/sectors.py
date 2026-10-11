@@ -14,8 +14,9 @@ import requests
 
 from ..common.envelope import envelope
 from ..errors import BadRequest
-from ._cache import _cache_get, _cache_meta, _cache_set, _now_str, _to_float
-from ._query import _paginate, _sort_items
+from ._cache import cache_get, _cache_meta, cache_set, _now_str, _to_float
+from ..common.pagination import paginate
+from ._query import _sort_items
 from ._sources import _safe_df_call
 
 logger = logging.getLogger(__name__)
@@ -41,7 +42,7 @@ _THS_DAY_SOURCE = {
 }
 
 
-def _parse_fund_flow_table(df, name_col_candidates):
+def parse_fund_flow_table(df, name_col_candidates):
     if df is None or df.empty:
         return []
 
@@ -237,12 +238,12 @@ def fetch_concept_fund_flow(period='day', ttl=180):
     """同花顺概念板块当日资金流（元）；多日口径走日度快照，见 _snapshot_rotation。"""
     _require_day(period)
     cache_key = f'concept_ff_{period}'
-    cached = _cache_get(cache_key, ttl)
+    cached = cache_get(cache_key, ttl)
     if cached is not None:
         return cached
     df = _ths_fund_flow_df('concept', 'ths_fund_flow_concept')
-    data = _parse_fund_flow_table(df, ['概念', '行业'])
-    _cache_set(cache_key, data)
+    data = parse_fund_flow_table(df, ['概念', '行业'])
+    cache_set(cache_key, data)
     return data
 
 
@@ -250,12 +251,12 @@ def fetch_industry_fund_flow(period='day', ttl=180):
     """同花顺行业板块当日资金流（元）；多日口径走日度快照，见 _snapshot_rotation。"""
     _require_day(period)
     cache_key = f'industry_ff_{period}'
-    cached = _cache_get(cache_key, ttl)
+    cached = cache_get(cache_key, ttl)
     if cached is not None:
         return cached
     df = _ths_fund_flow_df('industry', 'ths_fund_flow_industry')
-    data = _parse_fund_flow_table(df, ['行业'])
-    _cache_set(cache_key, data)
+    data = parse_fund_flow_table(df, ['行业'])
+    cache_set(cache_key, data)
     return data
 
 
@@ -268,7 +269,7 @@ def _sector_payload(
         items = [item for item in items if needle in item['name'].lower() or needle in (item.get('leader') or '').lower()]
 
     sorted_items = _sort_items(items, _SECTOR_SORT_FIELDS[sort], order)
-    page_items, pagination = _paginate(sorted_items, page, page_size)
+    page_items, pagination = paginate(sorted_items, page, page_size)
     inflow = sorted((item for item in items if item['net'] > 0), key=lambda item: item['net'], reverse=True)
     outflow = sorted((item for item in items if item['net'] < 0), key=lambda item: item['net'])
     neutral = [item for item in items if item['net'] == 0]

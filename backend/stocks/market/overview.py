@@ -129,13 +129,13 @@ def warm_post_close_lagging():
         from django.utils import timezone as _tz
 
         from ..alerts import push_message
-        from ._cache import _cache_get, _cache_set
+        from ._cache import cache_get, cache_set
 
         missing = snapshots.verify_daily_snapshots()
         if missing:
             key = f"snapshot_alert_{_tz.localdate().isoformat()}"
-            if _cache_get(key, 86400) is None:
-                _cache_set(key, missing)
+            if cache_get(key, 86400) is None:
+                cache_set(key, missing)
                 logger.warning("日度快照自检缺失: %s", missing)
                 push_message(
                     'StockTrace 快照自检告警',
