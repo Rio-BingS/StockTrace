@@ -13,6 +13,7 @@ import akshare as ak
 import pandas as pd
 import requests
 
+from ..common.envelope import envelope
 from ._cache import _cache_get, _cache_meta, _cache_set, _now_str, _to_float
 from ._query import _paginate, _sort_items
 from ._sources import _safe_df_call
@@ -355,18 +356,27 @@ def get_sector_rotation(board='industry', period='day', q='', sort='net', order=
         loader(period=period), board, period=period,
         q=q, sort=sort, order=order, page=page, page_size=page_size,
     )
-    return {
-        'updated_at': _now_str(),
-        'basis': 'ths_day',
-        'meta': _cache_meta(
+    return _rotation_envelope(
+        payload,
+        _cache_meta(
             cache_key,
             180,
             _THS_DAY_SOURCE[board],
             payload['available'],
             disclaimer=payload['methodology'],
         ),
-        **payload,
-    }
+        updated_at=_now_str(),
+        basis='ths_day',
+    )
+
+
+def _rotation_envelope(payload, meta, **head):
+    """板块轮动响应：{**head, meta, **payload}，经 envelope 输出（键顺序与旧实现一致，ARC-04）。"""
+    rest = {k: v for k, v in payload.items() if k not in ('items', 'pagination')}
+    return envelope(
+        payload['items'], payload['pagination'], meta,
+        key_order=(*head, 'meta', *payload), **head, **rest,
+    )
 
 
 def _snapshot_rotation(board, period, q='', order='desc', page=1, page_size=50):
@@ -400,14 +410,14 @@ def _snapshot_rotation(board, period, q='', order='desc', page=1, page_size=50):
         items, board, period=period, q=q, sort='net', order=order,
         page=page, page_size=page_size, message=message,
     )
-    return {
-        'updated_at': _now_str(),
-        'basis': 'ths_snapshot',
-        'meta': snapshots.snapshot_meta(
+    return _rotation_envelope(
+        payload,
+        snapshots.snapshot_meta(
             f'MarketDailySnapshot({kind}) n={n}（同花顺当日净额逐日累加）',
             bool(items),
             latest=latest,
             message=message,
         ),
-        **payload,
-    }
+        updated_at=_now_str(),
+        basis='ths_snapshot',
+    )

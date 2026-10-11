@@ -76,3 +76,21 @@ class ParseDateTests(SimpleTestCase):
                 req = SimpleNamespace(query_params=params)
                 self.assertEqual(dv._positive_int(req, 'page', 1), positive_int(params, 'page', 1))
                 self.assertEqual(dv._positive_int(req, 'page', 1, 100), positive_int(params, 'page', 1, 100))
+
+
+class EnvelopeTests(SimpleTestCase):
+    def test_default_order(self):
+        from .common.envelope import envelope
+
+        body = envelope([1], {'page': 1}, {'m': 1}, extra=2)
+        self.assertEqual(list(body), ['items', 'pagination', 'meta', 'extra'])
+
+    def test_key_order_keeps_legacy_layout_and_rejects_mismatch(self):
+        from .common.envelope import envelope
+
+        body = envelope([], None, {}, key_order=('a', 'meta', 'items', 'pagination'), a=1)
+        self.assertEqual(list(body), ['a', 'meta', 'items', 'pagination'])
+        with self.assertRaises(ValueError):
+            envelope([], key_order=('items', 'meta'))
+        with self.assertRaises(ValueError):
+            envelope([], key_order=('items', 'pagination', 'meta', 'ghost'))

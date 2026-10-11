@@ -7,6 +7,7 @@ from datetime import datetime, timedelta
 import akshare as ak
 from django.utils import timezone
 
+from ..common.envelope import envelope
 from ._cache import _cache_get, _cache_meta, _cache_set, _now_str, _stale_or, _to_float
 from .holders import fetch_holder_structure
 from ._query import _paginate, _sort_items
@@ -186,10 +187,10 @@ def get_etf_share_radar(
     total_turnover = sum(item['turnover'] for item in scoped_items if item.get('turnover') is not None)
     data_dates = [item['data_date'] for item in scoped_items if item.get('data_date')]
 
-    return {
-        'updated_at': _now_str(),
-        'available': bool(all_items),
-        'meta': _cache_meta(
+    return envelope(
+        page_items,
+        pagination,
+        _cache_meta(
             'etf_spot_df',
             ttl,
             'akshare.fund_etf_spot_em',
@@ -197,13 +198,16 @@ def get_etf_share_radar(
             source_data_date=max(data_dates) if data_dates else None,
             disclaimer='最新份额与资金流为市场源当前快照；股票/宽基范围为研究用规则筛选，非基金官方分类。',
         ),
-        'scope': {
+        key_order=_ETF_RADAR_KEY_ORDER,
+        updated_at=_now_str(),
+        available=bool(all_items),
+        scope={
             'active': scope,
             'rule_version': _ETF_SCOPE_RULE_VERSION,
             'all_count': len(all_items),
             'equity_broad_count': sum(1 for item in all_items if item['scope_match']),
         },
-        'summary': {
+        summary={
             'count': len(scoped_items),
             'share_available_count': sum(1 for item in scoped_items if item.get('share') is not None),
             'positive_main_net_count': sum(1 for item in scoped_items if (item.get('main_net') or 0) > 0),
@@ -211,12 +215,10 @@ def get_etf_share_radar(
             'total_main_net': total_main,
             'total_turnover': total_turnover,
         },
-        'rank': rank,
-        'sort': sort_field,
-        'order': sort_order,
-        'pagination': pagination,
-        'items': page_items,
-        'supported_metrics': {
+        rank=rank,
+        sort=sort_field,
+        order=sort_order,
+        supported_metrics={
             'share_change_1d': share_chg_maps[1] is not None,
             'share_change_5d': share_chg_maps[5] is not None,
             'share_change_20d': share_chg_maps[20] is not None,
@@ -225,8 +227,15 @@ def get_etf_share_radar(
                 '快照积累齐全后自动开放。'
             ),
         },
-        'message': '' if all_items else 'ETF 行情暂不可用',
-    }
+        message='' if all_items else 'ETF 行情暂不可用',
+    )
+
+
+# ETF 雷达已上线的 JSON 键顺序（envelope 按此输出，保证响应逐字节不变，ARC-04）
+_ETF_RADAR_KEY_ORDER = (
+    'updated_at', 'available', 'meta', 'scope', 'summary', 'rank', 'sort', 'order',
+    'pagination', 'items', 'supported_metrics', 'message',
+)
 
 
 def _etf_sina_symbol(code):
