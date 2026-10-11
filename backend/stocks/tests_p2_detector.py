@@ -971,3 +971,30 @@ class ScreenerSortTests(TestCase):
                 {'field': 'close_price', 'op': 'gt', 'value': 0}],
                 'order_by': 'rsi_14', 'order_dir': direction})
             self.assertEqual([r['code'] for r in rows], ['600001', '600002'], direction)
+
+
+class BuiltinStrategyConsistencyTests(TestCase):
+    """ALG-16：内置模板条件与描述一致。"""
+
+    def _spec(self, name):
+        from .ai.strategies import BUILTIN_STRATEGIES
+
+        return next(s['spec'] for s in BUILTIN_STRATEGIES if s['name'] == name)
+
+    def _match_all(self, spec, values):
+        from .ai.screener import _match
+
+        return all(_match(c['op'], c['value'], values[c['field']]) for c in spec['conditions'])
+
+    def test_low_pe_bluechip_excludes_zero_pe_and_small_caps(self):
+        spec = self._spec('低估值蓝筹')
+        good = {'pe_ttm': 8.0, 'pb': 1.0, 'total_mv': 1e11}
+        self.assertTrue(self._match_all(spec, good))
+        self.assertFalse(self._match_all(spec, {**good, 'pe_ttm': 0.0}))
+        self.assertFalse(self._match_all(spec, {**good, 'total_mv': 3e9}))
+
+    def test_pullback_requires_actual_drawdown(self):
+        spec = self._spec('缩量回调不破20日线')
+        base = {'above_ma20': 1, 'volume_ratio': 0.5}
+        self.assertFalse(self._match_all(spec, {**base, 'pct_from_high_20d': 0.0}))
+        self.assertTrue(self._match_all(spec, {**base, 'pct_from_high_20d': -5.0}))

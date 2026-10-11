@@ -54,9 +54,10 @@ BUILTIN_STRATEGIES = [
     },
     {
         'name': '缩量回调不破20日线',
-        'desc': '距20日高点回撤 ≤10% 且仍站上20日线、量比 ≤ 0.8',
+        # 回撤下限 2%（ALG-16）：旧条件 between [-10, 0] 包含 0，正在创新高的股票也算「回调」
+        'desc': '距20日最高收盘回撤 2%~10% 且仍站上20日线、量比 ≤ 0.8',
         'spec': {'logic': 'all', 'conditions': [
-            {'field': 'pct_from_high_20d', 'op': 'between', 'value': [-10, 0]},
+            {'field': 'pct_from_high_20d', 'op': 'between', 'value': [-10, -2]},
             {'field': 'above_ma20', 'op': 'eq', 'value': 1},
             {'field': 'volume_ratio', 'op': 'lte', 'value': 0.8},
         ]},
@@ -70,10 +71,14 @@ BUILTIN_STRATEGIES = [
     },
     {
         'name': '低估值蓝筹',
-        'desc': '0 < 市盈率(TTM) ≤ 15 且 市净率 ≤ 1.5',
+        # 与描述一致（ALG-16）：between [0, 15] 包含 PE=0（无意义/异常值），改为 gt 0 + lte 15；
+        # 「蓝筹」补上总市值门槛（500 亿元，total_mv 单位为元）
+        'desc': '0 < 市盈率(TTM) ≤ 15、市净率 ≤ 1.5 且总市值 ≥ 500 亿',
         'spec': {'logic': 'all', 'conditions': [
-            {'field': 'pe_ttm', 'op': 'between', 'value': [0, 15]},
+            {'field': 'pe_ttm', 'op': 'gt', 'value': 0},
+            {'field': 'pe_ttm', 'op': 'lte', 'value': 15},
             {'field': 'pb', 'op': 'lte', 'value': 1.5},
+            {'field': 'total_mv', 'op': 'gte', 'value': 50000000000},
         ], 'order_by': 'pe_ttm', 'order_dir': 'asc'},
     },
     {
