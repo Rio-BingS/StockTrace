@@ -408,3 +408,52 @@ class SchedulerStepIsolationTests(TestCase):
         trigger = str(sched.get_job('detector_scan').trigger)
         self.assertIn("hour='17-18'", trigger)
         self.assertIn("minute='15,45'", trigger)
+
+
+class FetchStockDataCommandTests(TestCase):
+    """REL-09：--all 传递 --days；失败/跳过/参数错误时非零退出。"""
+
+    CMD = 'stocks.management.commands.fetch_stock_data'
+
+    def setUp(self):
+        from stocks.models import Stock
+        Stock.objects.create(code='600000', name='A')
+        Stock.objects.create(code='600001', name='B')
+        sleep = mock.patch(f'{self.CMD}.time.sleep')
+        sleep.start()
+        self.addCleanup(sleep.stop)
+
+    def _call(self, *args):
+        from io import StringIO
+        from django.core.management import call_command
+        out = StringIO()
+        call_command('fetch_stock_data', *args, stdout=out)
+        return out.getvalue()
+
+    def test_all_passes_days(self):
+        with mock.patch(f'{self.CMD}.fetch_stock_all_data', return_value=3) as f:
+            self._call('--all', '--days', '4')
+        self.assertEqual(f.call_count, 2)
+        for call in f.call_args_list:
+            self.assertEqual(call.kwargs, {'days_back': 4})
+
+    def test_all_without_days_stays_light(self):
+        with mock.patch(f'{self.CMD}.fetch_stock_all_data', return_value=3) as f:
+            self._call('--all')
+        self.assertTrue(all(c.kwargs == {'light': True} for c in f.call_args_list))
+
+    def test_failures_exit_nonzero(self):
+        from django.core.management import CommandError
+        with mock.patch(f'{self.CMD}.fetch_stock_all_data', side_effect=[3, RuntimeError('x')]), \
+                self.assertRaises(CommandError) as ctx:
+            self._call('--all')
+        self.assertIn('1 只', str(ctx.exception))
+        with mock.patch(f'{self.CMD}.fetch_daily_data', return_value=0), \
+                self.assertRaises(CommandError):
+            self._call('600000', '--full-daily')
+
+    def test_bad_args_exit_nonzero(self):
+        from django.core.management import CommandError
+        for args in (('--days', '9', '--all'), ('999999',), (), ('--all', '--source', 'sina')):
+            with self.assertRaises(CommandError, msg=args):
+                self._call(*args)

@@ -250,7 +250,7 @@ class GuardedJobTests(_TmpRunDirMixin, SimpleTestCase):
     def test_commands_take_same_lock(self):
         from io import StringIO
 
-        from django.core.management import call_command
+        from django.core.management import CommandError, call_command
 
         err = StringIO()
         with mock.patch('stocks.detector.scan.run_scan') as rs, \
@@ -262,8 +262,10 @@ class GuardedJobTests(_TmpRunDirMixin, SimpleTestCase):
 
         out = StringIO()
         with mock.patch('stocks.management.commands.fetch_stock_data.task_lock') as tl, \
-                mock.patch('stocks.management.commands.fetch_stock_data.fetch_all_active_stocks') as fa:
+                mock.patch('stocks.management.commands.fetch_stock_data.fetch_stock_all_data') as fa, \
+                self.assertRaises(CommandError):
             tl.return_value.__enter__.return_value = False
+            # 锁被占用视为跳过，以非零退出码结束（REL-09）
             call_command('fetch_stock_data', '--all', stdout=out)
         tl.assert_called_once()
         self.assertEqual(tl.call_args.args[0], 'stock_quotes')
