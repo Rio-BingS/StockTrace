@@ -18,6 +18,12 @@ import {
   runReviewCells,
   TUNE_SOURCE_LABEL,
 } from '../utils/detectorReview.js'
+import {
+  dimScopeText,
+  dimThresholdText,
+  disabledText,
+  voteRuleText,
+} from '../utils/detectorDims.js'
 
 const loading = ref(false),
   error = ref('')
@@ -368,7 +374,7 @@ onUnmounted(() => {
                 <th>维度</th>
                 <th>适用对象</th>
                 <th>权重</th>
-                <th>投票门槛(min)</th>
+                <th>投票门槛</th>
                 <th>噪声分位</th>
                 <th>状态</th>
                 <th>口径说明</th>
@@ -377,29 +383,24 @@ onUnmounted(() => {
             <tbody>
               <tr v-for="dim in config.dims" :key="dim.key">
                 <td class="name">{{ dim.name }}</td>
-                <td>
-                  {{
-                    dim.params && dim.key === 'margin_north'
-                      ? '指数'
-                      : dim.key === 'big_order_net'
-                        ? '指数/板块'
-                        : dim.key === 'vol_ratio_slope' || dim.key === 'turnover_pct'
-                          ? '指数/自选股'
-                          : '全部'
-                  }}
-                </td>
+                <td>{{ dimScopeText(dim) }}</td>
                 <td>{{ dim.weight?.toFixed?.(2) }}</td>
-                <td>{{ dim.params?.min ?? '-' }}</td>
+                <td>{{ dimThresholdText(dim) }}</td>
                 <td>{{ dim.params?.noise_pct ?? '-' }}</td>
                 <td>
                   <span v-if="dim.enabled" class="status active">启用</span>
-                  <span v-else class="status missed" :title="dim.disabled_reason">停用</span>
+                  <span v-else class="status missed" :title="dim.disabled_reason">{{
+                    disabledText(dim)
+                  }}</span>
                 </td>
                 <td class="note-cell">{{ dim.note }}</td>
               </tr>
             </tbody>
           </table>
         </div>
+        <p v-if="voteRuleText(config.vote_rules)" class="hint">
+          投票规则：{{ voteRuleText(config.vote_rules) }}
+        </p>
         <p class="hint">
           回看规则：每交易日回看
           {{ config.review_rules.lookback_days }}
@@ -495,7 +496,8 @@ onUnmounted(() => {
         </div>
       </template>
       <p v-else-if="!showConfig" class="hint">
-        委比挂单、板块内分化两个维度因无数据源暂未启用（原因与口径见展开后的说明）。
+        委比挂单、板块内分化两个维度因无数据源暂未启用，量价相关性为离线回测未证明有效的候选维度、
+        默认停用（原因与口径见展开后的说明）。
       </p>
     </section>
   </div>

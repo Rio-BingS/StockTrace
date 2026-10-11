@@ -142,7 +142,7 @@ onMounted(load)
           class="dim-chip disabled"
         >
           <b>{{ dim.name }}</b>
-          <span>未启用</span>
+          <span>{{ dim.disabled_kind === 'candidate' ? '候选维度' : '未启用' }}</span>
           <small>{{ dim.disabled_reason }}</small>
         </div>
       </div>

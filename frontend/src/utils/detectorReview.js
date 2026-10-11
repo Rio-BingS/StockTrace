@@ -61,12 +61,26 @@ export function baseText(base, kind) {
   return REVIEW_BASE_TEXT[key] || '-'
 }
 
+/** 变更值：标量原样；对象（迁移重置整组参数）只说有几项变化，不铺开 JSON */
+function changedKeys(a, b) {
+  const x = a && typeof a === 'object' ? a : {}
+  const y = b && typeof b === 'object' ? b : {}
+  const keys = new Set([...Object.keys(x), ...Object.keys(y)])
+  return [...keys].filter((k) => JSON.stringify(x[k]) !== JSON.stringify(y[k])).length
+}
+
 /** 调参流水的参数变更 {k: [旧, 新]} → 'weight 1→1.2、noise_pct 0.8→0.75' */
 export function fmtChanges(changes) {
   const entries = Object.entries(changes || {})
   if (!entries.length) return '-'
   return entries
-    .map(([k, v]) => (Array.isArray(v) ? `${k} ${v[0]}→${v[1]}` : `${k} ${v}`))
+    .map(([k, v]) => {
+      if (!Array.isArray(v)) return `${k} ${v}`
+      if (typeof v[0] === 'object' || typeof v[1] === 'object') {
+        return `${k} 重置（${changedKeys(v[0], v[1])} 项变化）`
+      }
+      return `${k} ${v[0]}→${v[1]}`
+    })
     .join('、')
 }
 
