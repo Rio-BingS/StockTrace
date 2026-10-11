@@ -4,7 +4,7 @@ APScheduler 集成到 Django
 在 Django 启动时自动注册定时任务：
 1. 开盘前 08:50 增量日线（预热，避免手动时补大段）
 2. 盘中每5分钟更新分钟数据（随后评估价格提醒）
-3. 收盘后 15:10 汇总当日日线+分钟（自选库最后一次自动写入；随后评估价格提醒、清理 AI 调用记录）
+3. 收盘后 15:10 汇总当日日线+分钟（自选库最后一次自动写入；随后评估价格提醒、清理 AI 调用记录与后台任务）
 4. 收盘后 15:30–21:00 每30分钟预热晚到行情缓存并落日度快照（交易日）
 5. 每交易日 17:15 探测器扫描（板块/大盘快照已在前两轮预热落库后）
 6. 每日 02:30 清理超出保留期的分钟 K 线
@@ -183,6 +183,7 @@ def _daily_summary_job():
         ('收盘日线汇总', fetch_daily_summary),
         ('价格提醒评估', _evaluate_alerts),
         ('AI 调用记录清理', _cleanup_ai_logs),
+        ('AI 后台任务清理', _cleanup_ai_jobs),
         ('市场快照清理', _cleanup_market_snapshots),
     ])
 
@@ -210,6 +211,19 @@ def _cleanup_ai_logs():
             logger.info(f"清理 {days} 天前的 AI 调用记录 {deleted} 条")
     except Exception as e:
         logger.error(f"AI 调用记录清理失败: {e}")
+
+
+def _cleanup_ai_jobs():
+    """AI 后台任务兜底：中断/排队超时的标失败并结清占位流水，删除超过保留期的任务行。
+
+    Web 进程的执行线程平时就会做这两件事；这里覆盖重启后再没人提交/轮询的情况。
+    """
+    from .ai import jobs as ai_jobs
+
+    interrupted, expired = ai_jobs.recover_stale()
+    deleted = ai_jobs.prune()
+    if interrupted or expired or deleted:
+        logger.info(f"AI 后台任务清理：中断 {interrupted}、排队超时 {expired}、删除 {deleted} 条")
 
 
 def _cleanup_market_snapshots():

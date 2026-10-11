@@ -535,21 +535,6 @@ class RuntimeVersionDeclTests(TestCase):
         self.assertEqual(out.stdout.strip(), '/srv/st-static', out.stderr[-500:])
 
 
-class _DeferredExecutor:
-    """替身执行器：submit 只记录，run_all() 时在当前线程执行（TestCase 事务内可见数据）。"""
-
-    def __init__(self):
-        self.calls = []
-
-    def submit(self, fn, *args):
-        self.calls.append((fn, args))
-
-    def run_all(self):
-        while self.calls:
-            fn, args = self.calls.pop(0)
-            fn(*args)
-
-
 class AiAsyncJobTests(TestCase):
     """P1 遗留：个股 AI 分析异步化（202 + job_id + 轮询），默认仍同步。"""
 
@@ -558,16 +543,12 @@ class AiAsyncJobTests(TestCase):
         self.provider, self.stock = _ai_fixtures()
         self.post = _ai_patches(self)
         self.client = APIClient()
-        self.executor = _DeferredExecutor()
-        patcher = mock.patch.object(jobs, '_get_executor', return_value=self.executor)
+        # 任务已落库（AiJob）：不起后台线程，用 run_pending() 在当前线程执行，
+        # TestCase 事务内的数据对它可见
+        patcher = mock.patch.object(jobs, 'ensure_worker')
         patcher.start()
         self.addCleanup(patcher.stop)
-        jobs._jobs.clear()
-        self.addCleanup(jobs._jobs.clear)
-        # 后台线程里会关连接；测试里在主线程执行，别关掉 TestCase 的事务连接
-        close = mock.patch.object(jobs, 'close_old_connections')
-        close.start()
-        self.addCleanup(close.stop)
+        self.run_all = jobs.run_pending
 
     def _url(self):
         return f'/api/stocks/{self.stock.id}/ai-analysis/'
@@ -587,7 +568,7 @@ class AiAsyncJobTests(TestCase):
         poll = self.client.get(f'/api/ai/jobs/{job_id}/')
         self.assertEqual(poll.data['status'], 'queued')
         self.assertEqual(poll.data['queued_ahead'], 0)
-        self.executor.run_all()
+        self.run_all()
         poll = self.client.get(f'/api/ai/jobs/{job_id}/')
         self.assertEqual(poll.data['status'], 'done')
         self.assertEqual(poll.data['http_status'], 200)
@@ -600,7 +581,7 @@ class AiAsyncJobTests(TestCase):
         self.post.return_value = _fake_response(401, text='secret')
         r = self.client.post(self._url(), {'async': True}, format='json')
         self.assertEqual(r.status_code, 202)
-        self.executor.run_all()
+        self.run_all()
         poll = self.client.get(f"/api/ai/jobs/{r.data['job_id']}/")
         self.assertEqual(poll.data['status'], 'failed')
         self.assertEqual(poll.data['http_status'], 502)
@@ -632,34 +613,52 @@ class AiAsyncJobTests(TestCase):
         self.assertEqual(r.data['analysis'], '同步')
 
     def test_finished_jobs_pruned(self):
-        import time
+        from datetime import timedelta
+        from django.utils import timezone
         from stocks.ai import jobs
-        jobs._jobs['old'] = {'job_id': 'old', 'kind': 'analysis', 'status': 'done',
-                             'created_at': time.time() - 7200, 'finished_at': time.time() - 7200,
-                             'meta': {}}
-        jobs.submit('analysis', lambda: (200, {}))
+        from stocks.models import AiJob
+        old = timezone.now() - timedelta(hours=2)
+        AiJob.objects.create(job_id='old', kind='analysis', status='done',
+                             http_status=200, result={}, finished_at=old)
+        jobs.submit('analysis', {})
         self.assertIsNone(jobs.get('old'))
+        self.assertFalse(AiJob.objects.filter(job_id='old').exists())
 
 
 class AiAsyncJobThreadTests(TransactionTestCase):
     """真实后台线程跑一遍：结果可轮询，流水在后台线程里回填。"""
 
     def test_real_executor(self):
-        import time
         from stocks.ai import jobs
         from stocks.models import AiCallLog
         from stocks.tests_p1_ai import _ok
         provider, stock = _ai_fixtures()
         post = _ai_patches(self)
         post.return_value = _ok('线程结果')
+        # 空闲立即退出，用例结束时等线程收尾，不把轮询线程留给后面的用例
+        for name, value in (('IDLE_EXIT_SECONDS', 0), ('POLL_SECONDS', 0.01)):
+            patcher = mock.patch.object(jobs, name, value)
+            patcher.start()
+            self.addCleanup(patcher.stop)
+        self.addCleanup(self._join_worker, jobs)
         r = APIClient().post(f'/api/stocks/{stock.id}/ai-analysis/?async=1')
         self.assertEqual(r.status_code, 202)
-        deadline = time.time() + 10
-        while time.time() < deadline:
-            job = jobs.get(r.data['job_id'])
-            if job['status'] in ('done', 'failed'):
-                break
-            time.sleep(0.05)
+        # 测试库是共享缓存的内存 SQLite（表级锁），主线程边轮询边读会和后台线程写冲突；
+        # 改为等线程跑完空闲退出后再读结果（生产是 WAL 文件库，读写不互斥）
+        self._join_worker(jobs)
+        self.assertIsNone(jobs._worker_thread)
+        job = jobs.get(r.data['job_id'])
         self.assertEqual(job['status'], 'done', job)
         self.assertEqual(job['result']['analysis'], '线程结果')
         self.assertTrue(AiCallLog.objects.get().success)
+
+    @staticmethod
+    def _join_worker(jobs, timeout=10):
+        # 线程空闲退出时会把 _worker_thread 置空；可能已经退出，也可能还在跑
+        import time
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            thread = jobs._worker_thread
+            if thread is None or not thread.is_alive():
+                return
+            thread.join(0.1)

@@ -1,4 +1,5 @@
 from django.db import models
+from rest_framework.utils.encoders import JSONEncoder as DrfJSONEncoder
 
 
 class AiProvider(models.Model):
@@ -97,6 +98,56 @@ class AiCallLog(models.Model):
             models.Index(fields=['created_at'], name='aicalllog_created_idx'),
             models.Index(fields=['stock', 'purpose', 'created_at'], name='aicalllog_stock_purpose_idx'),
         ]
+
+
+class AiJob(models.Model):
+    """AI 后台任务（AIX-08 收尾：原进程内存队列落库）。
+
+    视图同步完成校验与额度预占后写一行 pending 任务并返回 202 + job_id；
+    Web 进程内的后台线程用条件 UPDATE 抢占（pending→running，多 worker 不重复执行），
+    结果与原 HTTP 状态码写回本表，前端轮询 /api/ai/jobs/<job_id>/ 读取。
+    进程重启后 pending 任务由任一 worker 继续执行；running 超过租约的按中断标失败。
+    """
+    STATUS_PENDING = 'pending'
+    STATUS_RUNNING = 'running'
+    STATUS_DONE = 'done'
+    STATUS_FAILED = 'failed'
+    STATUS_CHOICES = [
+        (STATUS_PENDING, '排队中'),
+        (STATUS_RUNNING, '执行中'),
+        (STATUS_DONE, '完成'),
+        (STATUS_FAILED, '失败'),
+    ]
+
+    job_id = models.CharField('任务 ID', max_length=32, unique=True)
+    kind = models.CharField('任务类型', max_length=30)
+    # 执行所需参数（提示词消息、占位流水 id 等）；结果按 DRF 的编码规则存，轮询返回与同步接口同形
+    params = models.JSONField('参数', default=dict, encoder=DrfJSONEncoder)
+    status = models.CharField('状态', max_length=10, choices=STATUS_CHOICES,
+                              default=STATUS_PENDING)
+    http_status = models.PositiveSmallIntegerField('结果状态码', null=True, blank=True)
+    result = models.JSONField('结果', null=True, blank=True, encoder=DrfJSONEncoder)
+    error = models.CharField('失败原因', max_length=200, null=True, blank=True)
+    # 认领者（主机:进程:随机串）与租约到期时刻：租约过期仍是 running 视为执行进程已退出
+    owner = models.CharField('执行者', max_length=80, null=True, blank=True)
+    lease_until = models.DateTimeField('租约到期', null=True, blank=True)
+    attempts = models.PositiveSmallIntegerField('认领次数', default=0)
+    created_at = models.DateTimeField('创建时间', auto_now_add=True)
+    started_at = models.DateTimeField('开始时间', null=True, blank=True)
+    finished_at = models.DateTimeField('结束时间', null=True, blank=True)
+
+    class Meta:
+        verbose_name = 'AI 后台任务'
+        verbose_name_plural = 'AI 后台任务'
+        ordering = ['id']
+        # 认领按 (status, id) 取最早的 pending；清理按 created_at 删旧行
+        indexes = [
+            models.Index(fields=['status', 'id'], name='aijob_status_idx'),
+            models.Index(fields=['created_at'], name='aijob_created_idx'),
+        ]
+
+    def __str__(self):
+        return f"{self.kind} {self.job_id} ({self.status})"
 
 
 class StockGroup(models.Model):
