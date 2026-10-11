@@ -59,3 +59,24 @@ export async function pollAiJob(
 export function isQueuedJob(res) {
   return res?.status === 202 && typeof res?.data?.job_id === 'string'
 }
+
+/**
+ * 提交 AI 请求并在需要时轮询后台任务，统一返回结果数据（P3：选股翻译/点评改走后台任务）。
+ *   submit(): 发起请求（如 aiApi.screenerAiAsync），返回 axios 响应
+ *   fetchJob(jobId): 查询任务（如 aiApi.aiJob）
+ * 后端返回 202 + job_id 时轮询直到结束；直接 200 时按同步结果返回（兼容旧后端）。
+ * 其余选项（signal、onStatus、intervalMs、timeoutMs）透传给 pollAiJob。
+ */
+export async function runAiJob(submit, fetchJob, options = {}) {
+  const res = await submit()
+  if (!isQueuedJob(res)) return res?.data || {}
+  options.onStatus?.({ status: res.data.status || 'queued', queued_ahead: 0 })
+  return pollAiJob(() => fetchJob(res.data.job_id), options)
+}
+
+// 后台任务阶段 → 按钮上的进度文字；running 时返回 fallback（如「AI 翻译中」）
+export function aiJobPhaseText(job, fallback) {
+  if (job?.status !== 'queued') return fallback
+  const ahead = Number(job.queued_ahead) || 0
+  return ahead > 0 ? `已排队（前面 ${ahead} 个）` : '已排队'
+}

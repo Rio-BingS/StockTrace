@@ -259,6 +259,14 @@ export const aiApi = {
   screenerComment(query, results, { signal } = {}) {
     return api.post('/screener/ai/comment/', { query, results }, { ...aiTimeout, signal })
   },
+
+  // 自然语言选股 / AI 点评（后台排队）：返回 202 + job_id，再用 aiJob 轮询结果
+  screenerAiAsync(query, { signal } = {}) {
+    return api.post('/screener/ai/?async=1', { query }, { timeout: 30000, signal })
+  },
+  screenerCommentAsync(query, results, { signal } = {}) {
+    return api.post('/screener/ai/comment/?async=1', { query, results }, { timeout: 30000, signal })
+  },
 }
 
 export default api
