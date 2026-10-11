@@ -197,3 +197,60 @@ class AiConcurrencyTests(TestCase):
         self.assertEqual(r.status_code, 502)  # content 为 None 不再 500
         with _AiSlot():
             pass  # 名额已释放，不抛 busy
+
+
+@override_settings(STOCKTRACE_LLM_MAX_RETRIES=0)
+@patch('stocks.ai.llm.socket.getaddrinfo', side_effect=_fake_getaddrinfo(_PUBLIC_DNS))
+@patch('stocks.ai.llm.requests.post')
+class AiErrorEchoTests(TestCase):
+    """SEC-07：个股分析、翻译、点评与 test 端点一致，不回显上游内容"""
+
+    SECRET = 'root:x:0:0:UPSTREAM-SECRET'
+
+    def setUp(self):
+        self.provider = _provider()
+        self.stock = Stock.objects.create(code='000001', name='测试')
+        DailyQuote.objects.create(
+            stock=self.stock, trade_date=date(2026, 9, 4),
+            open_price=Decimal('10'), close_price=Decimal('10.5'),
+            high_price=Decimal('10.8'), low_price=Decimal('9.9'),
+            open_close_diff=Decimal('0.5'), open_close_pct=Decimal('5'),
+            high_low_diff=Decimal('0.9'), high_low_pct=Decimal('9'),
+            change_pct=Decimal('5'), volume=1, turnover=Decimal('1'),
+        )
+
+    def _calls(self):
+        return [
+            self.client.post(f'/api/stocks/{self.stock.id}/ai-analysis/'),
+            self.client.post('/api/screener/ai/', {'query': '涨'},
+                             content_type='application/json'),
+            self.client.post('/api/screener/ai/comment/', {
+                'query': '涨', 'results': [{'code': '000001', 'name': '测试'}],
+            }, content_type='application/json'),
+        ]
+
+    def test_upstream_body_not_echoed(self, post, _dns):
+        post.return_value = _fake_response(500, text=self.SECRET)
+        for r in self._calls():
+            self.assertEqual(r.status_code, 502)
+            self.assertEqual(r.data['error'], 'upstream')
+            self.assertEqual(r.data['upstream_status'], 500)
+            self.assertNotIn('UPSTREAM-SECRET', r.content.decode())
+
+    def test_bad_json_reply_not_echoed(self, post, _dns):
+        post.return_value = _ok(self.SECRET)  # 翻译端点拿到非 JSON 文本
+        r = self.client.post('/api/screener/ai/', {'query': '涨'},
+                             content_type='application/json')
+        self.assertEqual(r.status_code, 502)
+        self.assertEqual(r.data['error'], 'bad_response')
+        self.assertNotIn('UPSTREAM-SECRET', r.content.decode())
+
+    def test_provider_test_empty_or_truncated_is_ok(self, post, _dns):
+        url = f'/api/ai-providers/{self.provider.id}/test/'
+        for resp in (_ok(content=None), _ok('o', finish_reason='length')):
+            post.return_value = resp
+            r = self.client.post(url)
+            self.assertEqual(r.status_code, 200)
+            self.assertEqual(r.data, {'status': 'ok'})
+        self.assertEqual(
+            AiCallLog.objects.filter(purpose='provider_test', success=True).count(), 2)

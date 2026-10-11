@@ -60,10 +60,13 @@ class AiProviderViewSet(viewsets.ModelViewSet):
                 # 并发已满：没有真正调用上游，撤销预占的流水
                 call_log.delete()
                 return _busy_response()
-            # 详情只进服务端日志（不含上游响应体），对外仅给分类
-            logger.warning('AI 服务商 %s 连通性测试失败：kind=%s status=%s',
-                           provider.pk, exc.kind, exc.status_code)
-            return _test_failed(exc.kind, exc.status_code)
+            if exc.kind not in _TEST_OK_KINDS:
+                # 详情只进服务端日志（不含上游响应体），对外仅给分类
+                logger.warning('AI 服务商 %s 连通性测试失败：kind=%s status=%s',
+                               provider.pk, exc.kind, exc.status_code)
+                return _test_failed(exc.kind, exc.status_code)
+            # 空回复/被截断说明 Key 与地址都通了（max_tokens 很小，推理模型常见）
+            usage = exc.usage
         call_log.success = True
         call_log.prompt_tokens = (usage or {}).get('prompt_tokens')
         call_log.completion_tokens = (usage or {}).get('completion_tokens')
@@ -71,6 +74,10 @@ class AiProviderViewSet(viewsets.ModelViewSet):
         return Response({'status': 'ok'})
 
 
+# test 端点视为"连接成功"的错误分类：上游已正常应答，只是内容为空或被截断
+_TEST_OK_KINDS = ('empty', 'truncated')
+
+# 对外的通用错误文案：所有 AI 端点只返回分类与状态码，不回显上游内容（SEC-07）
 _TEST_ERROR_TEXT = {
     'config': '配置无效：接口地址不合规或 API Key 无法解密，请检查后重新录入',
     'network': '无法连接到服务商',
@@ -80,6 +87,8 @@ _TEST_ERROR_TEXT = {
     'rate_limit': '服务商限流，请稍后再试',
     'bad_response': '服务商响应格式异常',
     'upstream': '服务商返回错误',
+    'empty': '服务商返回了空内容',
+    'truncated': 'AI 输出过长被截断，请稍后重试',
 }
 
 
@@ -99,6 +108,25 @@ def _test_failed(kind, status_code):
     return Response(
         {'status': 'failed', 'error': kind, 'upstream_status': status_code,
          'detail': message, 'message': message},
+        status=status.HTTP_502_BAD_GATEWAY,
+    )
+
+
+def _llm_failed(exc, purpose, provider, stock=None):
+    """AI 端点调用失败的统一出口：记流水、写日志，对外只给通用分类（SEC-07）。"""
+    kind = getattr(exc, 'kind', None) or 'config'
+    if kind == 'busy':
+        return _busy_response()
+    status_code = getattr(exc, 'status_code', None)
+    log_call(purpose, provider=provider, stock=stock, success=False,
+             usage=getattr(exc, 'usage', None))
+    logger.warning('AI 调用失败 purpose=%s stock=%s kind=%s status=%s: %s',
+                   purpose, stock.code if stock else '-', kind, status_code, exc)
+    message = _TEST_ERROR_TEXT.get(kind, _TEST_ERROR_TEXT['upstream'])
+    if status_code is not None and status_code != 200:
+        message = f'{message}（HTTP {status_code}）'
+    return Response(
+        {'detail': message, 'error': kind, 'upstream_status': status_code},
         status=status.HTTP_502_BAD_GATEWAY,
     )
 
@@ -132,12 +160,7 @@ def stock_ai_analysis(request, pk):
     try:
         text, usage = client.chat(build_analysis_messages(stock), max_tokens=1500)
     except (LlmError, ValueError) as exc:
-        if getattr(exc, 'kind', None) == 'busy':
-            return _busy_response()
-        log_call('analysis', provider=client.provider, stock=stock, success=False,
-                 usage=getattr(exc, 'usage', None))
-        logger.warning('AI 分析失败 %s: %s', stock.code, exc)
-        return Response({'detail': str(exc)}, status=status.HTTP_502_BAD_GATEWAY)
+        return _llm_failed(exc, 'analysis', client.provider, stock=stock)
 
     log_call('analysis', provider=client.provider, stock=stock, usage=usage)
     return Response({'analysis': text, 'disclaimer': DISCLAIMER})
@@ -171,11 +194,7 @@ def screener_ai(request):
     try:
         spec, usage = client.chat_json(build_translate_messages(query))
     except (LlmError, ValueError) as exc:
-        if getattr(exc, 'kind', None) == 'busy':
-            return _busy_response()
-        log_call('screener_translate', provider=client.provider, success=False,
-                 usage=getattr(exc, 'usage', None))
-        return Response({'detail': str(exc)}, status=status.HTTP_502_BAD_GATEWAY)
+        return _llm_failed(exc, 'screener_translate', client.provider)
 
     log_call('screener_translate', provider=client.provider, usage=usage)
 
@@ -211,11 +230,7 @@ def screener_ai_comment(request):
     try:
         text, usage = client.chat(build_comment_messages(rows, query), max_tokens=800)
     except (LlmError, ValueError) as exc:
-        if getattr(exc, 'kind', None) == 'busy':
-            return _busy_response()
-        log_call('screener_comment', provider=client.provider, success=False,
-                 usage=getattr(exc, 'usage', None))
-        return Response({'detail': str(exc)}, status=status.HTTP_502_BAD_GATEWAY)
+        return _llm_failed(exc, 'screener_comment', client.provider)
 
     log_call('screener_comment', provider=client.provider, usage=usage)
     return Response({'comment': text, 'disclaimer': DISCLAIMER})

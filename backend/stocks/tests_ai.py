@@ -323,10 +323,15 @@ class AiEndpointTests(TestCase):
     @patch('stocks.ai.views.LlmClient')
     def test_analysis_upstream_error_is_honest(self, mock_client_cls):
         mock_client_cls.return_value.provider = self.provider
-        mock_client_cls.return_value.chat.side_effect = LlmError('上游挂了')
+        mock_client_cls.return_value.chat.side_effect = LlmError(
+            '上游挂了', kind='upstream', status_code=500)
         response = self.client.post(f'/api/stocks/{self.stock.id}/ai-analysis/')
         self.assertEqual(response.status_code, 502)
-        self.assertIn('上游挂了', response.data['detail'])
+        # 如实报错但只给通用分类，不回显异常原文（SEC-07）
+        self.assertEqual(response.data['error'], 'upstream')
+        self.assertIn('HTTP 500', response.data['detail'])
+        self.assertNotIn('上游挂了', response.data['detail'])
+        self.assertFalse(AiCallLog.objects.get(purpose='analysis').success)
 
     def test_screener_invalid_condition_returns_400(self):
         response = self.client.post('/api/screener/', {
