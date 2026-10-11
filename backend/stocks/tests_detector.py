@@ -69,8 +69,9 @@ class RegistryIntegrityTests(TestCase):
                 self.assertTrue(spec['disabled_reason'], f"{spec['key']} 停用但未说明原因")
 
     def test_disabled_dims_are_exactly_the_sourceless_two(self):
+        # 无数据源的两个 + 待回测证明的候选维度 vp_corr（new-dims，默认停用）
         keys = {s['key'] for s in registry.DIMENSIONS if not s['enabled']}
-        self.assertEqual(keys, {'order_imbalance', 'sector_dispersion'})
+        self.assertEqual(keys, {'order_imbalance', 'sector_dispersion', 'vp_corr'})
 
 
 class MathHelperTests(TestCase):
@@ -598,7 +599,7 @@ class DetectorApiTests(TestCase):
         resp = self.client.get(reverse('detector-config'))
         body = resp.json()
         disabled = {d['key'] for d in body['dims'] if not d['enabled']}
-        self.assertEqual(disabled, {'order_imbalance', 'sector_dispersion'})
+        self.assertEqual(disabled, {'order_imbalance', 'sector_dispersion', 'vp_corr'})
         for dim in body['dims']:
             if not dim['enabled']:
                 self.assertTrue(dim['disabled_reason'])

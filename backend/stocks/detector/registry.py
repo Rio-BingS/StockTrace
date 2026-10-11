@@ -36,6 +36,7 @@ params 约定（阈值一律用「自身分布单位」表达，#1）：
 from __future__ import annotations
 
 from . import dimensions as _dims
+from . import dimensions_extra as _dims_extra
 # 噪声闸门默认值（各价量维度共用，见模块 docstring），数值在 constants.py
 from .constants import (
     COMPRESS_PCT_DEFAULT,
@@ -162,6 +163,22 @@ DIMENSIONS = [
         ),
         'defaults': {},
         'evaluate': None,
+    },
+    {
+        # 候选维度（00_plan 阶段 4）：回测证明相对随机基线有超额前不启用。
+        'key': 'vp_corr',
+        'name': '量价相关性（量能领先）',
+        'targets': ('index', 'stock'),
+        'enabled': False,
+        'disabled_reason': '候选维度：离线回测未证明相对随机基线有稳定超额，默认停用（见 DET_NOTES_new-dims）',
+        'note': (
+            '昨日异常量能与今日涨跌幅的20日秩相关（z 值）：放量后次日倾向上涨=量先于价。'
+            '量价同步不弱于领先、或近10日价格已走出 1.5σ 时不投票。'
+        ),
+        'defaults': {'window': 20, 'vol_base': 10, 'price_days': 10, 'price_z_max': 1.5,
+                     'sigma_window': 40, 'sync_margin': 0.0,
+                     'mild': 2.0, 'min': 1.64, 'max': 6.0, **_NOISE},
+        'evaluate': _dims_extra.eval_vp_corr,
     },
 ]
 
