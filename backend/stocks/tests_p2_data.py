@@ -282,3 +282,29 @@ class HolderShareUnitTests(SimpleTestCase):
             d = market.holders.fetch_holder_structure('510300', force=True)
         self.assertEqual(d['items'][0]['total_shares'], 2.5e8)
         self.assertEqual(d['items'][0]['total_shares_unit'], '份')
+
+
+class ValuationEntryTtlTests(SimpleTestCase):
+    """DAT-20：估值缓存按条目计时，补拉新股票不续期旧条目。"""
+
+    def test_old_entries_expire_independently(self):
+        from .ai import valuation
+
+        calls = []
+
+        def fake_fetch(codes):
+            calls.append(list(codes))
+            return {c: {'pe_ttm': float(len(calls))} for c in codes}
+
+        clock = [1_000_000.0]
+        with patch('stocks.ai.valuation._fetch_raw', side_effect=fake_fetch), \
+                patch('stocks.ai.valuation.time.time', side_effect=lambda: clock[0]), \
+                patch('stocks.market._cache.time.time', side_effect=lambda: clock[0]):
+            valuation.fetch_valuation_map(['600000'])
+            clock[0] += 200
+            valuation.fetch_valuation_map(['600000', '000001'])  # 只补拉 000001
+            clock[0] += 200  # 600000 已 400s，000001 才 200s
+            result = valuation.fetch_valuation_map(['600000', '000001'])
+        self.assertEqual(calls, [['600000'], ['000001'], ['600000']])
+        self.assertEqual(result['600000']['pe_ttm'], 3.0)
+        self.assertEqual(result['000001']['pe_ttm'], 2.0)

@@ -13,12 +13,13 @@ import time
 
 import requests
 
-from ..market._cache import _cache_get, _cache_set
+from ..market._cache import _cache_set, _is_fresh, _stale_or
 from ..services import _to_shsz_prefix
 
 logger = logging.getLogger(__name__)
 
 _VALUATION_TTL = 300
+_ENTRY_MAX_AGE = 86400  # 条目最长保留（秒），超过即丢弃
 _REQUEST_TIMEOUT = 5
 _FAIL_RETRY_SEC = 60  # 上游失败后的重试冷却，避免每股请求都挂着 5s 超时
 _last_fail_at = 0.0
@@ -76,19 +77,35 @@ def _fetch_raw(codes):
 
 
 def fetch_valuation_map(codes):
-    """返回 {code: {turnover_rate, pe_ttm, pb, float_mv, total_mv}}；缺失的 code 不在 map 中。"""
+    """返回 {code: {turnover_rate, pe_ttm, pb, float_mv, total_mv}}；缺失的 code 不在 map 中。
+
+    缓存按条目记录取数时间（DAT-20）：原先整表 _cache_set 写回，补拉一只新股票就把
+    所有旧条目的时间戳一起续期，自选里常驻的股票估值可能长期不再刷新。
+    """
     wanted = [str(c).zfill(6) for c in codes]
     if not wanted:
         return {}
 
-    cached = _cache_get('stock_valuation', _VALUATION_TTL) or {}
-    missing = [c for c in wanted if c not in cached]
-    if missing and (time.time() - _last_fail_at) > _FAIL_RETRY_SEC:
+    now = time.time()
+    entries = {
+        code: entry
+        for code, entry in (_stale_or('stock_valuation', None) or {}).items()
+        if now - entry['ts'] <= _ENTRY_MAX_AGE  # 久未请求的条目顺手清掉
+    }
+    fresh = {
+        code: entries[code]['row'] for code in wanted
+        if code in entries and _is_fresh(entries[code]['ts'], _VALUATION_TTL)
+    }
+    missing = [c for c in wanted if c not in fresh]
+    if missing and (now - _last_fail_at) > _FAIL_RETRY_SEC:
         try:
-            cached.update(_fetch_raw(missing))
-            _cache_set('stock_valuation', cached)
+            fetched = _fetch_raw(missing)
+            for code, row in fetched.items():
+                entries[code] = {'ts': now, 'row': row}
+                fresh[code] = row
+            _cache_set('stock_valuation', entries)
         except Exception as e:
             logger.warning(f"腾讯估值快照拉取失败（字段按 None 处理）: {e}")
             globals()['_last_fail_at'] = time.time()
 
-    return {c: cached[c] for c in wanted if c in cached}
+    return {c: fresh[c] for c in wanted if c in fresh}
