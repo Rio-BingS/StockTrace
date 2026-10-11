@@ -1,4 +1,5 @@
-"""calm-vote 方向回归测试：分组加权投票（#4）、权重参与投票、周期按维度状态（#2）。
+"""calm-vote 方向回归测试：分组加权投票（#4）、权重参与投票、周期按维度状态（#2）、
+多重检验报告与按强度截断（#11）。
 
 约定与 tests_detector 一致：交易日历 patch 为确定值，上游接口一律 patch，测试不触网。
 """
@@ -8,12 +9,12 @@ import random
 from datetime import timedelta
 from unittest.mock import patch
 
-from django.test import SimpleTestCase, TestCase
+from django.test import SimpleTestCase, TestCase, override_settings
 from django.utils import timezone
 
-from .detector import calm, registry, signals
+from .detector import calm, registry, scan, signals
 from .detector.constants import OPPOSE_RATIO, VOTE_MIN_WEIGHT
-from .models import DetectorSignal
+from .models import DetectorRun, DetectorSignal
 
 _TODAY = timezone.localdate()
 
@@ -283,3 +284,101 @@ class GroupedNoiseRegressionTests(SimpleTestCase):
             both += calm.is_calm(ctx)[0]
         self.assertGreater(first, 20)
         self.assertGreater(both / first, 0.45)
+
+
+class MultipleTestingTests(SimpleTestCase):
+    """#11：期望假阳数与按强度截断。"""
+
+    def _configs(self):
+        return [
+            {'key': s['key'], 'name': s['name'], 'weight': 1.0, 'params': dict(s['defaults']),
+             'targets': s['targets'], 'evaluate': s['evaluate'], 'enabled': s['enabled'],
+             'defaults': s['defaults'], 'group': s.get('group', s['key']), 'role': s.get('role', 'direction')}
+            for s in registry.DIMENSIONS
+        ]
+
+    def test_null_fire_probability_is_small_and_kind_specific(self):
+        configs = self._configs()
+        p_stock = scan.null_fire_probability(configs, 'stock')
+        p_sector = scan.null_fire_probability(configs, 'industry')
+        p_hs300 = scan.null_fire_probability(configs, 'index', 'sh000300')
+        p_index = scan.null_fire_probability(configs, 'index', 'sh000001')
+        for p in (p_stock, p_sector, p_hs300, p_index):
+            self.assertGreater(p, 0.0)
+            self.assertLess(p, 0.05)
+        # 沪深300 多一组融资余额，概率不低于其他指数
+        self.assertGreaterEqual(p_hs300, p_index)
+
+    def test_expected_false_positives_scale_with_tested(self):
+        configs = self._configs()
+        p = scan.null_fire_probability(configs, 'industry')
+        many = scan.multiple_testing_stats(configs, [('industry', str(i)) for i in range(500)], 7)
+        self.assertAlmostEqual(many['expected_false_positives'], p * 500, delta=0.01)
+        self.assertAlmostEqual(many['expected_by_kind']['industry'], p * 500, delta=0.01)
+        self.assertEqual(many['tested'], 500)
+        self.assertEqual(many['signals'], 7)
+
+    def test_truncate_keeps_strongest_sectors_and_never_cuts_watchlist(self):
+        def item(kind, code, strength, cycles=1):
+            return (f'{kind}:{code}', {'target_kind': kind, 'target_code': code,
+                                       'strength': strength, 'cycles': cycles}, {})
+
+        collected = [item('industry', f's{i}', float(i)) for i in range(6)]
+        collected += [item('stock', '600000', 0.1), item('index', 'sh000300', 0.2)]
+        kept, dropped = scan.truncate_by_strength(collected, 3)
+        kept_codes = {c[1]['target_code'] for c in kept}
+        self.assertEqual(kept_codes, {'s5', 's4', 's3', '600000', 'sh000300'})
+        self.assertEqual({c[1]['target_code'] for c in dropped}, {'s0', 's1', 's2'})
+        kept, dropped = scan.truncate_by_strength(collected, 0)  # 0 = 不截断
+        self.assertEqual((len(kept), len(dropped)), (8, 0))
+
+
+def _after_close_clock():
+    from datetime import datetime, time as dt_time
+    from types import SimpleNamespace
+
+    fixed = timezone.make_aware(datetime.combine(_TODAY, dt_time(16, 0)))
+    return SimpleNamespace(localdate=lambda *a: fixed.date(), localtime=lambda *a: fixed)
+
+
+@patch('stocks.trading_calendar.is_trading_day', _always_trading)
+class ScanTruncationTests(TestCase):
+    """run_scan：板块信号超上限按强度截断，截掉的不落库；run.message 带期望假阳数。"""
+
+    def _run(self, n_sectors):
+        targets = [{'kind': 'industry', 'code': f'板块{i}', 'name': f'板块{i}'} for i in range(n_sectors)]
+
+        def fake_eval(ctx, configs):
+            i = int(ctx['code'].replace('板块', ''))
+            data = {'target_kind': 'industry', 'target_code': ctx['code'], 'target_name': ctx['code'],
+                    'trade_date': _TODAY.isoformat(), 'direction': 'up', 'cycles': 1, 'score': 40.0 + i,
+                    'severity': DetectorSignal.SEVERITY_MEDIUM, 'status': DetectorSignal.STATUS_WATCHING,
+                    'cycles_unknown': False, 'strength': (40.0 + i) * 2}
+            return data, {}
+
+        with patch.object(scan, 'timezone', _after_close_clock()), \
+                patch.object(scan, 'save_margin_snapshot', return_value=0), \
+                patch.object(scan, '_collect_targets', return_value=targets), \
+                patch.object(scan, '_build_context',
+                             side_effect=lambda t: ({'kind': t['kind'], 'code': t['code'],
+                                                     'as_of': _TODAY.isoformat()}, None)), \
+                patch.object(scan.calm_mod, 'is_calm', return_value=(True, {})), \
+                patch.object(scan.signals, 'evaluate_target', side_effect=fake_eval):
+            return scan.run_scan()
+
+    @override_settings(DETECTOR_SECTOR_SIGNAL_CAP=2)
+    def test_sector_signals_truncated_by_strength(self):
+        summary = self._run(5)
+        codes = set(DetectorSignal.objects.values_list('target_code', flat=True))
+        self.assertEqual(codes, {'板块4', '板块3'})
+        self.assertEqual(summary['multiple_testing']['truncated'], 3)
+        self.assertEqual(summary['multiple_testing']['tested'], 5)
+        run = DetectorRun.objects.get(trade_date=_TODAY)
+        self.assertIn('期望假阳', run.message)
+        self.assertIn('截掉 3 个', run.message)
+
+    @override_settings(DETECTOR_SECTOR_SIGNAL_CAP=0)
+    def test_cap_zero_disables_truncation(self):
+        summary = self._run(4)
+        self.assertEqual(DetectorSignal.objects.count(), 4)
+        self.assertEqual(summary['multiple_testing']['truncated'], 0)

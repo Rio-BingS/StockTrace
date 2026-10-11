@@ -6,6 +6,7 @@
 2. 融资余额快照落库（两融 T+1，探测器是它唯一的日度写入方）；
 3. 收集对象宇宙：5 个主要指数 + 全部自选股 + 最近快照出现过的行业/概念板块；
 4. 逐对象：构建序列 → 平静判定（不满足直接跳过）→ 维度评估 → 投票落库；
+   板块信号超过每日上限时按强度截断，并估算期望假阳数（多重检验，#11）；
 5. 回看 5 个交易日前信号并按命中率微调权重/阈值（review.py）；
 6. upsert DetectorRun（矩阵、降级、调参流水），按保留策略清理旧数据。
 
@@ -33,7 +34,15 @@ from ..market.snapshots import save_margin_snapshot
 from ..models import DetectorDimConfig, DetectorRun, DetectorSignal, Stock
 from . import calm as calm_mod
 from . import registry, review, signals
-from .constants import ROLE_DIRECTION
+from .constants import (
+    MARGIN_VOTE_CODES,
+    NOISE_DEFAULTS,
+    NULL_VOTE_RATE_FALLBACK,
+    NULL_VOTE_RATES,
+    NULL_VOTE_RATES_BY_KIND,
+    ROLE_DIRECTION,
+    SECTOR_SIGNAL_CAP_DEFAULT,
+)
 from .dimensions import (
     build_index_context,
     build_sector_context,
@@ -177,6 +186,103 @@ def _clear_stale_signals(trade_date, cleared):
     return deleted
 
 
+_SECTOR_KINDS = ('industry', 'concept')
+
+
+def _null_vote_rate(cfg, kind=None):
+    """零假设下维度的两侧合计投票率（只用于期望假阳估计，不参与判定）。"""
+    by_kind = NULL_VOTE_RATES_BY_KIND.get(kind) or {}
+    if cfg['key'] in by_kind:
+        return by_kind[cfg['key']]
+    if cfg['key'] in NULL_VOTE_RATES:
+        return NULL_VOTE_RATES[cfg['key']]
+    pct = (cfg.get('params') or {}).get('noise_pct', NOISE_DEFAULTS['noise_pct'])
+    try:
+        return min(1.0, max(0.0, 1.0 - float(pct))) or NULL_VOTE_RATE_FALLBACK
+    except (TypeError, ValueError):
+        return NULL_VOTE_RATE_FALLBACK
+
+
+def null_fire_probability(configs, kind, code=None):
+    """零假设下某类对象单日出信号的概率（维度独立假设下精确枚举）。
+
+    每个适用维度以 p/2 投 up、p/2 投 down、1−p 不投（p 见 _null_vote_rate），
+    枚举全部组合并调用与线上相同的 signals.vote 判定，累加出信号的概率。
+    维度间实际正相关（同一条价格/量能序列），独立假设会低估；这里只给
+    量级，用于「期望假阳 vs 实际信号数」的对照。
+    """
+    from itertools import product
+
+    dims = [
+        c for c in configs
+        if c.get('enabled', True) and c.get('evaluate') is not None and kind in c['targets']
+        and not (c['key'] == 'margin_north' and code not in MARGIN_VOTE_CODES)
+    ]
+    if not dims:
+        return 0.0
+    rates = [_null_vote_rate(c, kind) for c in dims]
+    prob = 0.0
+    for combo in product((None, 'up', 'down'), repeat=len(dims)):
+        p = 1.0
+        results = {}
+        for cfg, rate, d in zip(dims, rates, combo):
+            p *= (1 - rate) if d is None else rate / 2
+            group, role = signals.dim_group(cfg['key'], cfg)
+            results[cfg['key']] = {'available': True, 'direction': d, 'value': 50.0,
+                                   'weight': cfg.get('weight', 1.0), 'group': group, 'role': role}
+        if p and signals.vote(results)['direction']:
+            prob += p
+    return prob
+
+
+def multiple_testing_stats(configs, calm_targets, signal_count):
+    """每次扫描的多重检验报告（#11）：期望假阳数 vs 实际信号数。
+
+    calm_targets: [(kind, code)] 当日通过平静闸门、参与投票的对象。
+    """
+    cache = {}
+    by_kind = {}
+    for kind, code in calm_targets:
+        sig = (kind, code if kind == 'index' and code in MARGIN_VOTE_CODES else None)
+        if sig not in cache:
+            cache[sig] = null_fire_probability(configs, kind, sig[1])
+        by_kind[kind] = by_kind.get(kind, 0.0) + cache[sig]
+    expected = sum(by_kind.values())
+    return {
+        'tested': len(calm_targets),
+        'expected_false_positives': round(expected, 2),
+        'expected_by_kind': {k: round(v, 2) for k, v in by_kind.items()},
+        'signals': signal_count,
+    }
+
+
+def _sector_signal_cap():
+    """每日板块信号上限：settings.DETECTOR_SECTOR_SIGNAL_CAP 覆盖默认值，0 = 不截断。"""
+    try:
+        return max(0, int(getattr(settings, 'DETECTOR_SECTOR_SIGNAL_CAP', SECTOR_SIGNAL_CAP_DEFAULT)))
+    except (TypeError, ValueError):
+        return SECTOR_SIGNAL_CAP_DEFAULT
+
+
+def truncate_by_strength(collected, cap):
+    """板块信号按强度降序只保留前 cap 个（#11）；返回 (保留, 截掉)。
+
+    强度 = 得分 × 同侧加权票（signals.evaluate_target 的 'strength'），并列时
+    维持中优先、再按对象 key 定序，保证同日重跑结果一致。指数/自选股不截。
+    """
+    sectors = [c for c in collected if c[1]['target_kind'] in _SECTOR_KINDS]
+    if not cap or len(sectors) <= cap:
+        return list(collected), []
+    ranked = sorted(
+        sectors,
+        key=lambda c: (-(c[1].get('strength') or 0.0), -c[1]['cycles'], c[0]),
+    )
+    dropped_keys = {c[0] for c in ranked[cap:]}
+    kept = [c for c in collected if c[0] not in dropped_keys]
+    dropped = [c for c in collected if c[0] in dropped_keys]
+    return kept, dropped
+
+
 def _sort_matrix_key(row):
     values = [abs(v) for v in row['values'].values() if v is not None]
     return max(values) if values else 0.0
@@ -223,6 +329,7 @@ def run_scan(trade_date=None, calendar=None):
     # 循环里只收集，不落库：落库集中到循环后的事务里（ALG-08）
     collected = []  # [(target_key, signal_data, dim_results)]
     cleared = []  # 本轮确定无信号的 (kind, code)；降级对象不在其中
+    calm_targets = []  # 参与投票的 (kind, code)，多重检验的分母（#11）
 
     for target in targets:
         try:
@@ -276,12 +383,33 @@ def run_scan(trade_date=None, calendar=None):
                 },
             })
 
+        calm_targets.append((target['kind'], target['code']))
         if signal_data is None:
             cleared.append((target['kind'], target['code']))
             continue
         if signal_data.get('cycles_unknown'):
             degraded.append({'target': target_key, 'reason': '交易日历不可用，周期数无法确认，按周期 1 记'})
         collected.append((target_key, signal_data, dim_results))
+
+    # ---- 多重检验（#11）：板块按强度截断 + 期望假阳数 ----
+    raw_signal_count = len(collected)
+    collected, dropped = truncate_by_strength(collected, _sector_signal_cap())
+    if dropped:
+        dropped_keys = set()
+        for target_key, signal_data, _dims in dropped:
+            # 截掉的对象按「本轮无信号」处理：同日重跑时旧行一并清理
+            cleared.append((signal_data['target_kind'], signal_data['target_code']))
+            dropped_keys.add((signal_data['target_kind'], signal_data['target_code']))
+        for kind, rows in matrix.items():
+            for row in rows:
+                if (kind, row['code']) in dropped_keys:
+                    row['truncated'] = True
+        message_parts.append(f'板块信号按强度截断：保留前 {_sector_signal_cap()} 个，截掉 {len(dropped)} 个')
+    mt_stats = multiple_testing_stats(configs, calm_targets, raw_signal_count)
+    message_parts.append(
+        f"期望假阳≈{mt_stats['expected_false_positives']:.1f}/实际 {raw_signal_count}"
+        f"（检验 {mt_stats['tested']} 个平静对象）"
+    )
 
     for board_rows in matrix.values():
         board_rows.sort(key=_sort_matrix_key, reverse=True)
@@ -357,6 +485,8 @@ def run_scan(trade_date=None, calendar=None):
         'baseline_rate': review_summary.get('baseline_rate'),
         'degraded_count': len(degraded),
         'adjustments': len(adjustments),
+        # 多重检验报告（#11）：DetectorRun 暂无专门字段，摘要见 run.message
+        'multiple_testing': {**mt_stats, 'truncated': len(dropped)},
     }
     logger.info("探测器扫描完成: %s", summary)
     return summary

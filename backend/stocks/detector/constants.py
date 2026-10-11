@@ -174,3 +174,32 @@ FLOW_RESID_MIN_OBS = 20
 # 新股上市初期的极端量能不进入基期——ctx 首根就是该股在库里的第一根、且
 # 不足 CONTEXT_BARS 时，把最前面这么多根量能置 None。
 NEW_LISTING_MASK_BARS = 20
+
+# 多重检验（scan.py，#11）
+# ============================================================
+
+# 零假设（随机游走、平静日）下各维度的两侧合计投票率，用于估计每次扫描的
+# 期望假阳数。个股四维取 regime 化平静闸门下的随机游走复测（σ=1.5%，
+# 773 个平静样本，见 DET_NOTES_calm-vote.md）；板块净额沿用 01_code_audit §2.0
+# 的板块模拟（19%~21%）；融资余额无模拟，取名义 5%。
+# 只用于「报告」，不参与判定；未列出的维度按 1 − noise_pct 估计（偏保守）。
+NULL_VOTE_RATES = {
+    'big_order_net': 0.20,
+    'vol_ratio_slope': 0.15,
+    'vol_compress': 0.07,
+    'turnover_pct': 0.015,
+    'margin_north': 0.05,
+    'ma_relation': 0.025,
+}
+# 按对象类型覆盖：板块（σ≈1.2% 的合成序列）上 ma_relation 平静日投票率约 10%、
+# vol_compress 约 9%，与个股差异大（板块随机游走复测，693 个平静样本）
+NULL_VOTE_RATES_BY_KIND = {
+    'industry': {'ma_relation': 0.10, 'vol_compress': 0.09},
+    'concept': {'ma_relation': 0.10, 'vol_compress': 0.09},
+}
+NULL_VOTE_RATE_FALLBACK = 0.2
+
+# 每日板块信号按强度排序截断的默认上限（settings.DETECTOR_SECTOR_SIGNAL_CAP
+# 可覆盖，0 = 不截断）。只截板块：约 500 个板块同日检验、彼此相关，是多重
+# 检验假阳的主要来源；指数与自选股是用户明确关注的少量对象，不截。
+SECTOR_SIGNAL_CAP_DEFAULT = 10
