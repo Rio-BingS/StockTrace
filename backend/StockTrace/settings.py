@@ -113,6 +113,9 @@ TEMPLATES = [
 
 WSGI_APPLICATION = 'StockTrace.wsgi.application'
 
+# 测试 runner：断网闸 + 每个用例前清空进程内缓存（OPS-03）
+TEST_RUNNER = 'StockTrace.isolated_runner.IsolatedTestRunner'
+
 
 # Database
 # https://docs.djangoproject.com/en/6.0/ref/settings/#databases
