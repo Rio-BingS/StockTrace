@@ -105,6 +105,18 @@ class EvaluateTargetInjectionTests(SimpleTestCase):
         self.assertEqual(sd['status'], 'active')
         self.assertEqual(seen, [('stock', 'sh600000', 'up', date(2024, 3, 5))])
 
+    def test_state_lookback_uses_injected_calendar(self):
+        # 集成（calm-vote #2）：方向组状态回看的交易日序列也走注入日历，回测不触网
+        days = _weekdays(date(2024, 1, 1), 60)
+        cal = _SetCalendar(days)
+        t = days.index(date(2024, 3, 5))
+        ctx = dict(self.ctx, dates=[d.isoformat() for d in days[:t + 1]])
+        with patch('stocks.trading_calendar.is_trading_day', side_effect=_no_global_calendar):
+            sd, _dims = signals.evaluate_target(ctx, [_vote_cfg('a'), _vote_cfg('b')],
+                                                cycle_counter=lambda *a: 0, calendar=cal)
+        # 两个自成一组的维度每天都同向：回看 CYCLE_LOOKBACK 天全部同向
+        self.assertEqual(sd['cycles'], signals._CYCLE_LOOKBACK + 1)
+
     def test_default_path_calls_count_cycles_with_old_signature(self):
         with patch.object(signals, '_count_cycles', return_value=None) as m:
             sd, _dims = signals.evaluate_target(self.ctx, [_vote_cfg('a'), _vote_cfg('b')])

@@ -358,7 +358,8 @@ def evaluate_target(ctx, configs, cycle_counter=None, calendar=None):
     else:
         prev_cycles = cycle_counter(ctx['kind'], ctx['code'], direction, as_of)
     streak = 0
-    if prev_cycles is not None:
+    # ctx 没有日期序列（测试桩）时无从回看，也就不必查交易日历
+    if prev_cycles is not None and ctx.get('dates'):
         # 状态回看的交易日序列同样走注入的日历（离线回测不触网）
         days = _previous_trading_days(as_of, _CYCLE_LOOKBACK, **cal_kwargs)
         streak = _state_streak(ctx, configs, direction, days) if days else 0

@@ -1,7 +1,8 @@
 """回测引擎：逐标的、逐日回放探测器（平静 → 维度 → 投票/周期 → 复盘判定与前瞻收益）。
 
 直接调用仓库函数，通过正式注入点替换两处依赖：
-- signals.evaluate_target(..., cycle_counter=MemoryCycleCounter)：周期计数走内存信号表；
+- signals.evaluate_target(..., cycle_counter=MemoryCycleCounter, calendar=ListCalendar)：
+  周期计数走内存信号表，方向组状态回看的交易日序列走本地日历（不触网）；
 - review._evaluate_bars(..., calendar=ListCalendar)：复盘窗口校验走本地交易日历。
 
 每行（标的·日）输出：平静结果、各维度 available/direction/value（所有日都评估，
@@ -31,7 +32,7 @@ from ..constants import (
     REVIEW_LOOKBACK,
     SIGMA_WINDOW,
 )
-from .context import DEFAULT_CTX_BARS, build_ctx
+from .context import DEFAULT_CTX_BARS, MARGIN_PROXY_NOTE, build_ctx
 from .data import CacheMiss
 from .tradedays import ListCalendar, to_date
 
@@ -45,7 +46,8 @@ REGIME_BAND = 5.0
 REVIEW_BEFORE_BARS = SIGMA_WINDOW + BASELINE_DAYS + REVIEW_LOOKBACK + 1
 DEFAULT_SAMPLE = 40
 DEFAULT_SEED = 20261011  # 与原型抽样种子一致，便于对照
-ROWS_FORMAT_VERSION = 1
+# 2：上下文/两融/量能与生产对齐（250 根、两融交易日轴 T−1、volume_adj）
+ROWS_FORMAT_VERSION = 2
 _CODE_RE = re.compile(r'^(sh|sz|bj)\d{6}$')
 
 
@@ -253,7 +255,8 @@ def run_target(target, items, *, calendar, bench_by_date, configs, start, end,
         row['severity'] = ''
         row['score'] = None
         if is_calm:
-            sd, _dims = signals.evaluate_target(ctx, configs, cycle_counter=counter)
+            sd, _dims = signals.evaluate_target(ctx, configs, cycle_counter=counter,
+                                                calendar=calendar)
             if sd:
                 row.update(sig_dir=sd['direction'], cycles=sd['cycles'], severity=sd['severity'],
                            score=sd['score'])
@@ -369,7 +372,7 @@ def run_backtest(store, targets, *, start, end=None, configs=None, ctx_bars=DEFA
         'targets_run': len(targets) - len(skipped),
         'skipped': skipped,
         'targets_reused': reused,
-        'data_notes': list(dict.fromkeys(store.notes)),
+        'data_notes': list(dict.fromkeys(store.notes + ([MARGIN_PROXY_NOTE] if margin else []))),
         'shares_missing': sorted({m for m in store.missing if m.startswith('shares/')}),
         'configs': {c['key']: {'enabled': c['enabled'], 'weight': c['weight'], 'params': c['params']}
                     for c in configs if c['evaluate'] is not None},

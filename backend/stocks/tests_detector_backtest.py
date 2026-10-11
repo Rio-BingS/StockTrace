@@ -121,20 +121,43 @@ class NoLookaheadTests(SimpleTestCase):
         self.assertEqual([r for r in a if r['date'] <= t], [r for r in b if r['date'] <= t])
 
     def test_margin_window_only_rows_before_t_and_drops_stale(self):
-        dates = [d.isoformat() for d in _weekdays(date(2024, 1, 1), 80)]
+        # 与生产 load_margin_series 同口径（#8/#9）：交易日轴、末点 T−1、缺失日 None
+        dates = [d.isoformat() for d in _weekdays(date(2024, 1, 1), 160)]
         cal = ListCalendar(dates)
         rows = [(d, 100.0 + k) for k, d in enumerate(dates)]
         mdates = [r[0] for r in rows]
-        win = context.margin_window(rows, mdates, dates[60], cal)
-        self.assertEqual(win[-1]['date'], dates[59])  # T+1 披露：T 当天的数不可见
-        self.assertEqual(len(win), context.MARGIN_ROWS)
-        # 缺口：只保留缺口后的连续段
-        gapped = rows[:40] + rows[45:]
-        win = context.margin_window(gapped, [r[0] for r in gapped], dates[60], cal)
-        self.assertEqual(win[0]['date'], dates[45])
-        # 最新一行落后 T 超过 2 个交易日：源缺口期，不可用
-        stale = rows[:50]
-        self.assertEqual(context.margin_window(stale, [r[0] for r in stale], dates[60], cal), [])
+        t = 150
+        win = context.margin_window(rows, mdates, dates[t], cal)
+        self.assertEqual(win[-1]['date'], dates[t - 1])  # T+1 披露：T 当天的数不可见
+        self.assertEqual(win[-1]['rz'], rows[t - 1][1])  # 缓存只有 total，代理 rz
+        self.assertEqual(len(win), context.MARGIN_CONTEXT_DAYS)
+        self.assertTrue(all(m['date'] < dates[t] for m in win))
+        # 缺口：日期轴保留缺失日为 None，不压缩时间
+        gapped = rows[:100] + rows[105:]
+        win = context.margin_window(gapped, [r[0] for r in gapped], dates[t], cal)
+        by_date = {m['date']: m['rz'] for m in win}
+        self.assertIsNone(by_date[dates[102]])
+        self.assertEqual(by_date[dates[106]], rows[106][1])
+        # 最新一行落后于 T−1：末点为 None，维度如实不可用
+        stale = rows[:140]
+        win = context.margin_window(stale, [r[0] for r in stale], dates[t], cal)
+        self.assertEqual(win[-1]['date'], dates[t - 1])
+        self.assertIsNone(win[-1]['rz'])
+        # 轴起点不早于缓存最早一行
+        late = rows[30:]
+        win = context.margin_window(late, [r[0] for r in late], dates[60], cal)
+        self.assertEqual(win[0]['date'], dates[30])
+
+    def test_build_ctx_matches_production_context_fields(self):
+        # 集成：上下文长度与生产 CONTEXT_BARS 一致；个股带 volume_adj（#15），指数为原始量
+        from .detector.constants import CONTEXT_BARS
+
+        self.assertEqual(context.DEFAULT_CTX_BARS, CONTEXT_BARS)
+        stock = context.build_ctx('stock', 'x', 'x', self.items, 219)
+        self.assertEqual(len(stock['volume_adj']), len(stock['dates']))
+        self.assertIn('volume_basis', stock)
+        index = context.build_ctx('index', 'sh000001', 'x', self.items, 219)
+        self.assertEqual(index['volume_adj'], index['volume'])
 
     def test_memory_cycle_counter_counts_consecutive_trading_days(self):
         days = _weekdays(date(2024, 1, 1), 60)

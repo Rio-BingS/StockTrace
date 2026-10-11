@@ -64,7 +64,7 @@ class Command(BaseCommand):
         parser.add_argument('--out', default=None, help='输出目录（report.json / report.md / rows/）')
         parser.add_argument('--param-override', default=None,
                             help='JSON 或 @文件：{维度: {参数: 值, "weight": w, "enabled": bool}}')
-        parser.add_argument('--ctx-bars', type=int, default=None, help='上下文根数，默认与生产一致（70）')
+        parser.add_argument('--ctx-bars', type=int, default=None, help='上下文根数，默认与生产一致（CONTEXT_BARS=250）')
         parser.add_argument('--resamples', type=int, default=2000, help='随机基线重采样次数，0 只给解析式 z')
         parser.add_argument('--calm-only', action='store_true',
                             help='只在平静日评估维度（更快，但没有「无闸门」对照）')
