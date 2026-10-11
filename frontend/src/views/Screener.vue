@@ -623,7 +623,7 @@ function goDetail(row) {
 }
 .cond-row.invalid input,
 .cond-row.invalid select {
-  border-color: #ff5a6e;
+  border-color: var(--danger);
 }
 .cond-error {
   color: var(--danger);
@@ -683,7 +683,7 @@ function goDetail(row) {
   color: #fff;
 }
 .btn.primary:hover:not(:disabled) {
-  background: #d63a54;
+  background: var(--accent-strong-hover);
 }
 .btn.small {
   padding: 4px 10px;

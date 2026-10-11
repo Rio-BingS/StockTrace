@@ -146,7 +146,7 @@ async function run() {
   color: var(--accent);
 }
 .btn:hover:not(:disabled) {
-  background: #d63a54;
+  background: var(--accent-strong-hover);
 }
 .btn.ghost:hover {
   background: #3a1a1f;

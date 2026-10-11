@@ -285,7 +285,7 @@ onMounted(load)
   color: #fff;
 }
 .btn.primary:hover:not(:disabled) {
-  background: #d63a54;
+  background: var(--accent-strong-hover);
 }
 .btn.danger {
   color: var(--danger);
