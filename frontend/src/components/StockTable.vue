@@ -1,9 +1,10 @@
 <script setup>
-import { ref } from 'vue'
+import { computed, ref, watch } from 'vue'
 import { formatPct, formatNum, formatSigned, pctClass } from '../utils/format.js'
 import { stockApi } from '../api/stocks.js'
+import { computePnl, syncDrafts, validateHolding } from '../utils/holding.js'
 
-defineProps({
+const props = defineProps({
   data: { type: Array, default: () => [] },
   loading: { type: Boolean, default: false },
   // 加载失败文案：有值时空状态显示错误而不是误导性的"暂无数据"
@@ -16,6 +17,8 @@ const emit = defineEmits(['row-click', 'delete', 'ai-click', 'refresh'])
 const expandedRows = ref(new Set())
 const costDrafts = ref({})
 const savingIds = ref(new Set())
+// 持仓校验失败的提示：code → 文案
+const costErrors = ref({})
 
 function toggleRow(code) {
   if (expandedRows.value.has(code)) {
@@ -29,30 +32,28 @@ function isExpanded(code) {
   return expandedRows.value.has(code)
 }
 
-// 盈亏：仅填了成本价的行参与；数据全部来自看板真实行情
-function pnlOf(item) {
-  if (item.cost_price == null || item.quantity == null || item.close_price == null) return null
-  return (Number(item.close_price) - Number(item.cost_price)) * Number(item.quantity)
-}
+// 盈亏：仅填了成本价的行参与；数据全部来自看板真实行情。
+// 预先按 code 计算，模板只读不写（FEF-08）
+const pnlMap = computed(() => {
+  const map = {}
+  for (const item of props.data) map[item.code] = computePnl(item)
+  return map
+})
+
+// 草稿在数据变化时同步（未编辑的行跟随服务端，编辑中的行保留），
+// 不在渲染期间写响应式状态（FEF-08）
+watch(() => props.data, (items) => {
+  costDrafts.value = syncDrafts(costDrafts.value, items)
+}, { immediate: true })
 
 function draftOf(item, key) {
-  if (!(item.code in costDrafts.value)) {
-    costDrafts.value[item.code] = {
-      cost_price: item.cost_price ?? '',
-      quantity: item.quantity ?? '',
-    }
-  }
-  return costDrafts.value[item.code][key]
+  return costDrafts.value[item.code]?.[key] ?? ''
 }
 
 function setDraft(item, key, value) {
-  if (!(item.code in costDrafts.value)) {
-    costDrafts.value[item.code] = {
-      cost_price: item.cost_price ?? '',
-      quantity: item.quantity ?? '',
-    }
-  }
-  costDrafts.value[item.code][key] = value
+  const old = costDrafts.value[item.code] || { cost_price: '', quantity: '' }
+  costDrafts.value[item.code] = { ...old, [key]: value, dirty: true }
+  if (costErrors.value[item.code]) delete costErrors.value[item.code]
 }
 
 async function changeGroup(item, value) {
@@ -65,13 +66,17 @@ async function changeGroup(item, value) {
 }
 
 async function saveCost(item) {
-  const draft = costDrafts.value[item.code] || {}
-  const cost = draft.cost_price === '' ? null : Number(draft.cost_price)
-  const qty = draft.quantity === '' ? null : Number(draft.quantity)
-  if (cost !== null && (Number.isNaN(cost) || cost <= 0)) return
+  const check = validateHolding(costDrafts.value[item.code])
+  if (!check.ok) {
+    costErrors.value[item.code] = check.error
+    return
+  }
   savingIds.value.add(item.code)
   try {
-    await stockApi.update(item.id, { cost_price: cost, quantity: qty })
+    await stockApi.update(item.id, { cost_price: check.cost, quantity: check.qty })
+    // 保存成功后取消编辑标记，下一次刷新按服务端值同步
+    const d = costDrafts.value[item.code]
+    if (d) costDrafts.value[item.code] = { ...d, dirty: false }
     emit('refresh')
   } catch {
     alert('保存持仓失败，请重试')
@@ -136,8 +141,8 @@ async function handleDelete(e, item) {
             <td :class="pctClass(item.change_diff)">
               {{ formatSigned(item.change_diff) }}
             </td>
-            <td :class="pctClass(pnlOf(item))">
-              {{ pnlOf(item) == null ? '-' : formatNum(pnlOf(item)) }}
+            <td :class="pctClass(pnlMap[item.code])">
+              {{ pnlMap[item.code] == null ? '-' : formatNum(pnlMap[item.code]) }}
             </td>
             <td class="actions">
               <button class="btn-kline" @click="handleGoDetail($event, item)" title="查看K线图">K线</button>
@@ -197,21 +202,22 @@ async function handleDelete(e, item) {
                     @input="setDraft(item, 'cost_price', $event.target.value)"
                   />
                   <input
-                    type="number" step="1" placeholder="持股数"
+                    type="number" step="1" min="0" placeholder="持股数"
                     :value="draftOf(item, 'quantity')"
                     @input="setDraft(item, 'quantity', $event.target.value)"
                   />
                   <button class="btn-kline-lg" :disabled="savingIds.has(item.code)" @click="saveCost(item)">
                     {{ savingIds.has(item.code) ? '保存中…' : '保存持仓' }}
                   </button>
+                  <span v-if="costErrors[item.code]" class="cost-error">{{ costErrors[item.code] }}</span>
                 </div>
               </div>
             </td>
           </tr>
         </template>
         <tr v-if="!data.length">
-          <td v-if="error" colspan="8" class="empty error">{{ error }}</td>
-          <td v-else colspan="8" class="empty">暂无数据，请先添加关注的股票并点击"刷新数据"</td>
+          <td v-if="error" colspan="9" class="empty error">{{ error }}</td>
+          <td v-else colspan="9" class="empty">暂无数据，请先添加关注的股票并点击"刷新数据"</td>
         </tr>
       </tbody>
     </table>
@@ -318,6 +324,11 @@ async function handleDelete(e, item) {
   text-align: center;
   color: #666;
   padding: 40px !important;
+}
+
+.cost-error {
+  color: #ff8a96;
+  font-size: 12px;
 }
 
 .empty.error {
