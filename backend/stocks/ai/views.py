@@ -256,6 +256,8 @@ def _job_slot_wait():
 # ---- AI 后台任务（AIX-08 收尾：任务落库，见 ai/jobs.py）----
 # 任务类型（AiJob.kind，也是轮询 JSON 的 kind 字段）
 JOB_ANALYSIS = 'analysis'
+JOB_SCREENER_AI = 'screener_ai'
+JOB_SCREENER_COMMENT = 'screener_comment'
 
 
 def _submit_job(purpose, kind, params, stock=None):
@@ -318,6 +320,26 @@ def _analysis_job(params):
     return 200, {'analysis': text, 'disclaimer': DISCLAIMER}
 
 
+@ai_jobs.register(JOB_SCREENER_AI)
+def _screener_ai_job(params):
+    messages = params['messages']
+    spec, failed = _job_llm(AiCallLog.PURPOSE_SCREENER_TRANSLATE, params,
+                            lambda c: c.chat_json(messages))
+    if failed:
+        return failed
+    resp = _screener_ai_result(spec)
+    return resp.status_code, resp.data
+
+
+@ai_jobs.register(JOB_SCREENER_COMMENT)
+def _screener_comment_job(params):
+    text, failed = _job_llm(AiCallLog.PURPOSE_SCREENER_COMMENT, params,
+                            _comment_invoke(params['messages']))
+    if failed:
+        return failed
+    return 200, {'comment': text, 'disclaimer': DISCLAIMER}
+
+
 @api_view(['GET'])
 def ai_job_detail(request, job_id):
     """查询 AI 后台任务：queued/running 时只有状态；done/failed 时带结果与原 HTTP 状态码。"""
@@ -347,17 +369,24 @@ def screener(request):
 
 @api_view(['POST'])
 def screener_ai(request):
-    """自然语言 → LLM 翻译成结构化条件 → 复用引擎执行"""
+    """自然语言 → LLM 翻译成结构化条件 → 复用引擎执行；?async=1 时进后台任务队列"""
     ser = ScreenerAiInputSerializer(data=request.data)
     if not ser.is_valid():
         return _invalid_input(ser.errors)
     query = ser.validated_data['query']
 
     messages = build_translate_messages(query)
+    if _wants_async(request):
+        return _submit_job(AiCallLog.PURPOSE_SCREENER_TRANSLATE, JOB_SCREENER_AI,
+                           {'messages': messages})
     spec, failed = _run_llm(AiCallLog.PURPOSE_SCREENER_TRANSLATE, lambda c: c.chat_json(messages))
     if failed:
         return failed
+    return _screener_ai_result(spec)
 
+
+def _screener_ai_result(spec):
+    """用 LLM 翻译出的条件执行选股，同步接口与后台任务共用。"""
     try:
         rows, meta = run_screener_with_meta(spec)
     except ConditionError as exc:
@@ -399,7 +428,10 @@ def _comment_rows(codes):
 
 @api_view(['POST'])
 def screener_ai_comment(request):
-    """对筛选结果做 AI 点评。入参：query（原始需求）+ results（screener 返回的 results）"""
+    """对筛选结果做 AI 点评。入参：query（原始需求）+ results（screener 返回的 results）。
+
+    ?async=1 时进后台任务队列。
+    """
     ser = ScreenerCommentInputSerializer(data=request.data)
     if not ser.is_valid():
         return _invalid_input(ser.errors)
@@ -410,8 +442,14 @@ def screener_ai_comment(request):
                         status=status.HTTP_400_BAD_REQUEST)
 
     messages = build_comment_messages(rows, query)
-    text, failed = _run_llm(
-        AiCallLog.PURPOSE_SCREENER_COMMENT, lambda c: c.chat(messages, max_tokens=800))
+    if _wants_async(request):
+        return _submit_job(AiCallLog.PURPOSE_SCREENER_COMMENT, JOB_SCREENER_COMMENT,
+                           {'messages': messages})
+    text, failed = _run_llm(AiCallLog.PURPOSE_SCREENER_COMMENT, _comment_invoke(messages))
     if failed:
         return failed
     return Response({'comment': text, 'disclaimer': DISCLAIMER})
+
+
+def _comment_invoke(messages):
+    return lambda client: client.chat(messages, max_tokens=800)

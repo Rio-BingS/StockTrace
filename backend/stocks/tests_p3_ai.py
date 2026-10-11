@@ -396,3 +396,101 @@ class AiJobMultiWorkerTests(TransactionTestCase):
         self.assertEqual(sorted(calls), list(range(6)))
         self.assertEqual({jobs.get(i)['status'] for i in ids}, {'done'})
 
+
+class ScreenerAiAsyncTests(TestCase):
+    """AI 选股翻译、点评走同一后台任务机制（?async=1）；默认同步接口保留。"""
+
+    def setUp(self):
+        from unittest import mock
+        from stocks.ai import jobs
+        from stocks.tests_ai import _no_valuation
+        self.jobs = jobs
+        for patcher in (mock.patch.object(jobs, 'ensure_worker'),
+                        mock.patch('stocks.ai.valuation.fetch_valuation_map', new=_no_valuation)):
+            patcher.start()
+            self.addCleanup(patcher.stop)
+        self.provider, self.stock = _ai_fixtures()
+        self.post = _ai_patches(self)
+        self.client = APIClient()
+
+    def _spec_reply(self, spec):
+        import json
+        from stocks.tests_p1_ai import _ok
+        return _ok(json.dumps(spec))
+
+    def _poll(self, job_id):
+        return self.client.get(f'/api/ai/jobs/{job_id}/').json()
+
+    def test_translate_async_matches_sync(self):
+        from stocks.models import AiCallLog
+        spec = {'logic': 'all', 'conditions': [{'field': 'change_pct', 'op': 'gt', 'value': 3}]}
+        self.post.return_value = self._spec_reply(spec)
+        sync = self.client.post('/api/screener/ai/', {'query': '涨3个点以上'}, format='json')
+        self.assertEqual(sync.status_code, 200, sync.content)
+        r = self.client.post('/api/screener/ai/?async=1', {'query': '涨3个点以上'}, format='json')
+        self.assertEqual(r.status_code, 202)
+        self.assertEqual(r.data['status'], 'queued')
+        self.assertEqual(r.data['poll_url'], f"/api/ai/jobs/{r.data['job_id']}/")
+        self.assertEqual(self.post.call_count, 1)
+        self.jobs.run_pending()
+        poll = self._poll(r.data['job_id'])
+        self.assertEqual((poll['kind'], poll['status'], poll['http_status']),
+                         ('screener_ai', 'done', 200))
+        # 轮询结果与同步接口的 JSON 完全一致
+        self.assertEqual(poll['result'], sync.json())
+        self.assertEqual(AiCallLog.objects.filter(
+            purpose='screener_translate', status='success').count(), 2)
+
+    def test_translate_async_bad_conditions(self):
+        bad = {'logic': 'all', 'conditions': [{'field': '市盈率', 'op': 'gt', 'value': 10}]}
+        self.post.return_value = self._spec_reply(bad)
+        r = self.client.post('/api/screener/ai/', {'query': '低估值', 'async': True}, format='json')
+        self.assertEqual(r.status_code, 202)
+        self.jobs.run_pending()
+        poll = self._poll(r.data['job_id'])
+        self.assertEqual((poll['status'], poll['http_status']), ('failed', 400))
+        self.assertIn('无法执行', poll['result']['detail'])
+        self.assertEqual(poll['result']['conditions'], bad)
+
+    def test_comment_async(self):
+        from stocks.models import AiCallLog
+        from stocks.tests_p1_ai import _ok
+        self.post.return_value = _ok('整体偏强')
+        r = self.client.post('/api/screener/ai/comment/?async=1',
+                             {'query': '强势股', 'results': [{'code': '000001'}]}, format='json')
+        self.assertEqual(r.status_code, 202)
+        self.post.assert_not_called()
+        self.jobs.run_pending()
+        poll = self._poll(r.data['job_id'])
+        self.assertEqual((poll['kind'], poll['status']), ('screener_comment', 'done'))
+        self.assertEqual(poll['result']['comment'], '整体偏强')
+        self.assertTrue(poll['result']['disclaimer'])
+        log = AiCallLog.objects.get()
+        self.assertEqual((log.purpose, log.status), ('screener_comment', 'success'))
+
+    def test_upstream_failure_in_job(self):
+        from stocks.tests_ai import _fake_response
+        self.post.return_value = _fake_response(401, text='secret-body')
+        r = self.client.post('/api/screener/ai/comment/?async=1',
+                             {'results': [{'code': '000001'}]}, format='json')
+        self.jobs.run_pending()
+        poll = self._poll(r.data['job_id'])
+        self.assertEqual((poll['status'], poll['http_status']), ('failed', 502))
+        self.assertEqual(poll['result']['error'], 'auth')
+        self.assertNotIn('secret-body', str(poll))
+
+    def test_validation_provider_and_quota_stay_synchronous(self):
+        from django.test import override_settings
+        from stocks.models import AiJob
+        r = self.client.post('/api/screener/ai/?async=1', {'query': ''}, format='json')
+        self.assertEqual(r.status_code, 400)
+        r = self.client.post('/api/screener/ai/comment/?async=1',
+                             {'results': [{'code': '999999'}]}, format='json')
+        self.assertEqual(r.status_code, 400)
+        with override_settings(STOCKTRACE_AI_DAILY_LIMIT=0):
+            r = self.client.post('/api/screener/ai/?async=1', {'query': '涨'}, format='json')
+        self.assertEqual(r.status_code, 429)
+        self.provider.delete()
+        r = self.client.post('/api/screener/ai/?async=1', {'query': '涨'}, format='json')
+        self.assertEqual(r.status_code, 400)
+        self.assertFalse(AiJob.objects.exists())
