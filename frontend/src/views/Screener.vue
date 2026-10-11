@@ -4,88 +4,15 @@ import { useRouter } from 'vue-router'
 import { aiApi, presetApi, stockApi } from '../api/stocks.js'
 import { aiDisclaimer, aiErrorText, createAiTask, isCanceled } from '../utils/aiRequest.js'
 import { formatPct, formatNum, formatRate, pctClass } from '../utils/format.js'
-import { formatAmount, formatVolume } from '../utils/marketFormat.js'
+import { formatAmount } from '../utils/marketFormat.js'
 import { errorMessage } from '../utils/errorMessage.js'
 import { confirmDialog } from '../stores/feedback.js'
 import { buildConditions, conditionErrors, hasDetail, newCondition } from '../utils/screenerConditions.js'
+import { BOOL_FIELDS, ORDER_OPTIONS } from '../constants/screenerFields.js'
+import { extraColumnsFor, fmtCell } from '../utils/screenerColumns.js'
+import ScreenerConditionList from '../components/ScreenerConditionList.vue'
 
 const router = useRouter()
-
-// 与后端 stocks/ai/screener.py FIELDS 保持一致
-const FIELDS = [
-  { key: 'change_pct', label: '涨跌幅(%)' },
-  { key: 'open_close_pct', label: '日内涨幅(%)' },
-  { key: 'high_low_pct', label: '日内振幅(%)' },
-  { key: 'close_price', label: '收盘价(元)' },
-  { key: 'open_price', label: '开盘价(元)' },
-  { key: 'high_price', label: '最高价(元)' },
-  { key: 'low_price', label: '最低价(元)' },
-  // 日线 volume 入库单位为股（DailyQuote.volume），这里按股填写和显示
-  { key: 'volume', label: '成交量(股)' },
-  { key: 'turnover', label: '成交额(元)' },
-  { key: 'pct_5d', label: '5日涨跌幅(%)' },
-  { key: 'pct_10d', label: '10日涨跌幅(%)' },
-  { key: 'pct_20d', label: '20日涨跌幅(%)' },
-  { key: 'pct_60d', label: '60日涨跌幅(%)' },
-  { key: 'volume_ratio', label: '量比(今量/5日均量)' },
-  { key: 'turnover_5d_avg', label: '5日日均成交额(元)' },
-  { key: 'pct_from_high_20d', label: '距20日最高回撤(%)' },
-  { key: 'up_days', label: '连续上涨天数' },
-  { key: 'above_ma5', label: '站上5日线' },
-  { key: 'above_ma10', label: '站上10日线' },
-  { key: 'above_ma20', label: '站上20日线' },
-  { key: 'above_ma60', label: '站上60日线' },
-  { key: 'ma5_gt_ma10', label: '5日线>10日线' },
-  { key: 'ma5_gt_ma20', label: '5日线>20日线' },
-  { key: 'new_high_20d', label: '创20日新高' },
-  { key: 'new_low_20d', label: '创20日新低' },
-  { key: 'new_high_60d', label: '创60日新高' },
-  { key: 'new_low_60d', label: '创60日新低' },
-  { key: 'ma10_gt_ma20', label: '10日线>20日线' },
-  { key: 'macd_dif', label: 'MACD DIF' },
-  { key: 'macd_dea', label: 'MACD DEA' },
-  { key: 'macd_hist', label: 'MACD柱' },
-  { key: 'macd_dif_gt_dea', label: 'DIF在DEA上方' },
-  { key: 'macd_golden_cross', label: 'MACD金叉' },
-  { key: 'macd_dead_cross', label: 'MACD死叉' },
-  { key: 'macd_dif_gt_zero', label: 'DIF在零轴上方' },
-  { key: 'kdj_k', label: 'KDJ K值' },
-  { key: 'kdj_d', label: 'KDJ D值' },
-  { key: 'kdj_j', label: 'KDJ J值' },
-  { key: 'kdj_golden_cross', label: 'KDJ金叉' },
-  { key: 'kdj_dead_cross', label: 'KDJ死叉' },
-  { key: 'rsi_6', label: 'RSI(6)' },
-  { key: 'rsi_14', label: 'RSI(14)' },
-  { key: 'above_boll_mid', label: '在布林中轨上方' },
-  { key: 'above_boll_upper', label: '触及布林上轨' },
-  { key: 'below_boll_lower', label: '触及布林下轨' },
-  { key: 'turnover_rate', label: '换手率(%)' },
-  { key: 'pe_ttm', label: '市盈率TTM(倍)' },
-  { key: 'pb', label: '市净率(倍)' },
-  { key: 'float_mv', label: '流通市值(元)' },
-  { key: 'total_mv', label: '总市值(元)' },
-]
-// 布尔字段：值只能是 1（是）/ 0（否），与后端 BOOL_FIELDS 保持一致
-const BOOL_FIELDS = new Set([
-  'above_ma5', 'above_ma10', 'above_ma20', 'above_ma60',
-  'ma5_gt_ma10', 'ma5_gt_ma20', 'ma10_gt_ma20',
-  'new_high_20d', 'new_low_20d', 'new_high_60d', 'new_low_60d',
-  'macd_dif_gt_dea', 'macd_golden_cross', 'macd_dead_cross', 'macd_dif_gt_zero',
-  'kdj_golden_cross', 'kdj_dead_cross',
-  'above_boll_mid', 'above_boll_upper', 'below_boll_lower',
-])
-const OPS = [
-  { key: 'gt', label: '>' },
-  { key: 'gte', label: '>=' },
-  { key: 'lt', label: '<' },
-  { key: 'lte', label: '<=' },
-  { key: 'eq', label: '=' },
-  { key: 'between', label: '介于' },
-]
-const ORDER_OPTIONS = [
-  { key: '', label: '默认' },
-  ...FIELDS.filter(f => !BOOL_FIELDS.has(f.key)).map(f => ({ key: f.key, label: f.label })),
-]
 
 // 自然语言选股
 const query = ref('')
@@ -142,53 +69,8 @@ onBeforeUnmount(() => {
   cancelComment()
 })
 
-// 结果表动态附加列：条件与排序里用到、且固定列没展示的指标
-const FIXED_COLS = new Set(['change_pct', 'close_price', 'high_low_pct', 'turnover'])
-const extraColumns = computed(() => {
-  const spec = appliedConditions.value
-  if (!spec) return []
-  const keys = []
-  for (const c of spec.conditions || []) {
-    if (!FIXED_COLS.has(c.field) && !keys.includes(c.field)) keys.push(c.field)
-  }
-  if (spec.order_by && !FIXED_COLS.has(spec.order_by) && !keys.includes(spec.order_by)) {
-    keys.push(spec.order_by)
-  }
-  return keys.map(k => ({
-    key: k,
-    label: (FIELDS.find(f => f.key === k) || {}).label || k,
-    bool: BOOL_FIELDS.has(k),
-  }))
-})
-
-// 结果表附加列：按字段类型选格式（成交量带单位、成交额换算万/亿、振幅不带正号）
-const AMOUNT_FIELDS = new Set(['turnover', 'turnover_5d_avg'])
-const PCT_FIELDS = new Set(['change_pct', 'open_close_pct', 'pct_5d', 'pct_10d', 'pct_20d', 'pct_60d', 'pct_from_high_20d'])
-function fmtCell(row, col) {
-  const v = row[col.key]
-  if (v == null) return '-'
-  if (col.bool) return v === 1 ? '是' : '否'
-  if (col.key === 'volume') return formatVolume(v)
-  if (col.key === 'up_days') return String(v)
-  if (col.key === 'high_low_pct') return formatRate(v)
-  if (AMOUNT_FIELDS.has(col.key)) return formatAmount(v)
-  if (PCT_FIELDS.has(col.key)) return formatPct(v)
-  return formatNum(v)
-}
-
-function addCondition() {
-  conditions.value.push(newCondition())
-}
-function removeCondition(i) {
-  conditions.value.splice(i, 1)
-}
-
-function onFieldChange(c) {
-  if (BOOL_FIELDS.has(c.field)) {
-    c.op = 'eq'
-    c.value = '1'
-  }
-}
+// 结果表动态附加列：条件与排序里用到、且固定列没展示的指标（逻辑见 utils/screenerColumns，ARC-09）
+const extraColumns = computed(() => extraColumnsFor(appliedConditions.value))
 
 // 逐行校验：不完整的行标红并禁用"执行筛选"，不再静默丢弃（FEF-09）
 const condErrors = computed(() => conditionErrors(conditions.value, BOOL_FIELDS))
@@ -408,32 +290,7 @@ function goDetail(row) {
     <!-- 手动条件 -->
     <div class="card">
       <h2>手动条件</h2>
-      <div class="conds">
-        <div
-          v-for="(c, i) in conditions" :key="c.uid"
-          class="cond-row" :class="{ invalid: condErrors[i] }"
-        >
-          <select v-model="c.field" @change="onFieldChange(c)">
-            <option v-for="f in FIELDS" :key="f.key" :value="f.key">{{ f.label }}</option>
-          </select>
-          <select v-if="!BOOL_FIELDS.has(c.field)" v-model="c.op" class="op">
-            <option v-for="o in OPS" :key="o.key" :value="o.key">{{ o.label }}</option>
-          </select>
-          <span v-else class="op">=</span>
-          <select v-if="BOOL_FIELDS.has(c.field)" v-model="c.value" class="val">
-            <option value="1">是</option>
-            <option value="0">否</option>
-          </select>
-          <input v-else v-model="c.value" type="number" class="val" placeholder="值" />
-          <template v-if="c.op === 'between'">
-            <span>~</span>
-            <input v-model="c.value2" type="number" class="val" placeholder="上限" />
-          </template>
-          <button class="btn small" :disabled="conditions.length <= 1" @click="removeCondition(i)">删</button>
-          <span v-if="condErrors[i]" class="cond-error">{{ condErrors[i] }}</span>
-        </div>
-        <button class="btn small" @click="addCondition">+ 加条件</button>
-      </div>
+      <ScreenerConditionList v-model="conditions" :errors="condErrors" />
       <div class="manual-meta">
         <label>条件关系</label>
         <select v-model="logic">
@@ -594,19 +451,6 @@ function goDetail(row) {
 .mono {
   font-family: monospace;
 }
-.conds {
-  display: flex;
-  flex-direction: column;
-  gap: 8px;
-  margin-bottom: 12px;
-}
-.cond-row {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-}
-.cond-row select,
-.cond-row input,
 .manual-meta select {
   padding: 6px 8px;
   border: 1px solid #3a3a5a;
@@ -614,16 +458,6 @@ function goDetail(row) {
   background: #14142a;
   color: #eee;
   font-size: 13px;
-}
-.cond-row select.op {
-  width: 70px;
-}
-.cond-row input.val {
-  width: 120px;
-}
-.cond-row.invalid input,
-.cond-row.invalid select {
-  border-color: var(--danger);
 }
 .cond-error {
   color: var(--danger);
