@@ -19,7 +19,7 @@ from rest_framework.response import Response
 from ..common.pagination import paginate as _paginate
 from ..trading_calendar import expected_latest_date
 from ..models import DetectorDimConfig, DetectorRun, DetectorSignal
-from . import calm, registry, review, signals
+from . import constants, registry
 from .dimensions import (
     build_index_context,
     build_sector_context,
@@ -356,26 +356,26 @@ def detector_config(request):
         'meta': _meta(run_rows[0] if run_rows else None),
         'dims': dims,
         'runs': runs,
-        # 规则直接引用实现里的常量（ALG-15）：旧实现在这里手写了一份副本，
-        # 改 review.py 后配置页展示的规则会与实际不一致
+        # 规则直接引用 detector/constants 里的常量（ALG-15 / ARC-06）：实现与展示
+        # 共用一份，旧实现在这里手写了一份副本，改阈值后配置页会与实际不一致
         'review_rules': {
-            'lookback_days': review.REVIEW_LOOKBACK,
-            'hit_sigma_k': review.HIT_SIGMA_K,
-            'sigma_window': review.SIGMA_WINDOW,
-            'hit_pct': review.HIT_PCT,
-            'weight_bounds': list(review.WEIGHT_BOUNDS),
-            'min_scale_bounds': list(review.MIN_SCALE_BOUNDS),
-            'min_samples': review.MIN_ADJ_SAMPLES,
-            'excess_bounds': [review.EXCESS_LOW, review.EXCESS_HIGH],
-            'weight_band': review.WEIGHT_BAND,
+            'lookback_days': constants.REVIEW_LOOKBACK,
+            'hit_sigma_k': constants.HIT_SIGMA_K,
+            'sigma_window': constants.SIGMA_WINDOW,
+            'hit_pct': constants.HIT_PCT,
+            'weight_bounds': list(constants.WEIGHT_BOUNDS),
+            'min_scale_bounds': list(constants.MIN_SCALE_BOUNDS),
+            'min_samples': constants.MIN_ADJ_SAMPLES,
+            'excess_bounds': [constants.EXCESS_LOW, constants.EXCESS_HIGH],
+            'weight_band': constants.WEIGHT_BAND,
         },
         # 平静闸门与分级参数只读展示（不参与自动调参，理由见 calm.py 文件尾）
         'calm_rules': {
-            'price': dict(calm.PRICE_CALM_PARAMS),
-            'sector': dict(calm.SECTOR_CALM_PARAMS),
+            'price': dict(constants.PRICE_CALM_PARAMS),
+            'sector': dict(constants.SECTOR_CALM_PARAMS),
         },
         'vote_rules': {
-            'min_dims': signals.VOTE_MIN_DIMS,
-            'severity': dict(signals.SEVERITY_RULES),
+            'min_dims': constants.VOTE_MIN_DIMS,
+            'severity': dict(constants.SEVERITY_RULES),
         },
     })

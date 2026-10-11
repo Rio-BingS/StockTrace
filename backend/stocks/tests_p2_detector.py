@@ -618,9 +618,9 @@ class ConfigSingleSourceTests(TestCase):
     def test_review_rules_follow_review_constants(self):
         from django.urls import reverse
 
-        from .detector import review
+        from .detector import constants, review
 
-        with patch.object(review, 'MIN_ADJ_SAMPLES', 42), patch.object(review, 'HIT_PCT', 9.9):
+        with patch.object(constants, 'MIN_ADJ_SAMPLES', 42), patch.object(constants, 'HIT_PCT', 9.9):
             data = self.client.get(reverse('detector-config')).json()
         self.assertEqual(data['review_rules']['min_samples'], 42)
         self.assertEqual(data['review_rules']['hit_pct'], 9.9)
