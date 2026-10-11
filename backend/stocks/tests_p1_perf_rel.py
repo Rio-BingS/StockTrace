@@ -485,3 +485,76 @@ class DashboardAndDailyQueryTests(TestCase):
         self.assertTrue(all(row['code'] == '600000' for row in r.json()))
         self.assertEqual(len(self.client.get(url, {'days': 500}).json()), 4)
         self.assertEqual(len(self.client.get(url, {'days': 99999}).json()), 4)  # 上限 3650 天
+
+
+class MarketDeadlineBreakerTests(SimpleTestCase):
+    """REL-05：市场接口总时限超时 504；同接口连续 3 次超时熔断 60s 返回 503。"""
+
+    def setUp(self):
+        from stocks import views
+
+        self.views = views
+        views._breaker.clear()
+        self.addCleanup(views._breaker.clear)
+        self.release = threading.Event()
+        self.addCleanup(self.release.set)  # 放走仍卡在池里的慢 loader
+
+    def _slow(self, *a, **k):
+        self.release.wait(10)
+        return {'ok': True}
+
+    def _get(self, url):
+        from rest_framework.test import APIRequestFactory
+
+        from stocks import views
+
+        req = APIRequestFactory().get(url)
+        return views.market_overview(req) if url == '/api/market/' else views.market_sectors(req)
+
+    def test_default_deadline_below_nginx(self):
+        from django.conf import settings
+
+        self.assertLess(settings.STOCKTRACE_REQUEST_DEADLINE, 120)
+
+    @override_settings(STOCKTRACE_REQUEST_DEADLINE=0.2)
+    def test_timeout_returns_504_and_breaker_opens(self):
+        with mock.patch.object(self.views, 'get_market_overview', side_effect=self._slow) as m, \
+                self.assertLogs('stocks.views', level='WARNING') as cm:
+            for _ in range(3):
+                t0 = time.monotonic()
+                r = self._get('/api/market/')
+                self.assertEqual(r.status_code, 504)
+                self.assertLess(time.monotonic() - t0, 2)
+            r = self._get('/api/market/')
+            self.assertEqual(r.status_code, 503)
+            self.assertEqual(m.call_count, 3)  # 熔断期间不再打上游
+        self.assertTrue(any('熔断' in line for line in cm.output))
+        # 熔断按接口隔离：其他接口不受影响
+        with mock.patch.object(self.views, 'get_sector_rotation', return_value={'items': []}):
+            self.assertEqual(self._get('/api/market/sectors/').status_code, 200)
+
+    @override_settings(STOCKTRACE_REQUEST_DEADLINE=0.2)
+    def test_success_resets_consecutive_count_and_breaker_expires(self):
+        with mock.patch.object(self.views, 'get_market_overview', side_effect=self._slow), \
+                self.assertLogs('stocks.views', level='WARNING'):
+            self._get('/api/market/')
+            self._get('/api/market/')
+        with mock.patch.object(self.views, 'get_market_overview', return_value={'ok': 1}):
+            self.assertEqual(self._get('/api/market/').status_code, 200)
+        self.assertNotIn('大盘数据', self.views._breaker)
+        # 熔断到期后恢复访问
+        self.views._breaker['大盘数据'] = {'timeouts': 0, 'open_until': time.monotonic() - 1}
+        with mock.patch.object(self.views, 'get_market_overview', return_value={'ok': 1}):
+            self.assertEqual(self._get('/api/market/').status_code, 200)
+
+    def test_errors_still_map_to_400_and_502(self):
+        with mock.patch.object(self.views, 'get_sector_rotation', side_effect=ValueError('bad')):
+            self.assertEqual(self._get('/api/market/sectors/').status_code, 400)
+        with mock.patch.object(self.views, 'get_sector_rotation', side_effect=RuntimeError('x')), \
+                self.assertLogs('stocks.views', level='ERROR'):
+            self.assertEqual(self._get('/api/market/sectors/').status_code, 502)
+
+    def test_frontend_timeout_below_nginx(self):
+        js = (Path(__file__).resolve().parents[2] / 'frontend' / 'src' / 'api' / 'stocks.js').read_text(encoding='utf-8')
+        self.assertNotIn('180000', js)
+        self.assertIn("api.get('/market/national-etf/flow/', { timeout: 110000, params })", js)

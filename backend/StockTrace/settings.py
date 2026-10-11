@@ -221,6 +221,8 @@ STOCKTRACE_SCHEDULER_HEARTBEAT = Path(
 )
 # 心跳超过该秒数未更新即判定调度器失联
 STOCKTRACE_HEARTBEAT_STALE_SECONDS = int(os.environ.get('STOCKTRACE_HEARTBEAT_STALE_SECONDS', '180'))
+# 同步拉上游的市场接口总时限（秒，REL-05）：须小于 nginx proxy_read_timeout 120s
+STOCKTRACE_REQUEST_DEADLINE = float(os.environ.get('STOCKTRACE_REQUEST_DEADLINE', '100'))
 
 
 # Logging（REL-02）

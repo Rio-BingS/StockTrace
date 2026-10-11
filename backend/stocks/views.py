@@ -1,11 +1,15 @@
 from rest_framework import viewsets, status
 from rest_framework.decorators import action, api_view
 from rest_framework.response import Response
-from django.db import IntegrityError, transaction
+from django.conf import settings
+from django.db import IntegrityError, close_old_connections, transaction
 from django.db.models import OuterRef, Subquery
 from django.utils import timezone
+from concurrent.futures import ThreadPoolExecutor, TimeoutError as FutureTimeout
 from datetime import date, datetime, timedelta
 import logging
+import threading
+import time
 
 from .models import Stock, DailyQuote, MinuteBar
 from .serializers import (
@@ -300,9 +304,78 @@ def dashboard(request):
     return Response(serializer.data)
 
 
+# ------------------------------------------------------------
+# 同步拉上游的市场接口：总时限 + 熔断（REL-05）
+# 请求线程把 loader 交给有界线程池，最多等 STOCKTRACE_REQUEST_DEADLINE 秒（默认 100，
+# 小于 nginx proxy_read_timeout 120s），超时返回 504 而不是让 nginx 先断开、worker 继续空等。
+# 同一接口连续 3 次超时即熔断 60s，期间直接 503，避免挂死的上游把线程池占满。
+# ------------------------------------------------------------
+_UPSTREAM_POOL = ThreadPoolExecutor(max_workers=4, thread_name_prefix='upstream')
+_BREAKER_THRESHOLD = 3
+_BREAKER_OPEN_SECONDS = 60
+_breaker_lock = threading.Lock()
+_breaker = {}  # label -> {'timeouts': 连续超时次数, 'open_until': monotonic 秒}
+
+
+class UpstreamTimeout(Exception):
+    pass
+
+
+class UpstreamCircuitOpen(Exception):
+    pass
+
+
+def _request_deadline():
+    return float(getattr(settings, 'STOCKTRACE_REQUEST_DEADLINE', 100))
+
+
+def _run_loader(loader):
+    try:
+        return loader()
+    finally:
+        close_old_connections()  # 池线程长驻：用完归还 DB 连接
+
+
+def _call_with_deadline(loader, label):
+    """在线程池里执行 loader，带总时限与按 label 熔断。超时抛 UpstreamTimeout，熔断中抛 UpstreamCircuitOpen。"""
+    now = time.monotonic()
+    with _breaker_lock:
+        st = _breaker.get(label)
+        if st and st['open_until'] > now:
+            raise UpstreamCircuitOpen(label)
+    future = _UPSTREAM_POOL.submit(_run_loader, loader)
+    try:
+        result = future.result(timeout=_request_deadline())
+    except FutureTimeout:
+        future.cancel()  # 还在排队则不再执行；已在跑的线程无法强停，由上游 socket 超时兜底
+        with _breaker_lock:
+            st = _breaker.setdefault(label, {'timeouts': 0, 'open_until': 0.0})
+            st['timeouts'] += 1
+            if st['timeouts'] >= _BREAKER_THRESHOLD:
+                st['open_until'] = time.monotonic() + _BREAKER_OPEN_SECONDS
+                st['timeouts'] = 0
+                logger.warning(f'{label} 连续 {_BREAKER_THRESHOLD} 次超时，熔断 {_BREAKER_OPEN_SECONDS}s')
+        raise UpstreamTimeout(label)
+    with _breaker_lock:
+        _breaker.pop(label, None)
+    return result
+
+
+def _deadline_error_response(exc, label):
+    if isinstance(exc, UpstreamCircuitOpen):
+        return Response(
+            {'detail': f'{label}上游连续超时，暂停访问 {_BREAKER_OPEN_SECONDS} 秒后再试'},
+            status=status.HTTP_503_SERVICE_UNAVAILABLE,
+        )
+    logger.warning(f'获取{label}超过 {_request_deadline():.0f}s 总时限')
+    return Response({'detail': f'获取{label}超时，请稍后重试'}, status=status.HTTP_504_GATEWAY_TIMEOUT)
+
+
 def _market_response(loader, label):
     try:
-        return Response(loader())
+        return Response(_call_with_deadline(loader, label))
+    except (UpstreamTimeout, UpstreamCircuitOpen) as e:
+        return _deadline_error_response(e, label)
     except Exception as e:
         logger.exception(f'获取{label}失败')
         return Response(
@@ -355,7 +428,7 @@ def market_trend(request):
         else:
             raise ValueError('period 必须是 1w、1m、3m、6m、1y 或 ytd')
         return get_market_trend(days=min(days, 300))
-    return _market_bad_request(load)
+    return _market_bad_request(load, '全市场走势')
 
 
 def _positive_int(request, key, default, maximum=None):
@@ -384,9 +457,11 @@ def _optional_float(request, key):
     return value
 
 
-def _market_bad_request(loader):
+def _market_bad_request(loader, label='市场数据'):
     try:
-        return Response(loader())
+        return Response(_call_with_deadline(loader, label))
+    except (UpstreamTimeout, UpstreamCircuitOpen) as e:
+        return _deadline_error_response(e, label)
     except ValueError as e:
         return Response({'detail': str(e)}, status=status.HTTP_400_BAD_REQUEST)
     except Exception as e:
@@ -407,7 +482,7 @@ def market_sectors(request):
             page=_positive_int(request, 'page', 1),
             page_size=_positive_int(request, 'page_size', 50, maximum=100),
         )
-    return _market_bad_request(load)
+    return _market_bad_request(load, '板块资金轮动')
 
 
 @api_view(['GET'])
@@ -425,7 +500,7 @@ def market_national_etf_flow(request):
             start=request.query_params.get('start'),
             end=request.query_params.get('end'),
         )
-    return _market_bad_request(load)
+    return _market_bad_request(load, '国家队ETF资金流向')
 
 
 @api_view(['GET'])
@@ -442,7 +517,7 @@ def market_etf_radar(request):
             page=_positive_int(request, 'page', 1),
             page_size=_positive_int(request, 'page_size', 50, maximum=100),
         )
-    return _market_bad_request(load)
+    return _market_bad_request(load, 'ETF雷达')
 
 
 @api_view(['GET'])
@@ -453,13 +528,13 @@ def market_etf_detail(request, code):
         range_name=request.query_params.get('range', '3m'),
         start_date=request.query_params.get('start_date') or None,
         end_date=request.query_params.get('end_date') or None,
-    ))
+    ), 'ETF详情')
 
 
 @api_view(['GET'])
 def market_stock_margin(request, code):
     """个股两融余额（交易所官方披露，T+1）。"""
-    return _market_bad_request(lambda: fetch_stock_margin(code.zfill(6)))
+    return _market_bad_request(lambda: fetch_stock_margin(code.zfill(6)), '个股两融')
 
 
 @api_view(['GET'])
@@ -468,7 +543,7 @@ def market_fund_flow_window(request):
     def load():
         window = resolve_period(request.query_params.get, FULL_PRESETS, default='1m')
         return get_market_fund_flow_window(window)
-    return _market_bad_request(load)
+    return _market_bad_request(load, '大盘资金流')
 
 
 @api_view(['GET'])
@@ -477,7 +552,7 @@ def market_northbound_window(request):
     def load():
         window = resolve_period(request.query_params.get, FULL_PRESETS, default='1m')
         return get_northbound_window(window)
-    return _market_bad_request(load)
+    return _market_bad_request(load, '北向资金')
 
 
 @api_view(['GET'])
@@ -487,7 +562,10 @@ def market_institutions(request):
     code = (request.query_params.get('code') or '').strip() or None
     quarter = (request.query_params.get('quarter') or '').strip() or None
     try:
-        return Response(get_institution_holdings(stock_code=code, quarter=quarter))
+        return Response(_call_with_deadline(
+            lambda: get_institution_holdings(stock_code=code, quarter=quarter), '机构持仓'))
+    except (UpstreamTimeout, UpstreamCircuitOpen) as e:
+        return _deadline_error_response(e, '机构持仓')
     except ValueError as e:
         return Response({'detail': str(e)}, status=status.HTTP_400_BAD_REQUEST)
     except Exception as e:
