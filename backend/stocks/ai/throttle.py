@@ -45,14 +45,6 @@ def _today_start(now):
     return timezone.localtime(now).replace(hour=0, minute=0, second=0, microsecond=0)
 
 
-def _has_field(name):
-    try:
-        AiCallLog._meta.get_field(name)
-        return True
-    except Exception:  # noqa: BLE001  FieldDoesNotExist
-        return False
-
-
 def _cooldown_qs(qs):
     """冷却只算成功与进行中的调用；失败调用不触发冷却（AIX-06）。
 
@@ -125,38 +117,47 @@ def error_text(exc):
 def finish_call(log, success, usage=None, provider=None, error=None):
     """回填占位流水的结果；失败流水保留（计入每日上限，不计冷却）。
 
-    可观测性（AIX-08）：耗时按占位写入时刻计算，模型取实际服务商。model/latency_ms/
-    error/status 字段待模型迁移补上后自动落库；在此之前同样内容写一行 INFO 日志。
+    可观测性（AIX-08）：耗时按占位写入时刻计算，模型取实际服务商，失败原因只含
+    分类与状态码；同样内容另写一行 INFO 日志，便于 journalctl 检索。
     """
     if provider is not None:
         log.provider = provider
     provider = log.provider
-    model = (getattr(provider, 'model', '') or '')[:100]
-    latency_ms = None
+    model = (getattr(provider, 'model', '') or '')[:100] or None
+    duration_ms = None
     if log.created_at:
-        latency_ms = max(0, int((timezone.now() - log.created_at).total_seconds() * 1000))
+        duration_ms = max(0, int((timezone.now() - log.created_at).total_seconds() * 1000))
     err = error_text(error) if not success else ''
+    usage = usage or {}
     log.success = bool(success)
-    log.prompt_tokens = (usage or {}).get('prompt_tokens')
-    log.completion_tokens = (usage or {}).get('completion_tokens')
     log.status = AiCallLog.STATUS_SUCCESS if success else AiCallLog.STATUS_FAILED
-    update = ['success', 'status', 'prompt_tokens', 'completion_tokens', 'provider']
-    optional = {
-        'model': model,
-        'latency_ms': latency_ms,
-        'error': err,
-    }
-    for name, value in optional.items():
-        if _has_field(name):
-            setattr(log, name, value)
-            update.append(name)
-    log.save(update_fields=update)
+    log.prompt_tokens = usage.get('prompt_tokens')
+    log.completion_tokens = usage.get('completion_tokens')
+    log.total_tokens = _total_tokens(usage)
+    log.model = model
+    log.duration_ms = duration_ms
+    log.error_reason = err[:200] or None
+    log.save(update_fields=[
+        'success', 'status', 'prompt_tokens', 'completion_tokens', 'total_tokens',
+        'provider', 'model', 'duration_ms', 'error_reason',
+    ])
     logger.info(
-        'AI 调用 purpose=%s provider=%s model=%s success=%s latency_ms=%s '
+        'AI 调用 purpose=%s provider=%s model=%s success=%s duration_ms=%s '
         'prompt_tokens=%s completion_tokens=%s error=%s',
-        log.purpose, getattr(provider, 'pk', None), model, log.success, latency_ms,
+        log.purpose, getattr(provider, 'pk', None), model or '-', log.success, duration_ms,
         log.prompt_tokens, log.completion_tokens, err or '-',
     )
+
+
+def _total_tokens(usage):
+    """总 tokens：优先用上游给的 total_tokens，否则输入 + 输出；都没有返回 None。"""
+    total = usage.get('total_tokens')
+    if total is not None:
+        return total
+    prompt, completion = usage.get('prompt_tokens'), usage.get('completion_tokens')
+    if prompt is None and completion is None:
+        return None
+    return (prompt or 0) + (completion or 0)
 
 
 def cancel_call(log):

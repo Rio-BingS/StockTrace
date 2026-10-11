@@ -237,23 +237,31 @@ class AiCallLogObservabilityTests(TestCase):
             self.client.post(f'/api/stocks/{self.stock.id}/ai-analysis/')
         line = '\n'.join(logs.output)
         self.assertIn('model=m', line)
-        self.assertIn('latency_ms=', line)
+        self.assertIn('duration_ms=', line)
         self.assertIn('error=auth HTTP 401', line)
         self.assertNotIn('secret-body', line)
 
     def test_fields_filled_when_migrated(self):
-        from stocks.ai.throttle import _has_field
         from stocks.models import AiCallLog
         from stocks.tests_ai import _fake_response
-        if not _has_field('latency_ms'):
-            self.skipTest('AiCallLog 尚未迁移 model/latency_ms/error/status 字段（待 data 方向）')
         self.post.return_value = _fake_response(401, text='x')
         self.client.post(f'/api/stocks/{self.stock.id}/ai-analysis/')
         log = AiCallLog.objects.get()
         self.assertEqual(log.model, 'm')
-        self.assertIsNotNone(log.latency_ms)
-        self.assertEqual(log.error, 'auth HTTP 401')
-        self.assertEqual(log.status, 'failed')
+        self.assertIsNotNone(log.duration_ms)
+        self.assertEqual(log.error_reason, 'auth HTTP 401')
+        self.assertEqual(log.status, AiCallLog.STATUS_FAILED)
+        self.assertIsNone(log.total_tokens)
+
+    def test_success_fills_tokens_and_clears_error(self):
+        from stocks.models import AiCallLog
+        from stocks.tests_p1_ai import _ok
+        self.post.return_value = _ok('分析')
+        self.client.post(f'/api/stocks/{self.stock.id}/ai-analysis/')
+        log = AiCallLog.objects.get()
+        self.assertEqual(log.status, AiCallLog.STATUS_SUCCESS)
+        self.assertIsNone(log.error_reason)
+        self.assertEqual((log.prompt_tokens, log.completion_tokens, log.total_tokens), (3, 2, 5))
 
 
 class AiMultiProviderTests(TestCase):
