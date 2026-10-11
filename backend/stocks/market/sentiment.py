@@ -88,8 +88,11 @@ def fetch_zt_sentiment(ttl=600, force=False):
             continue
         chosen = d
         zt_df = zt
-        dt_df = _safe_df_call(ak.stock_zt_pool_dtgc_em, date=ds, source_name='em_zt_dt_pool')
-        zb_df = _safe_df_call(ak.stock_zt_pool_zbgc_em, date=ds, source_name='em_zt_zb_pool')
+        # 跌停池/炸板池当日为空是合法结果（0 只），不能当作源失败（DAT-10）
+        dt_df = _safe_df_call(ak.stock_zt_pool_dtgc_em, date=ds, source_name='em_zt_dt_pool',
+                              empty_ok=True)
+        zb_df = _safe_df_call(ak.stock_zt_pool_zbgc_em, date=ds, source_name='em_zt_zb_pool',
+                              empty_ok=True)
         break
 
     if chosen is None:

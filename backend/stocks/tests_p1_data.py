@@ -261,3 +261,80 @@ class AlertEventUniqueTests(TestCase):
                                  content_type='application/json')
         self.assertEqual(r.status_code, 409)
         fetch.assert_not_called()
+
+
+class NegativeCacheTests(SimpleTestCase):
+    """DAT-10：空结果只做 60s 负缓存、不覆盖好数据、不走收盘后保鲜；合法空集不计冷却。"""
+
+    def setUp(self):
+        import importlib
+
+        from .market import _sources
+        # market 包把 _cache（OrderedDict）导出到包级，需按模块名取 _cache 模块
+        c = importlib.import_module('stocks.market._cache')
+        self.c = c
+        c._cache.clear()
+        _sources._source_state.clear()
+        self.addCleanup(c._cache.clear)
+        self.addCleanup(_sources._source_state.clear)
+
+    def test_empty_result_negative_cached_60s_only(self):
+        c = self.c
+        with patch('stocks.market._cache.time.time', return_value=1000.0):
+            c._cache_set('k', {'available': False, 'items': []})
+            self.assertEqual(c._cache_get('k', 600), {'available': False, 'items': []})
+            self.assertEqual(c._stale_or('k', 'default'), 'default')
+            self.assertEqual(c._cache_meta('k', 600, 's', False)['cache_status'], 'unavailable')
+        # 61 秒后即失效，即使收盘后保鲜条件成立也不算新鲜
+        with patch('stocks.market._cache.time.time', return_value=1061.0), \
+                patch('stocks.market._cache._calendar_enabled', return_value=True), \
+                patch('stocks.market._cache._data_changing_now', return_value=False), \
+                patch('stocks.market._cache._last_session_close') as close:
+            close.return_value = timezone.make_aware(datetime(1970, 1, 1))
+            self.assertIsNone(c._cache_get('k', 600))
+
+    def test_empty_does_not_overwrite_good_data(self):
+        c = self.c
+        with patch('stocks.market._cache.time.time', return_value=1000.0):
+            c._cache_set('k', [1, 2])
+        with patch('stocks.market._cache.time.time', return_value=1200.0):
+            self.assertIsNone(c._cache_get('k', 60))  # 好数据已过期
+            c._cache_set('k', [])                    # 重拉失败
+            self.assertEqual(c._cache_get('k', 60), [1, 2])  # 60s 内沿用旧数据
+            self.assertEqual(c._stale_or('k', None), [1, 2])
+            self.assertEqual(c._cache_meta('k', 60, 's', True)['cache_status'], 'stale')
+        with patch('stocks.market._cache.time.time', return_value=1300.0):
+            self.assertIsNone(c._cache_get('k', 60))
+            self.assertEqual(c._stale_or('k', None), [1, 2])
+            c._cache_set('k', [3])
+            self.assertEqual(c._cache_get('k', 60), [3])
+
+    def test_safe_df_call_empty_ok(self):
+        from .market import _sources
+        empty = pd.DataFrame()
+        for _ in range(3):
+            r = _sources._safe_df_call(lambda: empty, source_name='legit', empty_ok=True)
+            self.assertIsNotNone(r)
+            self.assertTrue(r.empty)
+        self.assertFalse(_sources._source_is_cool('legit'))
+        for _ in range(2):
+            self.assertIsNone(_sources._safe_df_call(lambda: empty, source_name='bad'))
+        self.assertTrue(_sources._source_is_cool('bad'))
+        # None 即使 empty_ok 也是失败
+        self.assertIsNone(_sources._safe_df_call(lambda: None, source_name='n', empty_ok=True))
+        r, name = _sources._first_ok([(lambda: empty, 'a')], empty_ok=True)
+        self.assertEqual(name, 'a')
+        self.assertEqual(_sources._first_ok([(lambda: empty, 'b')]), (None, None))
+
+    def test_sentiment_empty_dt_pool_counts_zero(self):
+        from .market import sentiment
+        zt = pd.DataFrame({'代码': ['600000'], '连板数': [1]})
+        with patch('stocks.market.sentiment.ak.stock_zt_pool_em', return_value=zt), \
+                patch('stocks.market.sentiment.ak.stock_zt_pool_dtgc_em',
+                      return_value=pd.DataFrame()), \
+                patch('stocks.market.sentiment.ak.stock_zt_pool_zbgc_em',
+                      return_value=pd.DataFrame()):
+            data = sentiment.fetch_zt_sentiment(force=True)
+        self.assertEqual(data['dt_count'], 0)
+        self.assertEqual(data['zb_count'], 0)
+        self.assertEqual(data['seal_rate'], 100.0)

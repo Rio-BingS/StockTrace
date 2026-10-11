@@ -52,15 +52,26 @@ def _source_mark_fail(name, err):
         _source_state[name] = st
 
 
-def _safe_df_call(fn, *args, source_name=None, **kwargs):
-    """单次调用；可选 source_name 参与冷却统计。"""
+def _is_empty_result(result):
+    return result is None or (isinstance(result, pd.DataFrame) and result.empty)
+
+
+def _safe_df_call(fn, *args, source_name=None, empty_ok=False, **kwargs):
+    """单次调用；可选 source_name 参与冷却统计。
+
+    empty_ok=True：空 DataFrame 是合法结果（如当日无跌停股），原样返回且不计入
+    冷却；默认 False 时空结果视为上游失败（DAT-10）。None 始终视为失败。
+    """
     name = source_name or getattr(fn, '__name__', 'unknown')
     if _source_is_cool(name):
         logger.debug(f"跳过冷却中的数据源 {name}")
         return None
     try:
         result = fn(*args, **kwargs)
-        if result is None or (isinstance(result, pd.DataFrame) and result.empty):
+        if _is_empty_result(result):
+            if empty_ok and result is not None:
+                _source_mark_ok(name)
+                return result
             _source_mark_fail(name, 'empty')
             return None
         _source_mark_ok(name)
@@ -70,12 +81,13 @@ def _safe_df_call(fn, *args, source_name=None, **kwargs):
         return None
 
 
-def _first_ok(candidates, *args, **kwargs):
+def _first_ok(candidates, *args, empty_ok=False, **kwargs):
     """多源路由：按优先级逐个尝试候选源，返回第一个成功的结果。
 
     candidates: [(fn, source_name), ...]，fn 用 *args/**kwargs 调用。
     每个候选都受冷却约束（冷却中的直接跳过），成败都计入冷却统计；
     上一个源失败会立即尝试下一个，不重试同一个源。
+    empty_ok=True 时空 DataFrame 视为合法结果直接返回（见 _safe_df_call）。
     返回 (result, source_name)；全部失败返回 (None, None)。
     """
     for fn, name in candidates:
@@ -84,7 +96,10 @@ def _first_ok(candidates, *args, **kwargs):
             continue
         try:
             result = fn(*args, **kwargs)
-            if result is None or (isinstance(result, pd.DataFrame) and result.empty):
+            if _is_empty_result(result):
+                if empty_ok and result is not None:
+                    _source_mark_ok(name)
+                    return result, name
                 _source_mark_fail(name, 'empty')
                 continue
             _source_mark_ok(name)
