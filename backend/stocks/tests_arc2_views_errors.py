@@ -147,3 +147,24 @@ class ResolvePeriodExtensionTests(SimpleTestCase):
             self._resolve({'start': '2026/01/01'}, messages={'bad_date': 'start/end 必须是 YYYY-MM-DD'})
         with self.assertRaisesMessage(ValueError, 'period 仅支持 1w/1m/ytd'):
             self._resolve({'period': '5y'})
+
+
+class ErrorHierarchyTests(SimpleTestCase):
+    def test_hierarchy_and_legacy_paths(self):
+        from . import errors
+        from .common import upstream
+        from . import views
+
+        self.assertTrue(issubclass(errors.BadRequest, errors.StockTraceError))
+        self.assertTrue(issubclass(errors.BadRequest, ValueError))  # 旧 except ValueError 仍能接住
+        for cls in (errors.UpstreamTimeout, errors.UpstreamCircuitOpen):
+            self.assertTrue(issubclass(cls, errors.UpstreamError))
+            self.assertFalse(issubclass(cls, ValueError))
+        # 旧导入路径与新定义是同一个类
+        self.assertIs(upstream.UpstreamTimeout, errors.UpstreamTimeout)
+        self.assertIs(views.UpstreamCircuitOpen, errors.UpstreamCircuitOpen)
+        self.assertEqual(
+            [errors.BadRequest.status_code, errors.UpstreamError.status_code,
+             errors.UpstreamTimeout.status_code, errors.UpstreamCircuitOpen.status_code],
+            [400, 502, 504, 503],
+        )

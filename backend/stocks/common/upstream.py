@@ -14,6 +14,8 @@ from concurrent.futures import ThreadPoolExecutor, TimeoutError as FutureTimeout
 from django.conf import settings
 from django.db import close_old_connections
 
+from ..errors import UpstreamCircuitOpen, UpstreamTimeout  # 定义已迁至 stocks.errors（ARC-05）
+
 logger = logging.getLogger(__name__)
 
 _UPSTREAM_POOL = ThreadPoolExecutor(max_workers=4, thread_name_prefix='upstream')
@@ -21,14 +23,6 @@ _BREAKER_THRESHOLD = 3
 _BREAKER_OPEN_SECONDS = 60
 _breaker_lock = threading.Lock()
 _breaker = {}  # label -> {'timeouts': 连续超时次数, 'open_until': monotonic 秒}
-
-
-class UpstreamTimeout(Exception):
-    pass
-
-
-class UpstreamCircuitOpen(Exception):
-    pass
 
 
 def _request_deadline():
