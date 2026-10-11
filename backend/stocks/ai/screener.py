@@ -338,9 +338,9 @@ FIELDS = {
     'change_pct': ('涨跌幅', lambda ctx: _f(ctx['quote'].change_pct), '%，相对昨收'),
     'open_close_pct': ('日内涨幅', lambda ctx: _f(ctx['quote'].open_close_pct), '%，(收盘-开盘)/开盘'),
     'high_low_pct': ('日内振幅', lambda ctx: _f(ctx['quote'].high_low_pct), '%，(最高-最低)/最低'),
-    'volume': ('成交量', lambda ctx: _f(ctx['quote'].volume), '手'),
+    'volume': ('成交量', lambda ctx: _f(ctx['quote'].volume), '股'),
     'turnover': ('成交额', lambda ctx: _f(ctx['quote'].turnover), '元'),
-    # ---- 多日衍生字段（由最近 ≤61 根日线现算） ----
+    # ---- 多日衍生字段（由截至 as_of 的最近 ≤140 根日线现算） ----
     'pct_5d': ('5日涨跌幅', _pct_n(5), '%'),
     'pct_10d': ('10日涨跌幅', _pct_n(10), '%'),
     'pct_20d': ('20日涨跌幅', _pct_n(20), '%'),
