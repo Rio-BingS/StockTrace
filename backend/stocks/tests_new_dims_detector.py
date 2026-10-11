@@ -145,13 +145,17 @@ class VpCorrEvalTests(SimpleTestCase):
 
 
 class VpCorrNoiseSignalTests(SimpleTestCase):
-    """启用 vp_corr 后，随机游走下「≥2 维同向」信号率仍须 < 5%（同 ALG-04 守护口径）。
+    """启用 vp_corr 后，随机游走下线上投票规则的出信号率仍须 < 5%（同 ALG-04 守护口径）。
 
     生成器与种子沿用 tests_p2_detector 的随机游走守护测试，便于对照；另要求
-    vp_corr 带来的增量 ≤ 2 个百分点（实测约 +1.0~1.4pp）。
+    vp_corr 带来的增量 ≤ 2 个百分点。
+    集成说明：投票改为分组加权（calm-vote #4）后，这里用线上的 signals.vote 判定，
+    vp_corr 按注册表归入量能强度组。若仍按旧的「≥2 维同向、零反向」规则计，σ=2.5%
+    平静日约 5.7%，会超线——这正是 vp_corr 保持默认停用、且只能作强度确认的原因之一。
     """
 
     def _rates(self, sigma, with_vp):
+        from .detector import signals
         from .tests_p2_detector import _random_walk_ctx
 
         specs = [s for s in registry.DIMENSIONS
@@ -161,12 +165,12 @@ class VpCorrNoiseSignalTests(SimpleTestCase):
         n = 800
         for _ in range(n):
             ctx = _random_walk_ctx(rng, sigma=sigma)
-            up = down = 0
+            results = {}
             for spec in specs:
-                d = spec['evaluate'](ctx, dict(spec['defaults']))['direction']
-                up += d == 'up'
-                down += d == 'down'
-            fire = (up >= 2 and not down) or (down >= 2 and not up)
+                group, role = signals.dim_group(spec['key'])
+                res = spec['evaluate'](ctx, dict(spec['defaults']))
+                results[spec['key']] = dict(res, weight=1.0, group=group, role=role)
+            fire = signals.vote(results)['direction'] is not None
             fired += fire
             if calm.is_calm(ctx)[0]:
                 calm_n += 1
@@ -180,6 +184,12 @@ class VpCorrNoiseSignalTests(SimpleTestCase):
             self.assertLess(overall, 0.05, sigma)
             self.assertLess(given_calm, 0.05, sigma)
             self.assertLessEqual(overall - base, 0.02, sigma)
+
+    def test_vp_corr_is_strength_only(self):
+        # 量能领先不单独定方向：归入量能强度组，down 既不计票也不否决
+        from .detector import signals
+
+        self.assertEqual(signals.dim_group('vp_corr'), ('volume', 'strength'))
 
 
 class VpCorrRegistryTests(SimpleTestCase):
