@@ -194,14 +194,14 @@ class AddStockFetchResponseTests(TestCase):
     """REL-04：新增关注的首拉结果回给前端，忙时明确告知已排队。"""
 
     def test_create_reports_queued_when_busy(self):
-        with mock.patch('stocks.views.start_fetch_one', return_value=(False, {'queued': True})) as m:
+        with mock.patch('stocks.views.watchlist.start_fetch_one', return_value=(False, {'queued': True})) as m:
             r = self.client.post('/api/stocks/', {'code': '600000', 'name': 'x'}, content_type='application/json')
         self.assertEqual(r.status_code, 201, r.content)
         self.assertEqual(r.json()['fetch']['status'], 'queued')
         self.assertTrue(m.call_args.kwargs['queue_if_busy'])
 
     def test_create_reports_started_and_restore_path(self):
-        with mock.patch('stocks.views.start_fetch_one', return_value=(True, {})):
+        with mock.patch('stocks.views.watchlist.start_fetch_one', return_value=(True, {})):
             r = self.client.post('/api/stocks/', {'code': '600001'}, content_type='application/json')
             self.assertEqual(r.json()['fetch']['status'], 'started')
             self.client.delete(f"/api/stocks/{r.json()['id']}/")
@@ -494,8 +494,10 @@ class MarketDeadlineBreakerTests(SimpleTestCase):
 
     def setUp(self):
         from stocks import views
+        from stocks.views import market as market_views
 
-        self.views = views
+        self.views = market_views  # patch 目标须是定义模块（ARC-01 拆包）
+        self.breaker = views._breaker
         views._breaker.clear()
         self.addCleanup(views._breaker.clear)
         self.release = threading.Event()
@@ -520,8 +522,9 @@ class MarketDeadlineBreakerTests(SimpleTestCase):
 
     @override_settings(STOCKTRACE_REQUEST_DEADLINE=0.2)
     def test_timeout_returns_504_and_breaker_opens(self):
+        # 熔断日志随 _call_with_deadline 迁到 stocks.common.upstream，取父 logger 一并捕获
         with mock.patch.object(self.views, 'get_market_overview', side_effect=self._slow) as m, \
-                self.assertLogs('stocks.views', level='WARNING') as cm:
+                self.assertLogs('stocks', level='WARNING') as cm:
             for _ in range(3):
                 t0 = time.monotonic()
                 r = self._get('/api/market/')
@@ -543,9 +546,9 @@ class MarketDeadlineBreakerTests(SimpleTestCase):
             self._get('/api/market/')
         with mock.patch.object(self.views, 'get_market_overview', return_value={'ok': 1}):
             self.assertEqual(self._get('/api/market/').status_code, 200)
-        self.assertNotIn('大盘数据', self.views._breaker)
+        self.assertNotIn('大盘数据', self.breaker)
         # 熔断到期后恢复访问
-        self.views._breaker['大盘数据'] = {'timeouts': 0, 'open_until': time.monotonic() - 1}
+        self.breaker['大盘数据'] = {'timeouts': 0, 'open_until': time.monotonic() - 1}
         with mock.patch.object(self.views, 'get_market_overview', return_value={'ok': 1}):
             self.assertEqual(self._get('/api/market/').status_code, 200)
 

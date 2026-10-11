@@ -256,7 +256,7 @@ class AlertEventUniqueTests(TestCase):
                                   content_type='application/json')
         self.assertEqual(r.status_code, 409)
         with patch('stocks.serializers.StockSerializer.save', side_effect=IntegrityError), \
-                patch('stocks.views.start_fetch_one') as fetch:
+                patch('stocks.views.watchlist.start_fetch_one') as fetch:
             r = self.client.post('/api/stocks/', {'code': '000001'},
                                  content_type='application/json')
         self.assertEqual(r.status_code, 409)
