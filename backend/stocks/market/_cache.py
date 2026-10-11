@@ -121,6 +121,15 @@ def _cache_get_or_load(key, ttl, loader):
                 del _inflight[key]
 
 
+def _cache_written_at(key):
+    """好数据的写入时间戳（秒）；无条目或仅有负缓存返回 None（DAT-09 快照时效校验用）"""
+    with _cache_lock:
+        item = _cache.get(key)
+    if not item or item.get('neg'):
+        return None
+    return item['ts']
+
+
 def _stale_or(key, default):
     with _cache_lock:
         item = _cache.get(key)

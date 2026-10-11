@@ -60,7 +60,8 @@ class SnapshotSaveTests(TestCase):
         ), patch(
             'stocks.market.etf._normalized_etf_items',
             return_value=[{'code': '510300', 'name': '300ETF', 'share': 100.0, 'market_cap': 400.0}],
-        ), patch('akshare.fund_etf_scale_sse', return_value=pd.DataFrame()):
+        ), patch('stocks.market.snapshots._etf_spot_fresh_for', return_value=True), \
+                patch('akshare.fund_etf_scale_sse', return_value=pd.DataFrame()):
             saved = snapshots.save_daily_snapshots(trade_date=_BASE)
 
         self.assertEqual(saved[MarketDailySnapshot.KIND_INDUSTRY_FF], 1)
@@ -1183,7 +1184,8 @@ class SnapshotSseSharePreferenceTests(TestCase):
             'stocks.market.etf_flow.fetch_flow_klines', side_effect=RuntimeError('down'),
         ), patch(
             'stocks.market.etf._normalized_etf_items', return_value=em_items,
-        ), patch('akshare.fund_etf_scale_sse', **sse_kwargs):
+        ), patch('stocks.market.snapshots._etf_spot_fresh_for', return_value=True), \
+                patch('akshare.fund_etf_scale_sse', **sse_kwargs):
             return snapshots.save_daily_snapshots(trade_date=_BASE)
 
     def _saved_etf_rows(self):

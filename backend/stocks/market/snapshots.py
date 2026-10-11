@@ -9,7 +9,8 @@
 from __future__ import annotations
 
 import logging
-from datetime import time as dt_time, timedelta
+import time
+from datetime import datetime, time as dt_time, timedelta
 
 from django.utils import timezone
 
@@ -85,6 +86,44 @@ def fetch_market_ff_merged_rows():
     return merge_market_ff_rows(by_secid), errors
 
 
+# 落库前 ETF 现货缓存可接受的最大年龄（秒），超过则 force 重拉（DAT-09）
+_ETF_SPOT_MAX_AGE = 180
+_UNKNOWN_DATES = ('', 'NaT', 'nan', 'None')
+
+
+def _etf_spot_fresh_for(trade_date):
+    """确保 ETF 现货缓存是 trade_date 收盘（15:00）后写入的新数据（DAT-09）。
+
+    缓存过旧或不存在时 force 重拉；重拉失败时 _fetch_etf_spot_df 会退回旧缓存
+    （_stale_or），写入时间早于该交易日 15:00 就判为不新鲜，调用方不得落库。
+    """
+    from . import etf
+    from ._cache import _cache_written_at
+
+    close_ts = timezone.make_aware(datetime.combine(trade_date, dt_time(15, 0))).timestamp()
+    ts = _cache_written_at('etf_spot_df')
+    if ts is None or ts < close_ts or time.time() - ts > _ETF_SPOT_MAX_AGE:
+        etf._fetch_etf_spot_df(force=True)
+        ts = _cache_written_at('etf_spot_df')
+    return ts is not None and ts >= close_ts
+
+
+def _etf_items_on(items, trade_date):
+    """剔除「数据日期」明确不等于 trade_date 的行；上游未给日期的行无法校验，保留"""
+    want = trade_date.isoformat()
+    kept = []
+    dropped = 0
+    for item in items:
+        d = str(item.get('data_date') or '')[:10]
+        if d not in _UNKNOWN_DATES and d != want:
+            dropped += 1
+            continue
+        kept.append(item)
+    if dropped:
+        logger.warning(f'etf_share 快照剔除 {dropped} 行数据日期不是 {want} 的 ETF')
+    return kept
+
+
 def save_daily_snapshots(trade_date=None):
     """把当日板块资金流与 ETF 份额写入快照表；返回 {'kind': 条数} 与失败项。
 
@@ -136,9 +175,16 @@ def save_daily_snapshots(trade_date=None):
             logger.error(f"{kind} 快照落库失败: {e}")
 
     try:
+        # 东财现货须为该交易日收盘后的新数据，否则旧数据会被标成当日（DAT-09）；
+        # 不新鲜时东财部分不写，仍可用上交所官方份额补齐沪市
+        if _etf_spot_fresh_for(trade_date):
+            em_items = _etf_items_on(etf._normalized_etf_items(), trade_date)
+        else:
+            logger.warning(f'ETF 现货缓存早于 {trade_date} 15:00（重拉失败），东财份额不落库')
+            em_items = []
         rows = [
             {field: item.get(field) for field in _ETF_SNAPSHOT_FIELDS}
-            for item in etf._normalized_etf_items()
+            for item in em_items
             if item.get('code') and item.get('share') is not None
         ]
         rows = _prefer_sse_share_rows(rows, trade_date)

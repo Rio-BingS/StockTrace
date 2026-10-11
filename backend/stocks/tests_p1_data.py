@@ -414,3 +414,76 @@ class CacheConcurrencyTests(SimpleTestCase):
         self.assertIn('src299', s._source_state)
         self.assertIn('keep', s._source_state)
         self.assertEqual(s._source_state['keep']['fails'], 2)
+
+
+class SnapshotEtfFreshnessTests(TestCase):
+    """DAT-09：ETF 份额快照只落该交易日收盘后的新数据，数据日期不符的行剔除。"""
+
+    D = date(2026, 9, 4)
+
+    def setUp(self):
+        import importlib
+        from .market import _sources
+        self.c = importlib.import_module('stocks.market._cache')
+        self.c._cache.clear()
+        _sources._source_state.clear()
+        self.addCleanup(self.c._cache.clear)
+        self.addCleanup(_sources._source_state.clear)
+
+    def _df(self, data_date):
+        return pd.DataFrame([
+            {'代码': '510300', '名称': '沪深300ETF', '最新份额': 100.0, '总市值': 400.0,
+             '数据日期': data_date},
+            {'代码': '159915', '名称': '创业板ETF', '最新份额': 50.0, '总市值': 100.0,
+             '数据日期': '2026-09-03'},
+            {'代码': '510500', '名称': '中证500ETF', '最新份额': 30.0, '总市值': 60.0,
+             '数据日期': None},
+        ])
+
+    def _save(self, spot_side_effect):
+        from .market import snapshots
+        trading = patch('stocks.services.is_trading_day', return_value=True)
+        with trading, patch('stocks.market.sectors.fetch_industry_fund_flow', return_value=[]), \
+                patch('stocks.market.sectors.fetch_concept_fund_flow', return_value=[]), \
+                patch('stocks.market.etf_flow.fetch_flow_klines', side_effect=RuntimeError('down')), \
+                patch('akshare.fund_etf_scale_sse', return_value=pd.DataFrame()), \
+                patch('akshare.fund_etf_spot_em', side_effect=spot_side_effect) as spot:
+            saved = snapshots.save_daily_snapshots(trade_date=self.D)
+        return saved, spot
+
+    def _ts(self, hm):
+        return timezone.make_aware(datetime.combine(self.D, datetime.strptime(hm, '%H:%M').time()))
+
+    def test_force_refetch_and_drop_mismatched_date(self):
+        from .models import MarketDailySnapshot
+        with patch('stocks.market.snapshots.time.time', return_value=self._ts('16:00').timestamp()), \
+                patch('stocks.market._cache.time.time', return_value=self._ts('16:00').timestamp()):
+            saved, spot = self._save(lambda: self._df('2026-09-04'))
+        spot.assert_called_once()  # 缓存为空 → 落库前 force 拉取
+        row = MarketDailySnapshot.objects.get(kind=MarketDailySnapshot.KIND_ETF_SHARE,
+                                              trade_date=self.D)
+        self.assertEqual(sorted(r['code'] for r in row.payload), ['510300', '510500'])
+        self.assertEqual(saved[MarketDailySnapshot.KIND_ETF_SHARE], 2)
+
+    def test_stale_cache_before_close_not_written(self):
+        from .models import MarketDailySnapshot
+        # 上一轮 14:00 写入的缓存（盘中数据），本轮重拉失败 → 退回旧缓存，不能落库
+        with patch('stocks.market._cache.time.time', return_value=self._ts('14:00').timestamp()):
+            self.c._cache_set('etf_spot_df', self._df('2026-09-04'))
+        with patch('stocks.market.snapshots.time.time', return_value=self._ts('16:00').timestamp()), \
+                patch('stocks.market._cache.time.time', return_value=self._ts('16:00').timestamp()):
+            saved, spot = self._save(RuntimeError('em down'))
+        spot.assert_called_once()
+        self.assertNotIn(MarketDailySnapshot.KIND_ETF_SHARE, saved)
+        self.assertFalse(MarketDailySnapshot.objects.filter(
+            kind=MarketDailySnapshot.KIND_ETF_SHARE).exists())
+
+    def test_fresh_cache_after_close_no_refetch(self):
+        from .models import MarketDailySnapshot
+        with patch('stocks.market._cache.time.time', return_value=self._ts('15:50').timestamp()):
+            self.c._cache_set('etf_spot_df', self._df('2026-09-04'))
+        with patch('stocks.market.snapshots.time.time', return_value=self._ts('15:51').timestamp()), \
+                patch('stocks.market._cache.time.time', return_value=self._ts('15:51').timestamp()):
+            saved, spot = self._save(RuntimeError('should not be called'))
+        spot.assert_not_called()
+        self.assertEqual(saved[MarketDailySnapshot.KIND_ETF_SHARE], 2)
