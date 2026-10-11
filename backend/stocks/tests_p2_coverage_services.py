@@ -11,7 +11,8 @@ import pandas as pd
 from django.test import SimpleTestCase, TestCase
 from django.utils import timezone
 
-from . import services
+from . import datasources, ingest, jobs, search
+from .common import codes
 from .models import DailyQuote, MinuteBar, Stock
 
 D = date(2026, 9, 8)  # 周二
@@ -41,40 +42,40 @@ def _bs_ok():
 
 class HelperTests(SimpleTestCase):
     def test_exchange_and_prefix(self):
-        self.assertEqual(services._to_shsz_prefix('600000'), 'sh600000')
-        self.assertEqual(services._to_shsz_prefix('1'), 'sz000001')
-        self.assertEqual(services._to_shsz_prefix('920001'), 'bj920001')
-        self.assertEqual(services._to_shsz_prefix('510300'), 'sh510300')
+        self.assertEqual(codes.exchange_prefix('600000'), 'sh600000')
+        self.assertEqual(codes.exchange_prefix('1'), 'sz000001')
+        self.assertEqual(codes.exchange_prefix('920001'), 'bj920001')
+        self.assertEqual(codes.exchange_prefix('510300'), 'sh510300')
 
     def test_numeric_helpers_pass_through_empty(self):
-        self.assertIsNone(services._to_numeric_cols(None))
-        self.assertIsNone(services._volume_lots_to_shares(None))
+        self.assertIsNone(datasources._to_numeric_cols(None))
+        self.assertIsNone(datasources._volume_lots_to_shares(None))
         empty = pd.DataFrame()
-        self.assertIs(services._volume_lots_to_shares(empty), empty)
-        self.assertIsNone(services._filter_minute_range(None, 'a', 'b'))
+        self.assertIs(datasources._volume_lots_to_shares(empty), empty)
+        self.assertIsNone(datasources._filter_minute_range(None, 'a', 'b'))
 
     def test_volume_lots_to_shares_does_not_mutate_input(self):
         df = pd.DataFrame({'成交量': ['12'], '收盘': ['1.5']})
-        out = services._volume_lots_to_shares(df)
+        out = datasources._volume_lots_to_shares(df)
         self.assertEqual(out['成交量'].iloc[0], 1200)
         self.assertEqual(df['成交量'].iloc[0], '12')
 
     def test_compute_high_low_times(self):
         t1, t2, t3 = (datetime(2026, 9, 8, 9, 30 + i) for i in range(3))
-        self.assertIsNone(services.compute_high_low_times([]))
-        self.assertIsNone(services.compute_high_low_times([(t1, None, None)]))
+        self.assertIsNone(ingest.compute_high_low_times([]))
+        self.assertIsNone(ingest.compute_high_low_times([(t1, None, None)]))
         # 并列取最早一根
-        hl = services.compute_high_low_times([(t1, 10, 9), (t2, 11, 9), (t3, 11, 8)])
+        hl = ingest.compute_high_low_times([(t1, 10, 9), (t2, 11, 9), (t3, 11, 8)])
         self.assertEqual(hl, (t2, t3, 11, 8))
 
     def test_base_source_contract(self):
-        src = services.DataSource()
+        src = datasources.DataSource()
         with self.assertRaises(NotImplementedError):
             src.fetch_daily('000001', '20260101', '20260102')
         with self.assertRaises(NotImplementedError):
             src.fetch_minute('000001', 'a', 'b')
         self.assertIsNone(src.fetch_stock_name('000001'))
-        self.assertEqual(services.format_symbol('1'), '000001')
+        self.assertEqual(ingest.format_symbol('1'), '000001')
 
 
 class SourceAdapterTests(SimpleTestCase):
@@ -84,18 +85,18 @@ class SourceAdapterTests(SimpleTestCase):
         df = pd.DataFrame({'日期': ['2026-09-08'], '开盘': [1], '收盘': [2], '最高': [3],
                            '最低': [1], '成交量': [5], '成交额': [100.0]})
         with patch('akshare.stock_zh_a_hist', return_value=df.copy()) as hist:
-            out = services.EastMoneySource().fetch_daily('000001', '20260901', '20260908')
+            out = datasources.EastMoneySource().fetch_daily('000001', '20260901', '20260908')
         self.assertEqual(out['成交量'].iloc[0], 500)
         self.assertEqual(hist.call_args.kwargs['adjust'], 'qfq')
         mdf = pd.DataFrame({'时间': ['2026-09-08 09:31:00'], '成交量': [3]})
         with patch('akshare.stock_zh_a_hist_min_em', return_value=mdf):
-            out = services.EastMoneySource().fetch_minute('000001', 'a', 'b')
+            out = datasources.EastMoneySource().fetch_minute('000001', 'a', 'b')
         self.assertEqual(out['成交量'].iloc[0], 300)
 
     def test_eastmoney_name(self):
         spot = pd.DataFrame({'代码': ['000001', '600000'], '名称': ['平安银行', '浦发银行']})
         with patch('akshare.stock_zh_a_spot_em', return_value=spot):
-            src = services.EastMoneySource()
+            src = datasources.EastMoneySource()
             self.assertEqual(src.fetch_stock_name('600000'), '浦发银行')
             self.assertIsNone(src.fetch_stock_name('999999'))
 
@@ -103,7 +104,7 @@ class SourceAdapterTests(SimpleTestCase):
         df = pd.DataFrame({'date': ['2026-09-08'], 'open': [1.0], 'close': [2.0], 'high': [3.0],
                            'low': [0.5], 'volume': [1000], 'amount': [2000.0]})
         with patch('akshare.stock_zh_a_daily', return_value=df) as daily:
-            out = services.SinaSource().fetch_daily('600000', '20260901', '20260908')
+            out = datasources.SinaSource().fetch_daily('600000', '20260901', '20260908')
         self.assertEqual(daily.call_args.kwargs['symbol'], 'sh600000')
         self.assertEqual(list(out.columns), ['日期', '开盘', '收盘', '最高', '最低', '成交量', '成交额'])
         self.assertEqual(out['成交量'].iloc[0], 1000)  # 新浪原生为股，不换算
@@ -112,7 +113,7 @@ class SourceAdapterTests(SimpleTestCase):
         df = pd.DataFrame({'day': ['2026-09-08 09:31:00'], 'open': ['1.1'], 'close': ['1.2'],
                            'high': ['1.3'], 'low': ['1.0'], 'volume': ['500'], 'amount': ['600.5']})
         with patch('akshare.stock_zh_a_minute', return_value=df):
-            out = services.SinaSource().fetch_minute('000001', 'a', 'b')
+            out = datasources.SinaSource().fetch_minute('000001', 'a', 'b')
         self.assertIn('时间', out.columns)
         self.assertEqual(out['成交量'].iloc[0], 500)
         self.assertAlmostEqual(out['成交额'].iloc[0], 600.5)
@@ -120,25 +121,25 @@ class SourceAdapterTests(SimpleTestCase):
     def test_sina_name_by_position_and_failure(self):
         spot = pd.DataFrame({'symbol': ['sh600000'], 'name': ['浦发银行']})
         with patch('akshare.stock_zh_a_spot', return_value=spot):
-            self.assertEqual(services.SinaSource().fetch_stock_name('600000'), '浦发银行')
-            self.assertIsNone(services.SinaSource().fetch_stock_name('000001'))
+            self.assertEqual(datasources.SinaSource().fetch_stock_name('600000'), '浦发银行')
+            self.assertIsNone(datasources.SinaSource().fetch_stock_name('000001'))
         with patch('akshare.stock_zh_a_spot', side_effect=RuntimeError('down')):
-            self.assertIsNone(services.SinaSource().fetch_stock_name('600000'))
+            self.assertIsNone(datasources.SinaSource().fetch_stock_name('600000'))
 
     def test_tencent_amount_is_volume_in_lots(self):
         df = pd.DataFrame({'date': ['2026-09-08'], 'open': [1.0], 'close': [2.0], 'high': [3.0],
                            'low': [0.5], 'amount': [7]})
         with patch('akshare.stock_zh_a_hist_tx', return_value=df):
-            out = services.TencentSource().fetch_daily('000001', '20260901', '20260908')
+            out = datasources.TencentSource().fetch_daily('000001', '20260901', '20260908')
         self.assertEqual(out['成交量'].iloc[0], 700)
         self.assertIsNone(out['成交额'].iloc[0])
         with patch('akshare.stock_zh_a_hist_tx', return_value=pd.DataFrame()):
-            self.assertTrue(services.TencentSource().fetch_daily('000001', 'a', 'b').empty)
-        self.assertIsNone(services.TencentSource().fetch_minute('000001', 'a', 'b'))
-        self.assertIsNone(services.TencentSource().fetch_stock_name('000001'))
+            self.assertTrue(datasources.TencentSource().fetch_daily('000001', 'a', 'b').empty)
+        self.assertIsNone(datasources.TencentSource().fetch_minute('000001', 'a', 'b'))
+        self.assertIsNone(datasources.TencentSource().fetch_stock_name('000001'))
 
     def test_baostock_daily_minute_and_name(self):
-        src = services.BaoStockSource()
+        src = datasources.BaoStockSource()
         daily = _BsResult([['2026-09-08', '1', '3', '0.5', '2', '1000', '2000']],
                           ['date', 'open', 'high', 'low', 'close', 'volume', 'amount'])
         with patch('baostock.login', return_value=_bs_ok()), patch('baostock.logout'), \
@@ -161,7 +162,7 @@ class SourceAdapterTests(SimpleTestCase):
             self.assertEqual(src.fetch_stock_name('600000'), '浦发银行')
 
     def test_baostock_empty_and_beijing_unsupported(self):
-        src = services.BaoStockSource()
+        src = datasources.BaoStockSource()
         self.assertIsNone(src.fetch_daily('920001', 'a', 'b'))
         self.assertIsNone(src.fetch_minute('920001', 'a', 'b'))
         self.assertIsNone(src.fetch_stock_name('830799'))
@@ -174,7 +175,7 @@ class SourceAdapterTests(SimpleTestCase):
             self.assertIsNone(src.fetch_stock_name('600000'))
 
 
-class _Src(services.DataSource):
+class _Src(datasources.DataSource):
     def __init__(self, name, result=None, exc=None):
         self.name = name
         self._result = result
@@ -204,7 +205,7 @@ class TrySourcesTests(SimpleTestCase):
     def test_switches_on_error_and_empty(self, sleep):
         ok = pd.DataFrame({'x': [1]})
         a, b, c = _Src('a', exc=RuntimeError('boom')), _Src('b', pd.DataFrame()), _Src('c', ok)
-        src, res = services._try_sources('fetch_daily', '000001', 's', 'e', sources=[a, b, c])
+        src, res = datasources._try_sources('fetch_daily', '000001', 's', 'e', sources=[a, b, c])
         self.assertIs(src, c)
         self.assertIs(res, ok)
         self.assertEqual([s.calls for s in (a, b, c)], [1, 1, 1])
@@ -212,7 +213,7 @@ class TrySourcesTests(SimpleTestCase):
 
     def test_all_fail_returns_none_pair(self, sleep):
         srcs = [_Src('a', exc=RuntimeError('x')), _Src('b', None)]
-        self.assertEqual(services._try_sources('fetch_daily', '1', sources=srcs), (None, None))
+        self.assertEqual(datasources._try_sources('fetch_daily', '1', sources=srcs), (None, None))
         self.assertEqual(sleep.call_count, 1)  # 最后一个源之后不再等待
 
     def test_minute_out_of_range_counts_as_failure(self, _sleep):
@@ -220,16 +221,16 @@ class TrySourcesTests(SimpleTestCase):
         other_day = pd.DataFrame({'时间': ['2026-09-07 10:00:00'], '收盘': [1]})
         today = pd.DataFrame({'时间': ['2026-09-08 10:00:00'], '收盘': [2]})
         a, b = _Src('sina', other_day), _Src('bs', today)
-        src, res = services._try_sources(
+        src, res = datasources._try_sources(
             'fetch_minute', '000001', '2026-09-08 09:30:00', '2026-09-08 15:00:00', sources=[a, b])
         self.assertIs(src, b)
         self.assertEqual(len(res), 1)
 
     def test_fetch_stock_info_falls_back_to_code(self, _sleep):
         with patch('stocks.ingest.NAME_SOURCES', [_Src('a', None)]):
-            self.assertEqual(services.fetch_stock_info('000001'), '000001')
+            self.assertEqual(ingest.fetch_stock_info('000001'), '000001')
         with patch('stocks.ingest.NAME_SOURCES', [_Src('a', '平安银行')]):
-            self.assertEqual(services.fetch_stock_info('000001'), '平安银行')
+            self.assertEqual(ingest.fetch_stock_info('000001'), '平安银行')
 
 
 def _daily_df(rows):
@@ -240,12 +241,12 @@ def _daily_df(rows):
 class FetchDailyDataTests(TestCase):
     def setUp(self):
         self.stock = Stock.objects.create(code='600000', name='浦发银行')
-        self.src = services.DataSource()
+        self.src = datasources.DataSource()
         self.src.name = 'sina'
 
     def test_all_sources_down_returns_zero(self, _sleep):
         with patch('stocks.ingest._try_sources', return_value=(None, None)):
-            self.assertEqual(services.fetch_daily_data(self.stock), 0)
+            self.assertEqual(ingest.fetch_daily_data(self.stock), 0)
         self.assertFalse(DailyQuote.objects.exists())
 
     def test_parses_rows_chains_prev_close_and_skips_nan(self, _sleep):
@@ -255,7 +256,7 @@ class FetchDailyDataTests(TestCase):
             ['2026-09-04', float('nan'), 9.0, 9.5, 8.5, 1, 1.0],  # 价格缺失跳过
         ])
         with patch('stocks.ingest._try_sources', return_value=(self.src, df)):
-            n = services.fetch_daily_data(self.stock, start_date='20260901', end_date='20260908')
+            n = ingest.fetch_daily_data(self.stock, start_date='20260901', end_date='20260908')
         self.assertEqual(n, 2)
         q7 = DailyQuote.objects.get(trade_date=date(2026, 9, 7))
         q8 = DailyQuote.objects.get(trade_date=date(2026, 9, 8))
@@ -273,7 +274,7 @@ class FetchDailyDataTests(TestCase):
             open_close_diff=0, open_close_pct=0, high_low_diff=0, high_low_pct=0)
         df = _daily_df([['2026-09-08', 10.0, 8.8, 11.0, 9.0, 1, 1.0]])
         with patch('stocks.ingest._try_sources', return_value=(self.src, df)):
-            services.fetch_daily_data(self.stock, start_date='20260908', end_date='20260908')
+            ingest.fetch_daily_data(self.stock, start_date='20260908', end_date='20260908')
         q = DailyQuote.objects.get(trade_date=date(2026, 9, 8))
         self.assertEqual(q.prev_close, Decimal('8.000'))
         self.assertEqual(q.change_pct, Decimal('10.0000'))
@@ -285,7 +286,7 @@ class FetchDailyDataTests(TestCase):
             open_close_diff=0, open_close_pct=0, high_low_diff=0, high_low_pct=0)
         df = _daily_df([['2026-09-08', 10.0, 10.0, 10.0, 10.0, 1, 1.0]])
         with patch('stocks.ingest._try_sources', return_value=(self.src, df)) as ts:
-            services.fetch_daily_data(self.stock, full=True)
+            ingest.fetch_daily_data(self.stock, full=True)
         self.assertEqual(ts.call_args.args[2], '20200102')
 
 
@@ -305,20 +306,20 @@ class SaveMinuteBarsTests(TestCase):
     def test_idempotent_and_skips_nan_rows(self):
         df = self._df([31, 32])
         df.loc[1, '开盘'] = float('nan')
-        self.assertEqual(services._save_minute_bars(self.stock, df, D, 'em', 1), 1)
-        self.assertEqual(services._save_minute_bars(self.stock, df, D, 'em', 1), 0)
+        self.assertEqual(ingest._save_minute_bars(self.stock, df, D, 'em', 1), 1)
+        self.assertEqual(ingest._save_minute_bars(self.stock, df, D, 'em', 1), 0)
         self.assertEqual(MinuteBar.objects.count(), 1)
 
     def test_one_minute_replaces_five_minute_but_not_vice_versa(self):
-        services._save_minute_bars(self.stock, self._df([35]), D, 'baostock', 5)
-        self.assertEqual(services._save_minute_bars(self.stock, self._df([31, 32]), D, 'em', 1), 2)
+        ingest._save_minute_bars(self.stock, self._df([35]), D, 'baostock', 5)
+        self.assertEqual(ingest._save_minute_bars(self.stock, self._df([31, 32]), D, 'em', 1), 2)
         self.assertEqual(set(MinuteBar.objects.values_list('freq', flat=True)), {1})
-        self.assertEqual(services._save_minute_bars(self.stock, self._df([40]), D, 'baostock', 5), 0)
+        self.assertEqual(ingest._save_minute_bars(self.stock, self._df([40]), D, 'baostock', 5), 0)
         self.assertFalse(MinuteBar.objects.filter(freq=5).exists())
 
     def test_empty_after_filter_returns_zero(self):
         df = pd.DataFrame({'时间': [None], '开盘': [1], '收盘': [1], '最高': [1], '最低': [1]})
-        self.assertEqual(services._save_minute_bars(self.stock, df, D), 0)
+        self.assertEqual(ingest._save_minute_bars(self.stock, df, D), 0)
 
 
 @patch('stocks.datasources.chain.time.sleep')
@@ -329,7 +330,7 @@ class FetchMinuteDataTests(TestCase):
             stock=self.stock, trade_date=D,
             open_price=10, close_price=10, high_price=11, low_price=9,
             open_close_diff=0, open_close_pct=0, high_low_diff=2, high_low_pct=0)
-        self.src = services.DataSource()
+        self.src = datasources.DataSource()
         self.src.name = 'em'
 
     def _df(self, rows):
@@ -343,7 +344,7 @@ class FetchMinuteDataTests(TestCase):
             ['2026-09-08 14:00:00', 10, 10, 10.2, 9.1, 1, 1],
         ])
         with patch('stocks.ingest._try_sources', return_value=(self.src, df)):
-            res = services.fetch_minute_data(self.stock, trade_date='2026-09-08')
+            res = ingest.fetch_minute_data(self.stock, trade_date='2026-09-08')
         self.assertEqual(res['high_price'], Decimal('10.9'))
         self.assertEqual(res['low_price'], Decimal('9.1'))
         q = DailyQuote.objects.get(stock=self.stock, trade_date=D)
@@ -352,25 +353,25 @@ class FetchMinuteDataTests(TestCase):
 
     def test_no_data_or_other_day_only_returns_none(self, _sleep):
         with patch('stocks.ingest._try_sources', return_value=(None, None)):
-            self.assertIsNone(services.fetch_minute_data(self.stock, trade_date='2026-09-08'))
+            self.assertIsNone(ingest.fetch_minute_data(self.stock, trade_date='2026-09-08'))
         df = self._df([['2026-09-07 10:00:00', 10, 10, 11, 9, 1, 1]])
         with patch('stocks.ingest._try_sources', return_value=(self.src, df)):
-            self.assertIsNone(services.fetch_minute_data(self.stock, trade_date='2026-09-08'))
+            self.assertIsNone(ingest.fetch_minute_data(self.stock, trade_date='2026-09-08'))
 
     def test_coarse_source_keeps_existing_one_minute_times(self, _sleep):
-        services._save_minute_bars(self.stock, self._df([
+        ingest._save_minute_bars(self.stock, self._df([
             [pd.Timestamp('2026-09-08 09:31:00'), 10, 10, 10.5, 9.5, 1, 1]]), D, 'em', 1)
-        bs = services.BaoStockSource()
+        bs = datasources.BaoStockSource()
         df = self._df([['2026-09-08 09:35:00', 10, 10, 12, 8, 1, 1]])
         with patch('stocks.ingest._try_sources', return_value=(bs, df)):
-            self.assertIsNone(services.fetch_minute_data(self.stock, trade_date='2026-09-08'))
+            self.assertIsNone(ingest.fetch_minute_data(self.stock, trade_date='2026-09-08'))
         self.assertIsNone(DailyQuote.objects.get(trade_date=D).high_time)
 
     def test_missing_daily_row_still_returns_times(self, _sleep):
         DailyQuote.objects.all().delete()
         df = self._df([['2026-09-08 09:31:00', 10, 10, 10.5, 9.5, 1, 1]])
         with patch('stocks.ingest._try_sources', return_value=(self.src, df)):
-            res = services.fetch_minute_data(self.stock, trade_date='2026-09-08')
+            res = ingest.fetch_minute_data(self.stock, trade_date='2026-09-08')
         self.assertIsNotNone(res['high_time'])
 
 
@@ -386,7 +387,7 @@ class FetchOrchestrationTests(TestCase):
                 patch('stocks.jobs.fetch_minute_data') as minute, \
                 patch('stocks.trading_calendar.is_trading_day', side_effect=lambda d=None: d.weekday() < 5), \
                 patch('django.utils.timezone.localdate', return_value=today):
-            n = services.fetch_stock_all_data(self.stock, light=True)
+            n = jobs.fetch_stock_all_data(self.stock, light=True)
         self.assertEqual(n, 3)
         daily.assert_called_once()
         self.assertEqual([c.kwargs['trade_date'] for c in minute.call_args_list],
@@ -404,7 +405,7 @@ class FetchOrchestrationTests(TestCase):
             return 7
 
         with patch('stocks.jobs.fetch_stock_all_data', side_effect=fake):
-            for fn in (services.fetch_all_active_stocks, services.fetch_keep_fresh):
+            for fn in (jobs.fetch_all_active_stocks, jobs.fetch_keep_fresh):
                 res = {r['code']: r for r in fn()}
                 self.assertEqual(set(res), {'600000', '000001'})
                 self.assertEqual(res['600000']['count'], 7)
@@ -413,34 +414,34 @@ class FetchOrchestrationTests(TestCase):
     def test_incremental_daily_counts_ok_and_fail(self, _sleep):
         Stock.objects.create(code='000001', name='平安银行')
         with patch('stocks.jobs.fetch_daily_data', side_effect=[5, RuntimeError('x')]):
-            self.assertEqual(services.fetch_incremental_daily_all(), {'ok': 1, 'fail': 1})
+            self.assertEqual(jobs.fetch_incremental_daily_all(), {'ok': 1, 'fail': 1})
 
     def test_intraday_update_guards(self, _sleep):
         with patch('stocks.trading_calendar.is_trading_time', return_value=False), \
                 patch('stocks.jobs.fetch_minute_data') as minute:
-            services.fetch_intraday_update()
+            jobs.fetch_intraday_update()
         minute.assert_not_called()
         # 日历未知（None）时写库任务保守跳过
         with patch('stocks.trading_calendar.is_trading_time', return_value=True), \
                 patch('stocks.trading_calendar.is_trading_day', return_value=None), \
                 patch('stocks.jobs.fetch_minute_data') as minute:
-            services.fetch_intraday_update()
+            jobs.fetch_intraday_update()
         minute.assert_not_called()
         with patch('stocks.trading_calendar.is_trading_time', return_value=True), \
                 patch('stocks.trading_calendar.is_trading_day', return_value=True), \
                 patch('stocks.jobs.fetch_minute_data', side_effect=RuntimeError('x')) as minute:
-            services.fetch_intraday_update()  # 单只失败不抛
+            jobs.fetch_intraday_update()  # 单只失败不抛
         minute.assert_called_once()
 
     def test_daily_summary_guard_and_window(self, _sleep):
         with patch('stocks.trading_calendar.is_trading_day', return_value=False), \
                 patch('stocks.jobs.fetch_daily_data') as daily:
-            services.fetch_daily_summary()
+            jobs.fetch_daily_summary()
         daily.assert_not_called()
         with patch('stocks.trading_calendar.is_trading_day', return_value=True), \
                 patch('stocks.jobs.fetch_daily_data') as daily, \
                 patch('stocks.jobs.fetch_minute_data') as minute:
-            services.fetch_daily_summary()
+            jobs.fetch_daily_summary()
         start = datetime.strptime(daily.call_args.kwargs['start_date'], '%Y%m%d').date()
         end = datetime.strptime(daily.call_args.kwargs['end_date'], '%Y%m%d').date()
         self.assertEqual(end - start, timedelta(days=3))
@@ -449,22 +450,22 @@ class FetchOrchestrationTests(TestCase):
 
 class StockSearchTests(SimpleTestCase):
     def setUp(self):
-        services._stock_list_cache.update({'df': None, 'expires': 0})
-        self.addCleanup(services._stock_list_cache.update, {'df': None, 'expires': 0})
+        search._stock_list_cache.update({'df': None, 'expires': 0})
+        self.addCleanup(search._stock_list_cache.update, {'df': None, 'expires': 0})
         self.df = pd.DataFrame({'code': ['000001', '600000', '601318'],
                                 'name': ['平安银行', '浦发银行', '中国平安']})
 
     def test_search_by_name_and_code_literal(self):
         with patch('akshare.stock_info_a_code_name', return_value=self.df) as api:
-            self.assertEqual([r['code'] for r in services.search_stocks('平安')], ['000001', '601318'])
-            self.assertEqual([r['code'] for r in services.search_stocks('6000')], ['600000'])
-            self.assertEqual(services.search_stocks('.*'), [])  # 按字面匹配
-            self.assertEqual(services.search_stocks('平'), [])  # 少于 2 字
+            self.assertEqual([r['code'] for r in search.search_stocks('平安')], ['000001', '601318'])
+            self.assertEqual([r['code'] for r in search.search_stocks('6000')], ['600000'])
+            self.assertEqual(search.search_stocks('.*'), [])  # 按字面匹配
+            self.assertEqual(search.search_stocks('平'), [])  # 少于 2 字
         api.assert_called_once()  # 列表缓存
 
     def test_upstream_failure_keeps_old_list_or_empty(self):
         with patch('akshare.stock_info_a_code_name', side_effect=RuntimeError('down')):
-            self.assertEqual(services.search_stocks('平安'), [])
-        services._stock_list_cache.update({'df': self.df, 'expires': 0})
+            self.assertEqual(search.search_stocks('平安'), [])
+        search._stock_list_cache.update({'df': self.df, 'expires': 0})
         with patch('akshare.stock_info_a_code_name', side_effect=RuntimeError('down')):
-            self.assertEqual(len(services.search_stocks('平安')), 2)
+            self.assertEqual(len(search.search_stocks('平安')), 2)

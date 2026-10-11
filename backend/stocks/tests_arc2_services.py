@@ -59,13 +59,10 @@ class PublicApiTests(SimpleTestCase):
             self.assertEqual(exchange_prefix(code, sep='.'), f'{ex}.{code}')
         self.assertEqual(exchange_prefix('1'), 'sz000001')
 
-    def test_old_code_helpers_match_new(self):
-        from stocks import services
-        from stocks.common.codes import exchange_prefix
+    def test_baostock_format_code_uses_exchange_prefix(self):
+        from stocks.datasources import BaoStockSource
 
-        for code in ('600000', '000001', '830799', '510300', '1'):
-            self.assertEqual(services._to_shsz_prefix(code), exchange_prefix(code))
-        src = services.BaoStockSource()
+        src = BaoStockSource()
         self.assertEqual(src._format_code('600000'), 'sh.600000')
         self.assertEqual(src._format_code('1'), 'sz.000001')
         self.assertIsNone(src._format_code('830799'))

@@ -20,7 +20,7 @@ from ..serializers import (
     StockSerializer,
     normalize_stock_code,
 )
-from ..services import search_stocks
+from ..search import search_stocks
 from ..tasks import get_fetch_status, start_fetch_all, start_fetch_one
 
 

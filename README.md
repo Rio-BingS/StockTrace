@@ -70,7 +70,7 @@ npm run dev                               # http://localhost:5173，/api 代理�
 npm run lint && npm test && npm run build
 ```
 
-目录速览：`backend/stocks/`（models / services 多源抓取 / tasks 后台拉取 / market/ 行情中心包 / detector/ 探测器包 / scheduler 定时任务）；`frontend/src/`（views / components / api）；`deploy/`（VPS 部署模板与 `DEPLOY.md`）。
+目录速览：`backend/stocks/`（models / datasources+ingest+jobs 多源抓取与入库 / tasks 后台拉取 / views/ 接口包 / market/ 行情中心包 / detector/ 探测器包 / scheduler 定时任务）；`frontend/src/`（views / components / api）；`deploy/`（VPS 部署模板与 `DEPLOY.md`）。
 
 定时任务（APScheduler，交易日才跑；生产由独立进程 `python manage.py run_scheduler` 运行）：08:50 盘前增量日线；09–14 点每 5 分钟分钟线；15:10 收盘汇总；15:30–21:00 每 30 分钟预热晚到行情缓存；17:15 探测器日度扫描，当日快照未落库时 17:45/18:15/18:45 重试（可 `python manage.py run_detector_scan` 手动触发）。
 

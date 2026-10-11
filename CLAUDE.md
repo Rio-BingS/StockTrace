@@ -42,12 +42,12 @@ npm run lint && npm run build   # eslint（vue essential 档）+ 产物到 dist/
 | 层 | 位置 |
 |---|---|
 | 模型 | `backend/stocks/models.py`（Stock / DailyQuote / MinuteBar / MarketDailySnapshot / PriceAlert / DetectorSignal 等） |
-| 自选行情抓取（多源降级） | `backend/stocks/services.py`（EastMoney→Sina→BaoStock→Tencent） |
+| 自选行情抓取（多源降级） | `backend/stocks/datasources/` 包（四个上游适配器 + `chain` 优先级/failover：EastMoney→Sina→BaoStock→Tencent）；`ingest.py`（日 K/分钟 bar 入库、复权检测、高低点时间）；`jobs.py`（单股/批量拉取与定时入口）；`search.py`（代码/名称搜索）；`trading_calendar.py`（全项目唯一交易日历）。原 `services.py` 兼容外观已删除，按定义模块导入与 patch |
 | 后台拉取线程 | `backend/stocks/tasks.py`（异步 + fetch-status 轮询） |
 | 行情中心 | `backend/stocks/market/` 包：`_cache`（TTL+交易日历保鲜）/`_sources`（冷却+failover）/`_query`/`periods`（**统一区间解析**）+ `indices`/`flows`/`sectors`/`etf`/`etf_flow`/`institutions`/`sentiment`（涨停池情绪/沪深两融汇总）/`margin_stock`（个股两融明细）/`snapshots`（日度快照+自检）/`holders`（定报持有人结构）/`overview` |
 | 探测器（一级模块） | `backend/stocks/detector/` 包：`registry`（维度注册表，单一事实来源）/`dimensions`（维度计算+序列构建）/`calm`（平静判定闸门）/`signals`（同向投票+周期+分级）/`review`（5日回看→权重/阈值有界迭代）/`scan`（编排+降级留痕）/`views`；平静盘面监测渐进微变，17:15 日度扫描 |
 | 调度器 | `backend/stocks/scheduler.py`（APScheduler + 文件锁单实例） |
-| REST + 页面 | `backend/stocks/views.py` `urls.py`；前端 `frontend/src/views/` `components/` |
+| REST + 页面 | `backend/stocks/views/` 包（`watchlist`/`market`/`alerts`/`presets`/`groups`）、`urls.py`；共用工具 `stocks/common/`；前端 `frontend/src/views/` `components/` |
 | 前端 API 封装 | `frontend/src/api/stocks.js`（axios baseURL `/api`） |
 
 ## 行情 API 与区间体系

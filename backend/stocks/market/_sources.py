@@ -2,7 +2,7 @@
 
 某源连续失败后暂时跳过，降低东财限流概率（简易「负载均衡」）。
 SourceChain 是全项目唯一的多源 failover 实现：市场接口（_first_ok/_safe_df_call）
-与个股行情（services._try_sources）共用（ARC-03）。
+与个股行情（datasources.chain._try_sources）共用（ARC-03）。
 """
 
 from __future__ import annotations

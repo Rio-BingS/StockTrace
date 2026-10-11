@@ -343,7 +343,7 @@ class DailyQuote(models.Model):
     change_diff = models.DecimalField('涨跌额', max_digits=10, decimal_places=3, null=True, blank=True)
     change_pct = models.DecimalField('涨跌幅', max_digits=8, decimal_places=4, null=True, blank=True)
 
-    # 单位约定：成交量「股」、成交额「元」（各数据源在适配层换算，见 services.py）
+    # 单位约定：成交量「股」、成交额「元」（各数据源在适配层换算，见 datasources/）
     volume = models.BigIntegerField('成交量(股)', null=True, blank=True)
     turnover = models.DecimalField(
         '成交额(元)', max_digits=15, decimal_places=2, null=True, blank=True

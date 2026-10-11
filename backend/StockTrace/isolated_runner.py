@@ -5,7 +5,7 @@
 - 项目代码普遍 ``except Exception`` 吞掉上游异常，单靠抛错用例未必会红，
   因此用 result mixin 在 stopTest 时把发生过网络尝试的用例判失败；
   用例之外（setUpClass、模块导入等）的尝试在结尾列出，并使整次运行失败。
-- 每个用例开始前清空 market/_sources/services 等模块级缓存，避免用例间串扰。
+- 每个用例开始前清空 market/_sources/search 等模块级缓存，避免用例间串扰。
 - STOCKTRACE_TEST_ALLOW_NETWORK=1 关闭断网闸（仅本地临时排查用）。
 - 测试期间 STOCKTRACE_MARKET_CALENDAR_ENABLED=False：市场缓存不查交易日历（ARC-02）；
   STOCKTRACE_FLOAT_SHARES_ENABLED=False：探测器不拉流通股本（ALG-13）。

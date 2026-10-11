@@ -344,7 +344,7 @@ LOGGING = {
     },
     'root': {'handlers': ['console'], 'level': 'WARNING'},
     'loggers': {
-        # 业务日志（stocks.scheduler / stocks.services / stocks.market.* / stocks.detector.* ...）
+        # 业务日志（stocks.scheduler / stocks.ingest / stocks.jobs / stocks.datasources.* / stocks.market.* / stocks.detector.* ...）
         'stocks': {'level': STOCKTRACE_LOGLEVEL},
         'django.request': {'level': 'WARNING'},
         # 只要 WARNING：job 异常/错过（misfire）会以 ERROR/WARNING 记录

@@ -4,10 +4,10 @@
 交易日、最近已完成交易日）、market/sentiment（候选日、前一交易日）与
 market/_cache（最近收盘时刻）四处，market 包还要反向 import services。现在
 所有模块只依赖本模块；本模块只依赖上游数据源（新浪整表 + BaoStock 单日），
-不依赖任何业务模块。旧位置保留同名薄包装转调，行为不变。
+不依赖任何业务模块。market 包内保留同名薄包装转调，行为不变。
 
 测试打桩：统一 patch ``stocks.trading_calendar.is_trading_day``——本模块内的
-派生函数与 services.is_trading_day 包装都经它查询，一处生效。
+派生函数与 market 包内的薄包装都经它查询，一处生效。
 
 交易日历缓存（DAT-07）：
 - 整表（新浪）带 TTL，过期后刷新失败继续沿用旧表（日历极少变化），只在表覆盖

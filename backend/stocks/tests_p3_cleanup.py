@@ -294,3 +294,18 @@ class CompatAliasRemovedTests(SimpleTestCase):
                 importlib.import_module(old)
         from stocks.ai import serializers  # noqa: F401
         from stocks.screener import engine, strategies  # noqa: F401
+
+    def test_services_facade_removed(self):
+        import importlib
+        from pathlib import Path
+
+        with self.assertRaises(ModuleNotFoundError):
+            importlib.import_module('stocks.services')
+        # 生产代码不得再引用外观（测试文件里只剩依赖方向断言）
+        root = Path(__file__).resolve().parent
+        for path in root.rglob('*.py'):
+            if path.name.startswith('tests') or 'migrations' in path.parts:
+                continue
+            text = path.read_text(encoding='utf-8')
+            for needle in ('from .services', 'from ..services', 'stocks.services'):
+                self.assertNotIn(needle, text, str(path))

@@ -170,12 +170,12 @@ class LocalDateTests(SimpleTestCase):
         2026, 10, 11, 17, 30, tzinfo=__import__('datetime').timezone.utc)
 
     def test_daily_start_date_uses_local_date(self):
-        from . import services
+        from . import ingest
 
         with patch('django.utils.timezone.now', return_value=self._UTC_NIGHT), \
                 patch('stocks.ingest.DailyQuote.objects') as qs:
             qs.filter.return_value.order_by.return_value.values_list.return_value.first.return_value = None
-            start = services._daily_start_date(object(), bootstrap_days=1)
+            start = ingest._daily_start_date(object(), bootstrap_days=1)
         self.assertEqual(start, '20261011')  # 本地 10-12 往前 1 天；UTC 口径会是 10-10
 
     def test_now_str_and_fetched_at_are_local(self):
@@ -484,9 +484,9 @@ class SourceChainTests(SimpleTestCase):
         self.assertEqual(name, 'only')
 
     def test_stock_chain_cools_failing_source_and_keeps_order(self):
-        from . import services
+        from . import datasources
 
-        class Bad(services.DataSource):
+        class Bad(datasources.DataSource):
             name = 'bad'
             calls = 0
 
@@ -494,7 +494,7 @@ class SourceChainTests(SimpleTestCase):
                 Bad.calls += 1
                 raise RuntimeError('502')
 
-        class Good(services.DataSource):
+        class Good(datasources.DataSource):
             name = 'good'
 
             def fetch_daily(self, *a):
@@ -502,7 +502,7 @@ class SourceChainTests(SimpleTestCase):
 
         with patch('stocks.datasources.chain.time.sleep') as sleep:
             for _ in range(3):
-                source, df = services._try_sources(
+                source, df = datasources._try_sources(
                     'fetch_daily', '600000', '20260901', '20260901', sources=[Bad(), Good()])
                 self.assertEqual(source.name, 'good')
         # 连续失败 2 次后冷却，第三次直接跳过坏源、也不再等待

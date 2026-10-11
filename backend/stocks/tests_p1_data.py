@@ -10,7 +10,8 @@ import pandas as pd
 from django.test import SimpleTestCase, TestCase
 from django.utils import timezone
 
-from . import services
+from . import baostock_session, datasources, ingest, trading_calendar
+from .common import codes
 from .models import AlertEvent, DailyQuote, MinuteBar, PriceAlert, ScreenerPreset, Stock, StockGroup
 from .serializers import DailyQuoteSerializer, DashboardStockSerializer
 
@@ -41,8 +42,8 @@ class PricePrecisionTests(_NoSleep, TestCase):
             {'日期': '2026-09-02', '开盘': 1.234, '收盘': 1.237, '最高': 1.238, '最低': 1.233,
              '成交量': 100, '成交额': 123.7},
         ])
-        with patch('stocks.ingest._try_sources', return_value=(services.EastMoneySource(), df)):
-            services.fetch_daily_data(self.stock, start_date='20260901', end_date='20260902')
+        with patch('stocks.ingest._try_sources', return_value=(datasources.EastMoneySource(), df)):
+            ingest.fetch_daily_data(self.stock, start_date='20260901', end_date='20260902')
         q = DailyQuote.objects.get(stock=self.stock, trade_date=date(2026, 9, 1))
         self.assertEqual(q.close_price, Decimal('1.234'))
         self.assertEqual(q.high_low_diff, Decimal('0.007'))
@@ -57,7 +58,7 @@ class PricePrecisionTests(_NoSleep, TestCase):
             '时间': '2026-09-02 09:31:00', '开盘': 1.2341, '收盘': 1.2345,
             '最高': 1.236, '最低': 1.231, '成交量': 1000, '成交额': 1234.567,
         }])
-        n = services._save_minute_bars(self.stock, df, date(2026, 9, 2), 'eastmoney')
+        n = ingest._save_minute_bars(self.stock, df, date(2026, 9, 2), 'eastmoney')
         self.assertEqual(n, 1)
         bar = MinuteBar.objects.get(stock=self.stock)
         self.assertEqual(bar.open, Decimal('1.234'))
@@ -65,7 +66,7 @@ class PricePrecisionTests(_NoSleep, TestCase):
         self.assertEqual(bar.turnover, Decimal('1234.57'))
         # 再写一遍不变的数据：与库内 3 位精度一致，不重复写
         with patch.object(MinuteBar.objects, 'bulk_create') as bc:
-            services._save_minute_bars(self.stock, df, date(2026, 9, 2), 'eastmoney')
+            ingest._save_minute_bars(self.stock, df, date(2026, 9, 2), 'eastmoney')
         bc.assert_not_called()
 
     def test_dashboard_serializer_three_decimals(self):
@@ -93,12 +94,12 @@ class ExchangeRouteTests(SimpleTestCase):
             '920001': 'bj', '430047': 'bj', '830799': 'bj', '871981': 'bj',
         }
         for code, ex in cases.items():
-            self.assertEqual(services._exchange(code), ex, code)
-        self.assertEqual(services._to_shsz_prefix('510300'), 'sh510300')
-        self.assertEqual(services._to_shsz_prefix('830799'), 'bj830799')
+            self.assertEqual(codes.exchange(code), ex, code)
+        self.assertEqual(codes.exchange_prefix('510300'), 'sh510300')
+        self.assertEqual(codes.exchange_prefix('830799'), 'bj830799')
 
     def test_baostock_skips_bj(self):
-        src = services.BaoStockSource()
+        src = datasources.BaoStockSource()
         self.assertEqual(src._format_code('510300'), 'sh.510300')
         self.assertIsNone(src._format_code('830799'))
         with patch('baostock.login') as login:
@@ -144,7 +145,7 @@ class BaoStockSessionTests(SimpleTestCase):
             def get_row_data(self):
                 return ['2026-09-01', '1', '1', '1', '1', '100', '100']
 
-        src = services.BaoStockSource()
+        src = datasources.BaoStockSource()
         with patch('baostock.login', side_effect=login), \
                 patch('baostock.logout', side_effect=logout), \
                 patch('baostock.query_history_k_data_plus', side_effect=lambda *a, **k: _RS()):
@@ -162,9 +163,9 @@ class BaoStockSessionTests(SimpleTestCase):
         with patch('baostock.login'), patch('baostock.logout') as logout, \
                 patch('baostock.query_stock_basic', side_effect=RuntimeError('boom')):
             with self.assertRaises(RuntimeError):
-                services.BaoStockSource().fetch_stock_name('600000')
+                datasources.BaoStockSource().fetch_stock_name('600000')
         logout.assert_called_once()
-        self.assertFalse(services._bs_lock.locked())
+        self.assertFalse(baostock_session.bs_lock.locked())
 
 
 class DailyIsFinalTests(_NoSleep, TestCase):
@@ -183,10 +184,10 @@ class DailyIsFinalTests(_NoSleep, TestCase):
     def _fetch(self, now_str):
         now = _aware(now_str)
         with patch('stocks.ingest._try_sources',
-                   return_value=(services.SinaSource(), self.df)), \
+                   return_value=(datasources.SinaSource(), self.df)), \
                 patch('stocks.ingest.timezone.now', return_value=now), \
                 patch('stocks.ingest.timezone.localdate', return_value=now.date()):
-            services.fetch_daily_data(self.stock, start_date='20260901', end_date='20260902')
+            ingest.fetch_daily_data(self.stock, start_date='20260901', end_date='20260902')
 
     def _final(self, d):
         return DailyQuote.objects.get(stock=self.stock, trade_date=d).is_final
@@ -501,8 +502,8 @@ class BaoStockLoginFailureTests(SimpleTestCase):
             self.error_msg = msg
 
     def setUp(self):
-        services._reset_trade_calendar_cache()
-        self.addCleanup(services._reset_trade_calendar_cache)
+        trading_calendar.reset_cache()
+        self.addCleanup(trading_calendar.reset_cache)
 
     def test_login_error_code_enters_cooldown(self):
         with patch('akshare.tool_trade_date_hist_sina', side_effect=RuntimeError('down')), \
@@ -510,11 +511,11 @@ class BaoStockLoginFailureTests(SimpleTestCase):
                 patch('baostock.logout') as logout, \
                 patch('baostock.query_trade_dates') as query:
             for d in range(5, 10):
-                self.assertIsNone(services.is_trading_day(date(2026, 10, d)))
+                self.assertIsNone(trading_calendar.is_trading_day(date(2026, 10, d)))
         self.assertEqual(login.call_count, 1)
         query.assert_not_called()
         logout.assert_not_called()  # 未登录成功不登出
-        self.assertFalse(services._bs_lock.locked())
+        self.assertFalse(baostock_session.bs_lock.locked())
 
     def test_query_error_code_enters_cooldown(self):
         rs = self._Result('10004011', '查询失败')
@@ -524,14 +525,14 @@ class BaoStockLoginFailureTests(SimpleTestCase):
                 patch('baostock.logout'), \
                 patch('baostock.query_trade_dates', return_value=rs):
             for d in range(5, 8):
-                self.assertIsNone(services.is_trading_day(date(2026, 10, d)))
+                self.assertIsNone(trading_calendar.is_trading_day(date(2026, 10, d)))
         self.assertEqual(login.call_count, 1)
 
     def test_login_failure_makes_source_fail(self):
         with patch('baostock.login', return_value=self._Result('10002007')), \
                 patch('baostock.query_history_k_data_plus') as query:
             with self.assertRaises(RuntimeError):
-                services.BaoStockSource().fetch_daily('600000', '20260901', '20260901')
+                datasources.BaoStockSource().fetch_daily('600000', '20260901', '20260901')
         query.assert_not_called()
 
 
