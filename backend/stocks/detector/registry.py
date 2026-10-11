@@ -13,17 +13,21 @@ params 约定（阈值一律用「自身分布单位」表达，#1）：
 - mild  温和带的归一化基准（value = raw/mild×50）；
 - max   旧的跨品种绝对突变上限。噪声闸门开启且配置了 noise_hi 时不再参与
   （上限改为 noise_hi × 自身噪声带）；库里旧配置行残留的 max 因此失效；
-- 迭代优化（review.py）只微调 min（灵敏度）与权重，min 的调整边界是
-  [0.5×, 2×] 默认值，权重边界 [0.5, 2.0]，防止自动调参失控；
+- 迭代优化（review.py，DETECTOR_AUTO_TUNE 默认关闭）只调权重（边界 [0.5, 2.0]）
+  与噪声闸门的 noise_pct（constants.TUNE_PARAMS，边界 [0.6, 0.95]）；min 被噪声
+  闸门覆盖、调它是空操作，不再调（#5）；
 - noise_pct / noise_window / noise_min / noise_hi  噪声闸门（ALG-04/#10）：
   |原始漂移| 须超过自身近 noise_window 个历史漂移绝对值的 noise_pct 分位
   （Harrell-Davis 估计）才投票，且不超过 noise_hi 倍该分位；历史不足 noise_min
-  个不投票。噪声闸门不参与自动调参，noise_pct 置 0 即关闭；
+  个不投票。noise_pct 置 0 即关闭（自动调参不会重新打开）；
 - z_lo / z_hi / z_mild / sigma_window / sigma_min  价格类维度（vol_compress、
   ma_relation）：raw 先除以由近 sigma_window 个日收益 σ 解析推导的噪声尺度
   得到 z，z_lo < |z| ≤ z_hi 才投票，value = z/z_mild×50。随机游走下 |z| 近似
   标准正态，单维度名义投票率 2·(Φ(−z_lo) − Φ(−z_hi))，与标的波动率无关；
   z_lo=0 即关闭下限闸门；
+- （条目级字段，不在 params 里）group / role：投票信息组与角色（#4）。方向组
+  （price/funds/leverage）决定 up/down，量能强度组（volume）只在活跃度抬升时
+  确认、不定方向不否决；未声明的维度自成方向组（signals.dim_group）；
 - compress_pct  波动率压缩专用：当前宽度 ≤ 自身历史 compress_pct 分位才算压缩。
   （旧参数 drift_z=2.13 的注释称「≈自由度 4 的双侧 10%」，但 t 的分母取自按
   「标准差小」筛出的同一窗口，压缩条件下实际假阳约 28%，已改为 σ60 的 z，#3/#17。）
