@@ -557,4 +557,7 @@ class MarketDeadlineBreakerTests(SimpleTestCase):
     def test_frontend_timeout_below_nginx(self):
         js = (Path(__file__).resolve().parents[2] / 'frontend' / 'src' / 'api' / 'stocks.js').read_text(encoding='utf-8')
         self.assertNotIn('180000', js)
-        self.assertIn("api.get('/market/national-etf/flow/', { timeout: 110000, params })", js)
+        # 选项对象里还可能有 params / signal 等，只要求该接口显式用 110s 超时
+        self.assertRegex(
+            js, r"api\.get\('/market/national-etf/flow/',\s*\{[^}]*\btimeout:\s*110000\b[^}]*\}\)",
+        )
