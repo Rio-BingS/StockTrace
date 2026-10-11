@@ -131,7 +131,8 @@ usePolling(load, { interval: 60000 })
     </form>
 
     <!-- 规则列表 -->
-    <table v-if="rules.length" class="rule-table">
+    <div v-if="rules.length" class="table-scroll">
+    <table class="rule-table">
       <thead>
         <tr><th>股票</th><th>规则</th><th>阈值</th><th>备注</th><th>状态</th><th>操作</th></tr>
       </thead>
@@ -150,6 +151,7 @@ usePolling(load, { interval: 60000 })
         </tr>
       </tbody>
     </table>
+    </div>
     <p v-else class="empty-hint">还没有提醒规则。添加后，盘中每 5 分钟和收盘汇总会自动评估，触发记录会显示在这里。</p>
 
     <!-- 触发记录 -->

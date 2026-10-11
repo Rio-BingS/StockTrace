@@ -123,7 +123,8 @@ onMounted(load)
 
     <div v-if="loading" class="hint">加载中…</div>
 
-    <table v-else-if="providers.length" class="provider-table">
+    <div v-else-if="providers.length" class="table-scroll">
+    <table class="provider-table">
       <thead>
         <tr>
           <th>名称</th>
@@ -153,6 +154,7 @@ onMounted(load)
         </tr>
       </tbody>
     </table>
+    </div>
     <div v-else class="hint">还没有配置，点击「新增服务商」添加。</div>
 
     <!-- Teleport 到 body，背景 #app 才能整体设为 inert（FEX-04） -->

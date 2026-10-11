@@ -96,9 +96,10 @@ const chartOption = computed(() => {
         `
       },
     },
+    // 固定像素边距：百分比边距在窄屏上会把价格刻度挤出画布；两个 grid 左右一致保证 K 线与量柱对齐（FEX-05）
     grid: [
-      { left: '10%', right: '8%', top: '12%', height: '55%' },
-      { left: '10%', right: '8%', top: '72%', height: '18%' },
+      { left: 56, right: 16, top: 36, height: '55%' },
+      { left: 56, right: 16, top: '72%', height: '18%' },
     ],
     xAxis: [
       {
@@ -219,7 +220,7 @@ function handleChartClick(params) {
       v-if="data.length"
       :option="chartOption"
       :autoresize="true"
-      style="height: 500px; width: 100%"
+      class="kline-canvas"
       @click="handleChartClick"
     />
     <div v-else class="no-data">暂无K线数据</div>
@@ -229,7 +230,17 @@ function handleChartClick(params) {
 <style scoped>
 .kline-chart {
   width: 100%;
-  min-height: 500px;
+}
+
+.kline-canvas {
+  width: 100%;
+  height: 500px;
+}
+
+@media (max-width: 600px) {
+  .kline-canvas {
+    height: 380px;
+  }
 }
 
 .no-data {

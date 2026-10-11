@@ -483,6 +483,8 @@ function goDetail(row) {
         AI 点评只针对前 {{ COMMENT_MAX_ROWS }} 只
       </div>
       <div v-if="resultDisclaimer" class="disclaimer">条件由 AI 翻译生成。{{ resultDisclaimer }}</div>
+      <!-- 窄屏下表格横向滚动，不撑宽整页（FEX-05） -->
+      <div class="table-scroll">
       <table class="result-table">
         <thead>
           <tr>
@@ -514,6 +516,7 @@ function goDetail(row) {
           </tr>
         </tbody>
       </table>
+      </div>
       <div v-if="comment" class="comment" aria-live="polite">
         <h3>AI 点评</h3>
         <pre class="comment-text">{{ comment }}</pre>

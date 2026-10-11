@@ -67,4 +67,36 @@ const isSettings = computed(() => route.path.startsWith('/settings'))
   color: #fff;
   background: #0f3460;
 }
+
+/* 窄屏：导航项不换行、可横向滑动，避免撑出页面宽度（FEX-05） */
+@media (max-width: 640px) {
+  .navbar {
+    padding: 10px 12px;
+    gap: 12px;
+  }
+
+  .nav-brand a {
+    font-size: 17px;
+  }
+
+  .nav-links {
+    flex: 1;
+    min-width: 0;
+    justify-content: flex-end;
+    overflow-x: auto;
+    scrollbar-width: none;
+    gap: 2px;
+  }
+
+  .nav-links::-webkit-scrollbar {
+    display: none;
+  }
+
+  .nav-links a {
+    margin-left: 0;
+    padding: 6px 9px;
+    white-space: nowrap;
+    flex-shrink: 0;
+  }
+}
 </style>

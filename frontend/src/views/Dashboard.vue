@@ -279,6 +279,8 @@ onUnmounted(() => {
   display: flex;
   justify-content: space-between;
   align-items: center;
+  flex-wrap: wrap;
+  gap: 10px 16px;
   margin-bottom: 24px;
 }
 
@@ -289,8 +291,9 @@ onUnmounted(() => {
 
 .header-actions {
   display: flex;
-  gap: 12px;
+  gap: 8px 12px;
   align-items: center;
+  flex-wrap: wrap;
 }
 
 .fetch-msg {

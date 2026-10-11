@@ -255,7 +255,8 @@ const chartOption = computed(() => {
         </div>`
       },
     },
-    grid: { left: '8%', right: '5%', top: '12%', bottom: '22%' },
+    // 固定像素边距，窄屏不裁掉价格刻度（FEX-05）
+    grid: { left: 56, right: 16, top: 40, bottom: 56 },
     xAxis: {
       type: 'category',
       data: times,
@@ -370,7 +371,7 @@ const extremaList = computed(() => {
       v-if="minuteData.length"
       :option="chartOption"
       :autoresize="true"
-      style="height: 400px; width: 100%"
+      class="intraday-canvas"
     />
     <div v-else class="no-data">暂无分钟走势数据</div>
 
@@ -456,6 +457,21 @@ const extremaList = computed(() => {
 .base-note {
   color: #909090;
   font-size: 12px;
+}
+
+.intraday-canvas {
+  width: 100%;
+  height: 400px;
+}
+
+@media (max-width: 600px) {
+  .intraday-canvas {
+    height: 320px;
+  }
+
+  .quote-table td {
+    padding: 6px 8px;
+  }
 }
 
 .no-data {

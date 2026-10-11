@@ -58,6 +58,13 @@ body {
   color: var(--flat);
 }
 
+/* 宽表格外包一层：窄屏横向滚动，不撑宽整页（FEX-05） */
+.table-scroll {
+  max-width: 100%;
+  overflow-x: auto;
+  -webkit-overflow-scrolling: touch;
+}
+
 a {
   color: var(--accent);
   text-decoration: none;
