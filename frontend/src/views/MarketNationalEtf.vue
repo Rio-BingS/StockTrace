@@ -11,7 +11,7 @@ import MarketDataStatus from '../components/MarketDataStatus.vue'
 import EtfDetailPanel from '../components/EtfDetailPanel.vue'
 import PeriodPicker from '../components/PeriodPicker.vue'
 import { marketApi } from '../api/stocks.js'
-import { formatPct, formatNum, pctClass } from '../utils/format.js'
+import { formatPct, formatNum, formatRate, pctClass } from '../utils/format.js'
 import { formatAmount, formatShare } from '../utils/marketFormat.js'
 import { errorMessage, isCanceled } from '../utils/errorMessage.js'
 import { createRequestGuard } from '../utils/requestGuard.js'
@@ -35,16 +35,6 @@ const verdictText = computed(() => {
   return '无显著异动'
 })
 
-function shareYi(val) {
-  if (val == null || Number.isNaN(Number(val))) return '-'
-  const n = Number(val)
-  return `${n > 0 ? '+' : ''}${(n / 1e8).toFixed(2)} 亿份`
-}
-function pctSigned(val) {
-  if (val == null || Number.isNaN(Number(val))) return '-'
-  const n = Number(val)
-  return `${n > 0 ? '+' : ''}${n.toFixed(2)}%`
-}
 
 async function load() {
   loading.value = true; error.value = ''
@@ -106,7 +96,7 @@ const flowBarOption = computed(() => {
       formatter: (p) => {
         const row = rows[p.dataIndex]
         // ETF 名称来自第三方数据源，拼 HTML 前转义（SEC-09）
-        return `${escapeHtml(row.name)}（${escapeHtml(row.code)}）<br/>区间主力净流入 ${formatAmount(row.total_main_net)}` +
+        return `${escapeHtml(row.name)}（${escapeHtml(row.code)}）<br/>区间主力净流入 ${formatAmount(row.total_main_net, { signed: true })}` +
           `<br/>净流入 ${row.up_days} 天 / 净流出 ${row.down_days} 天` +
           `<br/>最新收盘 ${formatNum(row.last_close)}（区间 ${formatPct(row.window_change_pct)}）`
       },
@@ -126,7 +116,7 @@ const flowBarOption = computed(() => {
       })),
       label: {
         show: true, position: 'right', fontSize: 10,
-        color: '#9eabc1', formatter: p => formatAmount(p.value),
+        color: '#9eabc1', formatter: p => formatAmount(p.value, { signed: true }),
       },
     }],
   }
@@ -154,7 +144,7 @@ onUnmounted(() => flowGuard.abort())
     </div>
     <div class="summary-grid">
       <div><label>有行情标的</label><b>{{ summary.count ?? '-' }} 只</b></div>
-      <div><label>合计主力净流入</label><b :class="pctClass(summary.total_main_net)">{{ formatAmount(summary.total_main_net) }}</b></div>
+      <div><label>合计主力净流入</label><b :class="pctClass(summary.total_main_net)">{{ formatAmount(summary.total_main_net, { signed: true }) }}</b></div>
       <div><label>合计最新份额</label><b>{{ formatShare(summary.total_share) }}</b></div>
       <div><label>合计市场规模</label><b>{{ formatAmount(summary.total_market_cap) }}</b></div>
     </div>
@@ -167,8 +157,8 @@ onUnmounted(() => flowGuard.abort())
         <div class="signal-verdict">
           <b :class="signals.signal">{{ verdictText }}</b>
           <span>
-            净申购 {{ signals.in_count ?? 0 }} 只<template v-if="signals.in_total_chg != null">（合计 {{ shareYi(signals.in_total_chg) }}）</template>
-            · 净赎回 {{ signals.out_count ?? 0 }} 只<template v-if="signals.out_total_chg != null">（合计 {{ shareYi(signals.out_total_chg) }}）</template>
+            净申购 {{ signals.in_count ?? 0 }} 只<template v-if="signals.in_total_chg != null">（合计 {{ formatShare(signals.in_total_chg, { signed: true }) }}）</template>
+            · 净赎回 {{ signals.out_count ?? 0 }} 只<template v-if="signals.out_total_chg != null">（合计 {{ formatShare(signals.out_total_chg, { signed: true }) }}）</template>
           </span>
         </div>
         <div v-if="signals.in_items?.length || signals.out_items?.length" class="signal-lists">
@@ -176,18 +166,18 @@ onUnmounted(() => flowGuard.abort())
             <label>份额显著增加</label>
             <div v-for="row in signals.in_items" :key="row.code" class="signal-row">
               <span class="code">{{ row.code }}</span><span class="name">{{ row.name }}</span>
-              <b :class="pctClass(row.share_chg)">{{ shareYi(row.share_chg) }}</b>
-              <b :class="pctClass(row.share_chg_pct)">{{ pctSigned(row.share_chg_pct) }}</b>
-              <b :class="pctClass(row.est_amount)">{{ formatAmount(row.est_amount) }}</b>
+              <b :class="pctClass(row.share_chg)">{{ formatShare(row.share_chg, { signed: true }) }}</b>
+              <b :class="pctClass(row.share_chg_pct)">{{ formatPct(row.share_chg_pct) }}</b>
+              <b :class="pctClass(row.est_amount)">{{ formatAmount(row.est_amount, { signed: true }) }}</b>
             </div>
           </div>
           <div v-if="signals.out_items?.length" class="signal-col">
             <label>份额显著减少</label>
             <div v-for="row in signals.out_items" :key="row.code" class="signal-row">
               <span class="code">{{ row.code }}</span><span class="name">{{ row.name }}</span>
-              <b :class="pctClass(row.share_chg)">{{ shareYi(row.share_chg) }}</b>
-              <b :class="pctClass(row.share_chg_pct)">{{ pctSigned(row.share_chg_pct) }}</b>
-              <b :class="pctClass(row.est_amount)">{{ formatAmount(row.est_amount) }}</b>
+              <b :class="pctClass(row.share_chg)">{{ formatShare(row.share_chg, { signed: true }) }}</b>
+              <b :class="pctClass(row.share_chg_pct)">{{ formatPct(row.share_chg_pct) }}</b>
+              <b :class="pctClass(row.est_amount)">{{ formatAmount(row.est_amount, { signed: true }) }}</b>
             </div>
           </div>
         </div>
@@ -201,8 +191,8 @@ onUnmounted(() => flowGuard.abort())
         <thead><tr><th>#</th><th>代码</th><th>ETF 名称</th><th>最新价</th><th>涨跌幅</th><th>主力净流入</th><th>最新份额</th><th>总市值</th><th>换手</th><th>折溢价</th></tr></thead>
         <tbody><tr v-for="(row,i) in items" :key="row.code" :class="{ selected:selectedCode===row.code, muted:!row.listed }" :tabindex="row.listed ? 0 : -1" @click="row.listed && select(row)" @keyup.enter="row.listed && select(row)">
           <td>{{ i+1 }}</td><td class="code">{{ row.code }}</td><td class="name">{{ row.name }} <small v-if="!row.listed">暂无行情</small></td><td>{{ formatNum(row.price) }}</td>
-          <td :class="pctClass(row.change_pct)">{{ formatPct(row.change_pct) }}</td><td :class="pctClass(row.main_net)">{{ formatAmount(row.main_net) }}</td>
-          <td>{{ formatShare(row.share) }}</td><td>{{ formatAmount(row.market_cap) }}</td><td>{{ formatPct(row.turnover_rate) }}</td><td :class="pctClass(row.discount_rate)">{{ formatPct(row.discount_rate) }}</td>
+          <td :class="pctClass(row.change_pct)">{{ formatPct(row.change_pct) }}</td><td :class="pctClass(row.main_net)">{{ formatAmount(row.main_net, { signed: true }) }}</td>
+          <td>{{ formatShare(row.share) }}</td><td>{{ formatAmount(row.market_cap) }}</td><td>{{ formatRate(row.turnover_rate) }}</td><td :class="pctClass(row.discount_rate)">{{ formatPct(row.discount_rate) }}</td>
         </tr></tbody>
       </table><div v-if="!items.length&&!loading" class="empty">暂无观察数据</div></div></section>
       <EtfDetailPanel :code="selectedCode" />
@@ -232,7 +222,7 @@ onUnmounted(() => flowGuard.abort())
     <div v-if="flowError" class="error-box">{{ flowError }}</div>
     <div v-if="flowData?.note" class="flow-note">{{ flowData.note }}</div>
       <div v-if="flowData?.summary" class="flow-summary">
-        <div><label>区间合计净流入</label><b :class="pctClass(flowSummary.total_main_net)">{{ formatAmount(flowSummary.total_main_net) }}</b></div>
+        <div><label>区间合计净流入</label><b :class="pctClass(flowSummary.total_main_net)">{{ formatAmount(flowSummary.total_main_net, { signed: true }) }}</b></div>
         <div><label>净流入 / 流出家数</label><b>{{ flowSummary.inflow_count ?? '-' }} / {{ flowSummary.outflow_count ?? '-' }}</b></div>
         <div><label>覆盖区间</label><b>{{ flowData.coverage_start || '-' }} ~ {{ flowData.end || '-' }}</b></div>
         <div><label>数据截至交易日</label><b>{{ flowData.meta?.data_as_of || flowData.end || '-' }}</b></div>

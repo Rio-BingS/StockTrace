@@ -12,8 +12,8 @@ import {
 import { CanvasRenderer } from 'echarts/renderers'
 import { marketApi } from '../api/stocks.js'
 import PeriodPicker from '../components/PeriodPicker.vue'
-import { formatPct, formatNum, pctClass } from '../utils/format.js'
-import { formatYi, formatYiAxis, formatTurnover, formatAmount } from '../utils/marketFormat.js'
+import { formatPct, formatNum, formatSigned, pctClass } from '../utils/format.js'
+import { formatYiAxis, formatTurnover, formatAmount } from '../utils/marketFormat.js'
 import { errorMessage, isCanceled } from '../utils/errorMessage.js'
 import { createRequestGuard } from '../utils/requestGuard.js'
 import { usePolling } from '../composables/usePolling.js'
@@ -215,10 +215,10 @@ onUnmounted(() => flowGuard.abort())
           <div class="idx-name">{{ item.name }}</div>
           <div class="idx-code">{{ item.code }}</div>
           <div class="idx-price" :class="pctClass(item.change_pct)">
-            {{ item.price != null ? Number(item.price).toFixed(2) : '-' }}
+            {{ formatNum(item.price) }}
           </div>
           <div class="idx-change" :class="pctClass(item.change_pct)">
-            <span>{{ formatNum(item.change) }}</span>
+            <span>{{ formatSigned(item.change) }}</span>
             <span>{{ formatPct(item.change_pct) }}</span>
           </div>
           <div class="idx-meta">
@@ -268,7 +268,7 @@ onUnmounted(() => flowGuard.abort())
         <div class="summary-card">
           <div class="slabel">北向资金净买额（合计）</div>
           <div class="svalue" :class="pctClass(northNet)">
-            {{ northNet != null ? formatYi(northNet) + ' 亿' : '-' }}
+            {{ formatAmount(northNet, { unit: '亿', signed: true }) }}
           </div>
           <div class="shint">沪股通 + 深股通</div>
         </div>
@@ -289,11 +289,11 @@ onUnmounted(() => flowGuard.abort())
         <div class="summary-card">
           <div class="slabel">两融余额（沪深）</div>
           <div class="svalue">
-            {{ margin.available && margin.total != null ? margin.total.toLocaleString() + ' 亿' : '-' }}
+            {{ margin.available ? formatAmount(margin.total, { unit: '亿' }) : '-' }}
           </div>
           <div class="shint">
             <span v-if="margin.chg_1d != null" :class="pctClass(margin.chg_1d)">
-              日变化 {{ margin.chg_1d > 0 ? '+' : '' }}{{ margin.chg_1d }} 亿
+              日变化 {{ formatAmount(margin.chg_1d, { unit: '亿', signed: true }) }}
             </span>
             <span v-else>日变化 -</span>
             <template v-if="margin.date"> · 截至 {{ margin.date }}</template>
@@ -359,7 +359,7 @@ onUnmounted(() => flowGuard.abort())
               <td>{{ row.trade_date }}</td>
               <td>{{ row.board }}</td>
               <td>{{ row.direction }}</td>
-              <td :class="pctClass(row.net_buy)">{{ formatYi(row.net_buy) }}</td>
+              <td :class="pctClass(row.net_buy)">{{ formatAmount(row.net_buy, { unit: '亿', signed: true }) }}</td>
               <td>
                 <span class="up">{{ row.up_count ?? '-' }}</span>
                 /
@@ -412,7 +412,7 @@ onUnmounted(() => flowGuard.abort())
               <tbody>
                 <tr v-for="(row, i) in (concept.inflow_top || []).slice(0, 5)" :key="'in'+i">
                   <td>{{ row.name }}</td>
-                  <td :class="row.net > 0 ? 'up' : row.net < 0 ? 'down' : ''">{{ formatAmount(row.net) }}</td>
+                  <td :class="row.net > 0 ? 'up' : row.net < 0 ? 'down' : ''">{{ formatAmount(row.net, { signed: true }) }}</td>
                   <td :class="pctClass(row.change_pct)">{{ formatPct(row.change_pct) }}</td>
                 </tr>
               </tbody>
@@ -425,7 +425,7 @@ onUnmounted(() => flowGuard.abort())
               <tbody>
                 <tr v-for="(row, i) in (concept.outflow_top || []).slice(0, 5)" :key="'out'+i">
                   <td>{{ row.name }}</td>
-                  <td :class="row.net > 0 ? 'up' : row.net < 0 ? 'down' : ''">{{ formatAmount(row.net) }}</td>
+                  <td :class="row.net > 0 ? 'up' : row.net < 0 ? 'down' : ''">{{ formatAmount(row.net, { signed: true }) }}</td>
                   <td :class="pctClass(row.change_pct)">{{ formatPct(row.change_pct) }}</td>
                 </tr>
               </tbody>

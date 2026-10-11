@@ -6,7 +6,7 @@ import { LineChart, BarChart } from 'echarts/charts'
 import { GridComponent, TooltipComponent, LegendComponent, DataZoomComponent } from 'echarts/components'
 import { CanvasRenderer } from 'echarts/renderers'
 import { marketApi } from '../api/stocks.js'
-import { formatNum, formatPct, pctClass } from '../utils/format.js'
+import { formatNum, formatPct, formatSigned, pctClass } from '../utils/format.js'
 import { formatAmount, formatShare } from '../utils/marketFormat.js'
 import MarketDataStatus from './MarketDataStatus.vue'
 import { errorMessage, isCanceled } from '../utils/errorMessage.js'
@@ -118,7 +118,7 @@ onUnmounted(() => guard.abort())
         <div><label>最新份额</label><b>{{ formatShare(quote.share) }}</b></div>
         <div><label>总市值</label><b>{{ formatAmount(quote.market_cap) }}</b></div>
         <div><label>成交额</label><b>{{ formatAmount(quote.turnover) }}</b></div>
-        <div><label>主力净流入</label><b :class="pctClass(quote.main_net)">{{ formatAmount(quote.main_net) }}</b></div>
+        <div><label>主力净流入</label><b :class="pctClass(quote.main_net)">{{ formatAmount(quote.main_net, { signed: true }) }}</b></div>
         <div><label>IOPV</label><b>{{ formatNum(quote.iopv, 3) }}</b></div>
         <div><label>折溢价</label><b :class="pctClass(quote.discount_rate)">{{ formatPct(quote.discount_rate) }}</b></div>
       </div>
@@ -148,7 +148,7 @@ onUnmounted(() => guard.abort())
           <b>持有人结构（基金定报）</b>
           <span>机构占比最新 {{ holders.items[0].institution_pct ?? '-' }}%</span>
           <span v-if="holders.items.length > 1 && holders.items[0].institution_pct != null && holders.items[1].institution_pct != null">
-            环比上一期 {{ (holders.items[0].institution_pct - holders.items[1].institution_pct > 0 ? '+' : '') + (holders.items[0].institution_pct - holders.items[1].institution_pct).toFixed(1) }}pct
+            环比上一期 {{ formatSigned(holders.items[0].institution_pct - holders.items[1].institution_pct, 1) }}pct
           </span>
         </div>
         <table class="holders-table">
@@ -181,9 +181,9 @@ onUnmounted(() => guard.abort())
         <b>份额变化{{ data.share_metrics?.availability === 'daily_snapshot' ? '（日度快照）' : '' }}</b>
         <p>{{ data.share_metrics?.message }}</p>
         <div v-if="data.share_metrics?.availability === 'daily_snapshot'" class="share-chgs">
-          <span>1日 <b :class="pctClass(data.share_metrics.share_chg_1d)">{{ formatShare(data.share_metrics.share_chg_1d) }}</b></span>
-          <span>5日 <b :class="pctClass(data.share_metrics.share_chg_5d)">{{ formatShare(data.share_metrics.share_chg_5d) }}</b></span>
-          <span>20日 <b :class="pctClass(data.share_metrics.share_chg_20d)">{{ formatShare(data.share_metrics.share_chg_20d) }}</b></span>
+          <span>1日 <b :class="pctClass(data.share_metrics.share_chg_1d)">{{ formatShare(data.share_metrics.share_chg_1d, { signed: true }) }}</b></span>
+          <span>5日 <b :class="pctClass(data.share_metrics.share_chg_5d)">{{ formatShare(data.share_metrics.share_chg_5d, { signed: true }) }}</b></span>
+          <span>20日 <b :class="pctClass(data.share_metrics.share_chg_20d)">{{ formatShare(data.share_metrics.share_chg_20d, { signed: true }) }}</b></span>
         </div>
       </div>
       <MarketDataStatus v-if="data.history?.meta" :meta="data.history.meta" />

@@ -12,8 +12,8 @@ import { CanvasRenderer } from 'echarts/renderers'
 import MarketSubNav from '../components/MarketSubNav.vue'
 import PeriodPicker from '../components/PeriodPicker.vue'
 import { marketApi } from '../api/stocks.js'
-import { formatPct, pctClass } from '../utils/format.js'
-import { formatAmount } from '../utils/marketFormat.js'
+import { formatNum, formatPct, pctClass } from '../utils/format.js'
+import { formatAmount, formatVolume } from '../utils/marketFormat.js'
 import { errorMessage, isCanceled } from '../utils/errorMessage.js'
 import { createRequestGuard } from '../utils/requestGuard.js'
 
@@ -253,9 +253,9 @@ onUnmounted(() => { northGuard.abort(); detailGuard.abort() })
                 <tr v-for="(r, i) in stockDetail.institutions" :key="i">
                   <td>{{ r.type || '-' }}</td>
                   <td class="name">{{ r.inst_name || r.inst_code || '-' }}</td>
-                  <td>{{ r.shares != null ? formatAmount(r.shares) : '-' }}</td>
-                  <td>{{ r.ratio != null ? Number(r.ratio).toFixed(2) : '-' }}</td>
-                  <td>{{ r.float_ratio != null ? Number(r.float_ratio).toFixed(2) : '-' }}</td>
+                  <td>{{ formatVolume(r.shares) }}</td>
+                  <td>{{ formatNum(r.ratio) }}</td>
+                  <td>{{ formatNum(r.float_ratio) }}</td>
                   <td :class="pctClass(r.ratio_chg)">{{ formatPct(r.ratio_chg) }}</td>
                 </tr>
               </tbody>
@@ -278,8 +278,8 @@ onUnmounted(() => { northGuard.abort(); detailGuard.abort() })
                 <tr v-for="(r, i) in stockDetail.top_holders" :key="i">
                   <td>{{ r.rank ?? i + 1 }}</td>
                   <td class="name">{{ r.name }}</td>
-                  <td>{{ r.shares != null ? formatAmount(r.shares) : '-' }}</td>
-                  <td>{{ r.ratio != null ? Number(r.ratio).toFixed(2) : '-' }}</td>
+                  <td>{{ formatVolume(r.shares) }}</td>
+                  <td>{{ formatNum(r.ratio) }}</td>
                   <td>{{ r.nature || '-' }}</td>
                 </tr>
               </tbody>
@@ -329,9 +329,9 @@ onUnmounted(() => { northGuard.abort(); detailGuard.abort() })
               <td class="name">{{ row.name }}</td>
               <td>{{ row.inst_count ?? '-' }}</td>
               <td :class="pctClass(row.inst_count_chg)">{{ formatChg(row.inst_count_chg) }}</td>
-              <td>{{ row.hold_ratio != null ? Number(row.hold_ratio).toFixed(2) : '-' }}</td>
+              <td>{{ formatNum(row.hold_ratio) }}</td>
               <td :class="pctClass(row.hold_ratio_chg)">{{ formatPct(row.hold_ratio_chg) }}</td>
-              <td>{{ row.float_ratio != null ? Number(row.float_ratio).toFixed(2) : '-' }}</td>
+              <td>{{ formatNum(row.float_ratio) }}</td>
               <td :class="pctClass(row.float_ratio_chg)">{{ formatPct(row.float_ratio_chg) }}</td>
             </tr>
           </tbody>

@@ -12,7 +12,8 @@ import {
   MarkLineComponent,
 } from 'echarts/components'
 import { CanvasRenderer } from 'echarts/renderers'
-import { formatPct, pctFrom } from '../utils/format.js'
+import { formatNum, formatPct, formatRate, pctFrom } from '../utils/format.js'
+import { formatAmount, formatVolume } from '../utils/marketFormat.js'
 import { escapeHtml } from '../utils/escapeHtml.js'
 
 use([
@@ -86,15 +87,17 @@ const chartOption = computed(() => {
         return `
           <div style="font-size:13px">
             <b>${escapeHtml(quote.trade_date)}</b><br/>
-            开盘: ${Number(quote.open_price).toFixed(2)}<br/>
-            收盘: ${Number(quote.close_price).toFixed(2)}<br/>
-            最高: ${Number(quote.high_price).toFixed(2)}
+            开盘: ${formatNum(quote.open_price)}<br/>
+            收盘: ${formatNum(quote.close_price)}<br/>
+            最高: ${formatNum(quote.high_price)}
               ${quote.high_time ? '@ ' + escapeHtml(quote.high_time.slice(11, 16)) : ''}<br/>
-            最低: ${Number(quote.low_price).toFixed(2)}
+            最低: ${formatNum(quote.low_price)}
               ${quote.low_time ? '@ ' + escapeHtml(quote.low_time.slice(11, 16)) : ''}<br/>
             涨跌幅: ${formatPct(chg)}<br/>
             日内涨幅（较开盘）: ${formatPct(quote.open_close_pct)}<br/>
-            振幅: ${Number(quote.high_low_pct).toFixed(2)}%
+            振幅: ${formatRate(quote.high_low_pct)}<br/>
+            成交量: ${formatVolume(quote.volume)}<br/>
+            成交额: ${formatAmount(quote.turnover)}
           </div>
         `
       },

@@ -1,6 +1,6 @@
 <script setup>
 import { computed, ref, watch } from 'vue'
-import { formatPct, formatNum, formatSigned, pctClass } from '../utils/format.js'
+import { formatPct, formatNum, formatRate, formatSigned, pctClass } from '../utils/format.js'
 import { stockApi } from '../api/stocks.js'
 import { computePnl, syncDrafts, validateHolding } from '../utils/holding.js'
 
@@ -142,7 +142,7 @@ async function handleDelete(e, item) {
               {{ formatSigned(item.change_diff) }}
             </td>
             <td :class="pctClass(pnlMap[item.code])">
-              {{ pnlMap[item.code] == null ? '-' : formatNum(pnlMap[item.code]) }}
+              {{ formatSigned(pnlMap[item.code]) }}
             </td>
             <td class="actions">
               <button class="btn-kline" @click="handleGoDetail($event, item)" title="查看K线图">K线</button>
@@ -156,7 +156,8 @@ async function handleDelete(e, item) {
                 <div class="expand-grid">
                   <div class="expand-item">
                     <span class="elabel">振幅</span>
-                    <span :class="pctClass(item.high_low_pct)">{{ formatPct(item.high_low_pct) }}</span>
+                    <!-- 振幅为非负量：不加正号、不着色（FEF-11） -->
+                    <span>{{ formatRate(item.high_low_pct) }}</span>
                   </div>
                   <div class="expand-item">
                     <span class="elabel">日内涨幅（较开盘）</span>

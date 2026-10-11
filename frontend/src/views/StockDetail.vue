@@ -2,7 +2,8 @@
 import { ref, onMounted, computed, watch } from 'vue'
 import { useRoute } from 'vue-router'
 import { stockApi, marketApi } from '../api/stocks.js'
-import { formatPct, formatNum, formatSigned, formatDateTime, pctClass } from '../utils/format.js'
+import { formatPct, formatNum, formatRate, formatSigned, formatDateTime, pctClass } from '../utils/format.js'
+import { formatAmount } from '../utils/marketFormat.js'
 import KlineChart from '../components/KlineChart.vue'
 import IntradayChart from '../components/IntradayChart.vue'
 import AiAnalysisPanel from '../components/AiAnalysisPanel.vue'
@@ -170,7 +171,7 @@ watch(code, (c) => {
         </div>
         <div class="summary-item">
           <span class="label">振幅</span>
-          <span class="value">{{ formatPct(latestQuote.high_low_pct) }}</span>
+          <span class="value">{{ formatRate(latestQuote.high_low_pct) }}</span>
         </div>
         <div class="summary-item highlight">
           <span class="label">最高价</span>
@@ -229,20 +230,20 @@ watch(code, (c) => {
         <div class="margin-grid">
           <div class="margin-item">
             <span class="label">融资余额</span>
-            <span class="value">{{ margin.rz != null ? margin.rz.toLocaleString() + ' 亿' : '-' }}</span>
+            <span class="value">{{ formatAmount(margin.rz, { unit: '亿' }) }}</span>
           </div>
           <div class="margin-item" v-if="margin.rq != null">
             <span class="label">融券余额</span>
-            <span class="value">{{ margin.rq.toLocaleString() }} 亿</span>
+            <span class="value">{{ formatAmount(margin.rq, { unit: '亿' }) }}</span>
           </div>
           <div class="margin-item">
             <span class="label">两融余额</span>
-            <span class="value">{{ margin.total != null ? margin.total.toLocaleString() + ' 亿' : '-' }}</span>
+            <span class="value">{{ formatAmount(margin.total, { unit: '亿' }) }}</span>
           </div>
           <div class="margin-item">
             <span class="label">融资余额日变化</span>
             <span class="value" :class="pctClass(margin.chg_1d)">
-              {{ margin.chg_1d != null ? (margin.chg_1d > 0 ? '+' : '') + margin.chg_1d + ' 亿' : '-' }}
+              {{ formatAmount(margin.chg_1d, { unit: '亿', signed: true }) }}
             </span>
           </div>
         </div>

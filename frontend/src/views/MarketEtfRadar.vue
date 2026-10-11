@@ -5,7 +5,7 @@ import MarketSubNav from '../components/MarketSubNav.vue'
 import MarketDataStatus from '../components/MarketDataStatus.vue'
 import EtfDetailPanel from '../components/EtfDetailPanel.vue'
 import { marketApi } from '../api/stocks.js'
-import { formatNum, formatPct, pctClass } from '../utils/format.js'
+import { formatNum, formatPct, formatRate, pctClass } from '../utils/format.js'
 import { formatAmount, formatShare } from '../utils/marketFormat.js'
 import { errorMessage, isCanceled } from '../utils/errorMessage.js'
 import { createRequestGuard } from '../utils/requestGuard.js'
@@ -109,7 +109,7 @@ onUnmounted(() => guard.abort())
     <div class="summary-grid">
       <div><label>当前范围</label><b>{{ summary.count ?? '-' }} 只</b></div>
       <div><label>合计成交额</label><b>{{ formatAmount(summary.total_turnover) }}</b></div>
-      <div><label>主力净流入</label><b :class="pctClass(summary.total_main_net)">{{ formatAmount(summary.total_main_net) }}</b></div>
+      <div><label>主力净流入</label><b :class="pctClass(summary.total_main_net)">{{ formatAmount(summary.total_main_net, { signed: true }) }}</b></div>
       <div><label>份额字段覆盖</label><b>{{ summary.share_available_count ?? '-' }} 只</b></div>
     </div>
 
@@ -144,11 +144,11 @@ onUnmounted(() => guard.abort())
               <tr v-for="(row, i) in items" :key="row.code" :class="{ selected: selectedCode === row.code }" tabindex="0" @click="select(row)" @keyup.enter="select(row)">
                 <td>{{ (pagination.page - 1) * pagination.page_size + i + 1 }}</td><td class="code">{{ row.code }}</td><td class="name">{{ row.name }}</td><td>{{ formatNum(row.price) }}</td>
                 <td :class="pctClass(row.change_pct)">{{ formatPct(row.change_pct) }}</td><td>{{ formatAmount(row.turnover) }}</td>
-                <td :class="pctClass(row.main_net)">{{ formatAmount(row.main_net) }}</td><td>{{ formatShare(row.share) }}</td>
-                <td v-if="supported.share_change_1d" :class="pctClass(row.share_chg_1d)">{{ formatShare(row.share_chg_1d) }}</td>
-                <td v-if="supported.share_change_5d" :class="pctClass(row.share_chg_5d)">{{ formatShare(row.share_chg_5d) }}</td>
-                <td v-if="supported.share_change_20d" :class="pctClass(row.share_chg_20d)">{{ formatShare(row.share_chg_20d) }}</td>
-                <td>{{ formatAmount(row.market_cap) }}</td><td>{{ formatPct(row.turnover_rate) }}</td><td :class="pctClass(row.discount_rate)">{{ formatPct(row.discount_rate) }}</td>
+                <td :class="pctClass(row.main_net)">{{ formatAmount(row.main_net, { signed: true }) }}</td><td>{{ formatShare(row.share) }}</td>
+                <td v-if="supported.share_change_1d" :class="pctClass(row.share_chg_1d)">{{ formatShare(row.share_chg_1d, { signed: true }) }}</td>
+                <td v-if="supported.share_change_5d" :class="pctClass(row.share_chg_5d)">{{ formatShare(row.share_chg_5d, { signed: true }) }}</td>
+                <td v-if="supported.share_change_20d" :class="pctClass(row.share_chg_20d)">{{ formatShare(row.share_chg_20d, { signed: true }) }}</td>
+                <td>{{ formatAmount(row.market_cap) }}</td><td>{{ formatRate(row.turnover_rate) }}</td><td :class="pctClass(row.discount_rate)">{{ formatPct(row.discount_rate) }}</td>
               </tr>
             </tbody>
           </table>

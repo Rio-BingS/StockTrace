@@ -2,8 +2,7 @@ import { formatPct } from './format.js'
 import { formatAmount } from './marketFormat.js'
 
 export function signedAmount(value) {
-  const result = formatAmount(value)
-  return Number(value) > 0 && result !== '-' ? `+${result}` : result
+  return formatAmount(value, { signed: true })
 }
 
 export function metricWidth(value) {

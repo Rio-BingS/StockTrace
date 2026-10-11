@@ -1,7 +1,7 @@
 // 运行：npm test（Node 内置 node:test，无需额外依赖）
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { formatPct, formatSigned, pctFrom, pctClass } from '../format.js'
+import { formatPct, formatRate, formatSigned, pctFrom, pctClass } from '../format.js'
 
 test('pctFrom：涨跌幅以昨收为基准（FEF-01）', () => {
   // 高开低走但收盘仍高于昨收：较昨收为正，较开盘为负
@@ -24,4 +24,16 @@ test('formatSigned：涨跌额带正负号', () => {
   assert.equal(formatSigned('-0.25'), '-0.25')
   assert.equal(formatSigned(0), '0.00')
   assert.equal(formatSigned(null), '-')
+})
+
+test('formatPct：空串不显示为 0，±0 不带符号（FEF-11）', () => {
+  assert.equal(formatPct(''), '-')
+  assert.equal(formatPct(-0.004), '0.00%')
+  assert.equal(formatPct(Infinity), '-')
+  assert.equal(pctClass('+1.23%'), 'up')
+  assert.equal(pctClass(-0.001), '')
+})
+
+test('formatRate：振幅不加正号（FEF-11）', () => {
+  assert.equal(formatRate(3.5), '3.50%')
 })

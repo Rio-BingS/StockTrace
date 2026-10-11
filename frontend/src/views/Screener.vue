@@ -3,7 +3,8 @@ import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
 import { useRouter } from 'vue-router'
 import { aiApi, presetApi, stockApi } from '../api/stocks.js'
 import { aiDisclaimer, aiErrorText, createAiTask, isCanceled } from '../utils/aiRequest.js'
-import { formatPct, formatNum, pctClass } from '../utils/format.js'
+import { formatPct, formatNum, formatRate, pctClass } from '../utils/format.js'
+import { formatAmount, formatVolume } from '../utils/marketFormat.js'
 import { errorMessage } from '../utils/errorMessage.js'
 import { buildConditions, conditionErrors, hasDetail } from '../utils/screenerConditions.js'
 
@@ -18,7 +19,8 @@ const FIELDS = [
   { key: 'open_price', label: '开盘价(元)' },
   { key: 'high_price', label: '最高价(元)' },
   { key: 'low_price', label: '最低价(元)' },
-  { key: 'volume', label: '成交量(手)' },
+  // 日线 volume 入库单位为股（DailyQuote.volume），这里按股填写和显示
+  { key: 'volume', label: '成交量(股)' },
   { key: 'turnover', label: '成交额(元)' },
   { key: 'pct_5d', label: '5日涨跌幅(%)' },
   { key: 'pct_10d', label: '10日涨跌幅(%)' },
@@ -158,10 +160,18 @@ const extraColumns = computed(() => {
   }))
 })
 
+// 结果表附加列：按字段类型选格式（成交量带单位、成交额换算万/亿、振幅不带正号）
+const AMOUNT_FIELDS = new Set(['turnover', 'turnover_5d_avg'])
+const PCT_FIELDS = new Set(['change_pct', 'open_close_pct', 'pct_5d', 'pct_10d', 'pct_20d', 'pct_60d', 'pct_from_high_20d'])
 function fmtCell(row, col) {
   const v = row[col.key]
   if (v == null) return '-'
   if (col.bool) return v === 1 ? '是' : '否'
+  if (col.key === 'volume') return formatVolume(v)
+  if (col.key === 'up_days') return String(v)
+  if (col.key === 'high_low_pct') return formatRate(v)
+  if (AMOUNT_FIELDS.has(col.key)) return formatAmount(v)
+  if (PCT_FIELDS.has(col.key)) return formatPct(v)
   return formatNum(v)
 }
 
@@ -361,12 +371,6 @@ function goDetail(row) {
   router.push(`/stock/${row.stock_id}`)
 }
 
-function fmtTurnover(v) {
-  if (v == null) return '-'
-  if (v >= 1e8) return (v / 1e8).toFixed(2) + '亿'
-  if (v >= 1e4) return (v / 1e4).toFixed(0) + '万'
-  return v
-}
 </script>
 
 <template>
@@ -499,9 +503,9 @@ function fmtTurnover(v) {
             <td>{{ r.name || '-' }}</td>
             <td :class="pctClass(r.change_pct)">{{ formatPct(r.change_pct) }}</td>
             <td>{{ formatNum(r.close_price) }}</td>
-            <td>{{ formatPct(r.high_low_pct) }}</td>
+            <td>{{ formatRate(r.high_low_pct) }}</td>
             <td v-for="col in extraColumns" :key="col.key" :class="pctClass(col.bool ? null : r[col.key])">{{ fmtCell(r, col) }}</td>
-            <td>{{ fmtTurnover(r.turnover) }}</td>
+            <td>{{ formatAmount(r.turnover) }}</td>
             <td>{{ r.trade_date }}</td>
             <td class="actions">
               <button v-if="hasDetail(r)" class="btn small" @click="goDetail(r)">详情</button>

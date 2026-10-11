@@ -9,6 +9,7 @@ import { HeatmapChart } from 'echarts/charts'
 import { GridComponent, TooltipComponent, VisualMapComponent } from 'echarts/components'
 import { CanvasRenderer } from 'echarts/renderers'
 import { escapeHtml } from '../utils/escapeHtml.js'
+import { fmtSigned } from '../utils/number.js'
 
 use([HeatmapChart, GridComponent, TooltipComponent, VisualMapComponent, CanvasRenderer])
 
@@ -44,7 +45,7 @@ const option = computed(() => {
         const dim = props.dims[p.value[0]]
         const v = p.value[2]
         // 板块名来自第三方数据源，拼 HTML 前转义（SEC-09）
-        return `${escapeHtml(row?.name)}<br/>${escapeHtml(dim?.name)}：<b style="color:${v >= 0 ? '#ff8796' : '#4cd68a'}">${v > 0 ? '+' : ''}${v.toFixed(1)}</b>`
+        return `${escapeHtml(row?.name)}<br/>${escapeHtml(dim?.name)}：<b style="color:${v >= 0 ? '#ff8796' : '#4cd68a'}">${fmtSigned(v, 1)}</b>`
       },
     },
     grid: { left: 8, right: 12, top: 6, bottom: 40, containLabel: true },

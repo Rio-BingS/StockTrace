@@ -6,6 +6,7 @@ import StockTable from '../components/StockTable.vue'
 import StockWatchlist from '../components/StockWatchlist.vue'
 import AlertPanel from '../components/AlertPanel.vue'
 import { errorMessage } from '../utils/errorMessage.js'
+import { formatSigned, pctClass } from '../utils/format.js'
 import { usePolling } from '../composables/usePolling.js'
 import { createBurstScheduler, createSerialRunner } from '../utils/serialRunner.js'
 
@@ -214,8 +215,8 @@ onUnmounted(() => {
     <div class="dashboard-header">
       <h1>股票监控面板</h1>
       <div class="header-actions">
-        <span v-if="portfolio" class="portfolio" :class="portfolio.pnl >= 0 ? 'up' : 'down'">
-          持仓{{ portfolio.count }}只 · 盈亏 {{ portfolio.pnl >= 0 ? '+' : '' }}{{ portfolio.pnl.toFixed(2) }}
+        <span v-if="portfolio" class="portfolio" :class="pctClass(portfolio.pnl)">
+          持仓{{ portfolio.count }}只 · 盈亏 {{ formatSigned(portfolio.pnl) }}
         </span>
         <span v-if="refreshing" class="refresh-badge">刷新中…</span>
         <span v-else-if="lastLoadedAt" class="updated-at">更新于 {{ lastLoadedAt }}</span>

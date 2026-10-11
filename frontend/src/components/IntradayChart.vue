@@ -12,7 +12,8 @@ import {
   MarkLineComponent,
 } from 'echarts/components'
 import { CanvasRenderer } from 'echarts/renderers'
-import { formatPct, formatNum, pctClass, pctFrom } from '../utils/format.js'
+import { formatPct, formatNum, formatRate, pctClass, pctFrom } from '../utils/format.js'
+import { formatVolume } from '../utils/marketFormat.js'
 import { escapeHtml } from '../utils/escapeHtml.js'
 
 use([
@@ -257,7 +258,7 @@ const chartOption = computed(() => {
         return `<div style="font-size:12px">
           <b>${escapeHtml(p.axisValue)}</b><br/>
           价格: ${Number(bar.close).toFixed(2)}${pct ? ` (${baseInfo.value.label} ${pct})` : ''}<br/>
-          成交量: ${escapeHtml(bar.volume || '-')}
+          成交量: ${escapeHtml(formatVolume(bar.volume))}
         </div>`
       },
     },
@@ -412,7 +413,7 @@ const extremaList = computed(() => {
           </tr>
           <tr>
             <td class="tlabel">振幅</td>
-            <td>{{ formatPct(tableData.high_low_pct) }}</td>
+            <td>{{ formatRate(tableData.high_low_pct) }}</td>
             <td class="tlabel"></td>
             <td></td>
           </tr>
