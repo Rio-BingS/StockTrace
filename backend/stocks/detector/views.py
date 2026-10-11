@@ -220,9 +220,9 @@ def _run_brief(run):
 
 def _context_for_signal(sig):
     """为信号重建序列上下文（详情页曲线用）；失败返回 (None, err)。"""
-    if sig.target_kind == 'index':
+    if sig.target_kind == DetectorSignal.TARGET_INDEX:
         return build_index_context(sig.target_code, sig.target_name)
-    if sig.target_kind == 'stock':
+    if sig.target_kind == DetectorSignal.TARGET_STOCK:
         from ..models import Stock
 
         stock = Stock.objects.filter(code=sig.target_code).first()
@@ -290,8 +290,8 @@ def detector_heatmap(request):
     ?board=industry|concept（默认 industry）；行按最大 |分值| 降序并截取
     前 40 行（热力图可读性上限，完整数据仍在 run.matrix 里）。
     """
-    board = request.query_params.get('board', 'industry')
-    if board not in ('industry', 'concept'):
+    board = request.query_params.get('board', DetectorSignal.TARGET_INDUSTRY)
+    if board not in (DetectorSignal.TARGET_INDUSTRY, DetectorSignal.TARGET_CONCEPT):
         return Response({'detail': 'board 仅支持 industry / concept'},
                         status=status.HTTP_400_BAD_REQUEST)
 
