@@ -201,3 +201,46 @@ class AiThrottleAtomicTests(TestCase):
         self.assertEqual(r.status_code, 500)
         self.assertFalse(_inflight)
         self.assertFalse(AiCallLog.objects.get().success)
+
+
+class AiCallLogObservabilityTests(TestCase):
+    """AIX-08：流水回填模型、耗时、错误原因（字段迁移前写 INFO 日志）。"""
+
+    def setUp(self):
+        self.provider, self.stock = _ai_fixtures()
+        self.post = _ai_patches(self)
+        self.client = APIClient()
+
+    def test_error_text_has_no_upstream_body(self):
+        from stocks.ai.llm import LlmError
+        from stocks.ai.throttle import error_text
+        self.assertEqual(error_text(LlmError('上游原文 secret', kind='auth', status_code=401)),
+                         'auth HTTP 401')
+        self.assertEqual(error_text(ValueError('x')), 'config')
+        self.assertEqual(error_text(RuntimeError('y' * 500)), 'RuntimeError')
+        self.assertEqual(error_text(None), '')
+
+    def test_failed_call_logged_with_model_latency_error(self):
+        from stocks.tests_ai import _fake_response
+        self.post.return_value = _fake_response(401, text='secret-body')
+        with self.assertLogs('stocks.ai.throttle', level='INFO') as logs:
+            self.client.post(f'/api/stocks/{self.stock.id}/ai-analysis/')
+        line = '\n'.join(logs.output)
+        self.assertIn('model=m', line)
+        self.assertIn('latency_ms=', line)
+        self.assertIn('error=auth HTTP 401', line)
+        self.assertNotIn('secret-body', line)
+
+    def test_fields_filled_when_migrated(self):
+        from stocks.ai.throttle import _has_field
+        from stocks.models import AiCallLog
+        from stocks.tests_ai import _fake_response
+        if not _has_field('latency_ms'):
+            self.skipTest('AiCallLog 尚未迁移 model/latency_ms/error/status 字段（待 data 方向）')
+        self.post.return_value = _fake_response(401, text='x')
+        self.client.post(f'/api/stocks/{self.stock.id}/ai-analysis/')
+        log = AiCallLog.objects.get()
+        self.assertEqual(log.model, 'm')
+        self.assertIsNotNone(log.latency_ms)
+        self.assertEqual(log.error, 'auth HTTP 401')
+        self.assertEqual(log.status, 'failed')

@@ -7,6 +7,7 @@
 调用结束后 finish_call() 回填结果。占位流水在调用前就存在，并发请求也会被计入，
 不再是"先查、调用完才写"的竞态窗口。
 """
+import logging
 import threading
 from datetime import timedelta
 
@@ -15,6 +16,8 @@ from django.db import transaction
 from django.utils import timezone
 
 from ..models import AiCallLog
+
+logger = logging.getLogger(__name__)
 
 # 服务商连通性测试（test 端点）单独轻量频控，不占用正式 AI 功能的每日总额度
 PROVIDER_TEST_PURPOSE = 'provider_test'
@@ -115,21 +118,54 @@ def reserve_call(purpose, provider=None, stock=None):
     return log, None
 
 
-def finish_call(log, success, usage=None, provider=None):
-    """回填占位流水的结果；失败流水保留（计入每日上限，不计冷却）。"""
+def error_text(exc):
+    """失败原因摘要：只含通用分类与上游状态码，不含上游响应体（SEC-07），截断到 200 字。"""
+    if exc is None:
+        return ''
+    kind = getattr(exc, 'kind', None) or (
+        'config' if isinstance(exc, ValueError) else type(exc).__name__)
+    code = getattr(exc, 'status_code', None)
+    text = f'{kind} HTTP {code}' if code else str(kind)
+    return text[:200]
+
+
+def finish_call(log, success, usage=None, provider=None, error=None):
+    """回填占位流水的结果；失败流水保留（计入每日上限，不计冷却）。
+
+    可观测性（AIX-08）：耗时按占位写入时刻计算，模型取实际服务商。model/latency_ms/
+    error/status 字段待模型迁移补上后自动落库；在此之前同样内容写一行 INFO 日志。
+    """
     with _inflight_lock:
         _inflight.discard(log.pk)
+    if provider is not None:
+        log.provider = provider
+    provider = log.provider
+    model = (getattr(provider, 'model', '') or '')[:100]
+    latency_ms = None
+    if log.created_at:
+        latency_ms = max(0, int((timezone.now() - log.created_at).total_seconds() * 1000))
+    err = error_text(error) if not success else ''
     log.success = bool(success)
     log.prompt_tokens = (usage or {}).get('prompt_tokens')
     log.completion_tokens = (usage or {}).get('completion_tokens')
-    update = ['success', 'prompt_tokens', 'completion_tokens']
-    if provider is not None:
-        log.provider = provider
-        update.append('provider')
-    if _has_field('status'):
-        log.status = 'success' if success else 'failed'
-        update.append('status')
+    update = ['success', 'prompt_tokens', 'completion_tokens', 'provider']
+    optional = {
+        'status': 'success' if success else 'failed',
+        'model': model,
+        'latency_ms': latency_ms,
+        'error': err,
+    }
+    for name, value in optional.items():
+        if _has_field(name):
+            setattr(log, name, value)
+            update.append(name)
     log.save(update_fields=update)
+    logger.info(
+        'AI 调用 purpose=%s provider=%s model=%s success=%s latency_ms=%s '
+        'prompt_tokens=%s completion_tokens=%s error=%s',
+        log.purpose, getattr(provider, 'pk', None), model, log.success, latency_ms,
+        log.prompt_tokens, log.completion_tokens, err or '-',
+    )
 
 
 def cancel_call(log):

@@ -55,8 +55,8 @@ class AiProviderViewSet(viewsets.ModelViewSet):
                 # 测试要快速给结论，不做重试
                 max_retries=0,
             )
-        except ValueError:
-            finish_call(call_log, False)
+        except ValueError as exc:
+            finish_call(call_log, False, error=LlmError(str(exc), kind='config'))
             return _test_failed('config', None)
         except LlmError as exc:
             if exc.kind == 'busy':
@@ -64,7 +64,7 @@ class AiProviderViewSet(viewsets.ModelViewSet):
                 cancel_call(call_log)
                 return _busy_response()
             if exc.kind not in _TEST_OK_KINDS:
-                finish_call(call_log, False, usage=exc.usage)
+                finish_call(call_log, False, usage=exc.usage, error=exc)
                 # 详情只进服务端日志（不含上游响应体），对外仅给分类
                 logger.warning('AI 服务商 %s 连通性测试失败：kind=%s status=%s',
                                provider.pk, exc.kind, exc.status_code)
@@ -120,7 +120,7 @@ def _llm_failed(exc, purpose, call_log, stock=None):
         cancel_call(call_log)
         return _busy_response()
     status_code = getattr(exc, 'status_code', None)
-    finish_call(call_log, False, usage=getattr(exc, 'usage', None))
+    finish_call(call_log, False, usage=getattr(exc, 'usage', None), error=exc)
     logger.warning('AI 调用失败 purpose=%s stock=%s kind=%s status=%s: %s',
                    purpose, stock.code if stock else '-', kind, status_code, exc)
     message = _TEST_ERROR_TEXT.get(kind, _TEST_ERROR_TEXT['upstream'])
@@ -162,9 +162,9 @@ def stock_ai_analysis(request, pk):
         text, usage = client.chat(build_analysis_messages(stock), max_tokens=1500)
     except (LlmError, ValueError) as exc:
         return _llm_failed(exc, 'analysis', call_log, stock=stock)
-    except Exception:
+    except Exception as exc:
         # 意外异常也要回填占位，避免"进行中"流水一直挡住冷却
-        finish_call(call_log, False)
+        finish_call(call_log, False, error=exc)
         raise
 
     finish_call(call_log, True, usage=usage)
@@ -201,9 +201,9 @@ def screener_ai(request):
         spec, usage = client.chat_json(build_translate_messages(query))
     except (LlmError, ValueError) as exc:
         return _llm_failed(exc, 'screener_translate', call_log)
-    except Exception:
+    except Exception as exc:
         # 意外异常也要回填占位，避免"进行中"流水一直挡住冷却
-        finish_call(call_log, False)
+        finish_call(call_log, False, error=exc)
         raise
 
     finish_call(call_log, True, usage=usage)
@@ -271,9 +271,9 @@ def screener_ai_comment(request):
         text, usage = client.chat(build_comment_messages(rows, query), max_tokens=800)
     except (LlmError, ValueError) as exc:
         return _llm_failed(exc, 'screener_comment', call_log)
-    except Exception:
+    except Exception as exc:
         # 意外异常也要回填占位，避免"进行中"流水一直挡住冷却
-        finish_call(call_log, False)
+        finish_call(call_log, False, error=exc)
         raise
 
     finish_call(call_log, True, usage=usage)
