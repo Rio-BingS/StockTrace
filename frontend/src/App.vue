@@ -1,8 +1,14 @@
 <script setup>
 import { ref } from 'vue'
-import { RouterView } from 'vue-router'
+import { RouterView, useRouter } from 'vue-router'
 import NavBar from './components/NavBar.vue'
 import SiteDisclaimer from './components/SiteDisclaimer.vue'
+
+// KeepAlive 缓存名单来自路由 meta.keepAlive；页面组件用 defineOptions 显式声明同名，
+// 不依赖 SFC 文件名推断的组件名（FEF-15）
+const keepAliveNames = useRouter().getRoutes()
+  .filter(r => r.meta?.keepAlive)
+  .map(r => r.name)
 
 // 首次访问自动弹出；页脚「免责声明」可随时重开
 const disclaimerRef = ref(null)
@@ -16,9 +22,9 @@ function openDisclaimer() {
   <div class="app-shell">
     <NavBar />
     <main class="main-content">
-      <!-- include 按路由 name 缓存页面组件：切走不销毁，回来免白屏重拉 -->
+      <!-- include 按组件 name 缓存页面：切走不销毁，回来免白屏重拉 -->
       <RouterView v-slot="{ Component }">
-        <KeepAlive :include="['Market', 'MarketTrend', 'MarketSectors', 'MarketInstitutions', 'MarketNationalEtf', 'MarketEtfRadar']">
+        <KeepAlive :include="keepAliveNames">
           <component :is="Component" />
         </KeepAlive>
       </RouterView>

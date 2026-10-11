@@ -9,20 +9,34 @@ import { formatNum, formatPct, formatRate, pctClass } from '../utils/format.js'
 import { formatAmount, formatShare } from '../utils/marketFormat.js'
 import { errorMessage, isCanceled } from '../utils/errorMessage.js'
 import { createRequestGuard } from '../utils/requestGuard.js'
+import { parseEtfRadarQuery } from '../utils/routeQuery.js'
+import { useRouteQuery } from '../composables/useRouteQuery.js'
+
+// 显式组件名：App.vue 的 KeepAlive include 按它匹配，不依赖文件名推断（FEF-15）
+defineOptions({ name: 'MarketEtfRadar' })
 
 const route = useRoute()
 const router = useRouter()
 const loading = ref(false)
 const error = ref('')
 const data = ref(null)
-const scope = ref(route.query.scope || 'equity_broad')
-const rank = ref(route.query.rank || 'share')
-const sort = ref(route.query.sort || '')
-const order = ref(route.query.order === 'asc' ? 'asc' : 'desc')
-const q = ref(route.query.q || '')
-const minTurnoverYi = ref(route.query.min_turnover_yi || '')
-const page = ref(Number(route.query.page) || 1)
-const selectedCode = ref(route.query.code || '')
+const initial = parseEtfRadarQuery(route.query)
+const scope = ref(initial.scope)
+const rank = ref(initial.rank)
+const sort = ref(initial.sort)
+const order = ref(initial.order)
+const q = ref(initial.q)
+const minTurnoverYi = ref(initial.minTurnoverYi)
+const page = ref(initial.page)
+const selectedCode = ref(initial.selectedCode)
+
+// 缓存页的 query 被外部改变时重新应用；只换了选中 ETF 时不必重拉榜单（FEF-15）
+useRouteQuery(
+  'MarketEtfRadar',
+  { scope, rank, sort, order, q, minTurnoverYi, page, selectedCode },
+  parseEtfRadarQuery,
+  (keys) => { if (keys.some(k => k !== 'selectedCode')) load() },
+)
 
 const ranks = [
   ['share', '份额规模'], ['market_cap', '市值'], ['turnover', '成交额'],
@@ -34,6 +48,8 @@ const pagination = computed(() => data.value?.pagination || { page: 1, total_pag
 const supported = computed(() => data.value?.supported_metrics || {})
 
 function syncUrl() {
+  // 晚到的调用不能改写别的页面的地址
+  if (route.name !== 'MarketEtfRadar') return
   router.replace({ query: {
     ...(scope.value !== 'equity_broad' ? { scope: scope.value } : {}),
     ...(rank.value !== 'share' ? { rank: rank.value } : {}),

@@ -12,19 +12,27 @@ import { formatAmount } from '../utils/marketFormat.js'
 import { signedAmount } from '../utils/sectorFlow.js'
 import { errorMessage, isCanceled } from '../utils/errorMessage.js'
 import { createRequestGuard } from '../utils/requestGuard.js'
+import { parseSectorsQuery } from '../utils/routeQuery.js'
+import { useRouteQuery } from '../composables/useRouteQuery.js'
+
+// 显式组件名：App.vue 的 KeepAlive include 按它匹配，不依赖文件名推断（FEF-15）
+defineOptions({ name: 'MarketSectors' })
 
 const route = useRoute()
 const router = useRouter()
 const loading = ref(false)
 const error = ref('')
 const data = ref(null)
-const board = ref(route.query.board === 'concept' ? 'concept' : 'industry')
-const period = ref(['5d', '10d', '20d'].includes(route.query.period) ? route.query.period : 'day')
-const q = ref(route.query.q || '')
-// 多日轮动只由日度快照供数，只能按净额排序（DAT-15）
-const sort = ref(period.value === 'day' ? route.query.sort || 'net' : 'net')
-const order = ref(route.query.order === 'asc' ? 'asc' : 'desc')
-const page = ref(Number(route.query.page) || 1)
+const initial = parseSectorsQuery(route.query)
+const board = ref(initial.board)
+const period = ref(initial.period)
+const q = ref(initial.q)
+const sort = ref(initial.sort)
+const order = ref(initial.order)
+const page = ref(initial.page)
+
+// 缓存页被前进/后退或站内链接改了 query 时，按新参数重新加载（FEF-15）
+useRouteQuery('MarketSectors', { board, period, q, sort, order, page }, parseSectorsQuery, () => load())
 
 const items = computed(() => data.value?.items || [])
 const summary = computed(() => data.value?.summary || {})

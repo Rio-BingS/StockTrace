@@ -23,31 +23,37 @@ const routes = [
     path: '/market',
     name: 'Market',
     component: Market,
+    meta: { keepAlive: true },
   },
   {
     path: '/market/trend',
     name: 'MarketTrend',
     component: MarketTrend,
+    meta: { keepAlive: true },
   },
   {
     path: '/market/sectors',
     name: 'MarketSectors',
     component: MarketSectors,
+    meta: { keepAlive: true },
   },
   {
     path: '/market/institutions',
     name: 'MarketInstitutions',
     component: MarketInstitutions,
+    meta: { keepAlive: true },
   },
   {
     path: '/market/national-etf',
     name: 'MarketNationalEtf',
     component: MarketNationalEtf,
+    meta: { keepAlive: true },
   },
   {
     path: '/market/etf-radar',
     name: 'MarketEtfRadar',
     component: MarketEtfRadar,
+    meta: { keepAlive: true },
   },
   {
     path: '/detector',

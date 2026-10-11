@@ -16,12 +16,19 @@ import { formatAmount, formatShare } from '../utils/marketFormat.js'
 import { errorMessage, isCanceled } from '../utils/errorMessage.js'
 import { createRequestGuard } from '../utils/requestGuard.js'
 import { escapeHtml } from '../utils/escapeHtml.js'
+import { parseNationalEtfQuery } from '../utils/routeQuery.js'
+import { useRouteQuery } from '../composables/useRouteQuery.js'
+
+// 显式组件名：App.vue 的 KeepAlive include 按它匹配，不依赖文件名推断（FEF-15）
+defineOptions({ name: 'MarketNationalEtf' })
 
 use([BarChart, GridComponent, TooltipComponent, CanvasRenderer])
 
 const route = useRoute(), router = useRouter()
 const loading = ref(false), error = ref(''), data = ref(null)
-const selectedCode = ref(route.query.code || '')
+const selectedCode = ref(parseNationalEtfQuery(route.query).selectedCode)
+// 前进/后退切换选中的 ETF（FEF-15）
+useRouteQuery('MarketNationalEtf', { selectedCode }, parseNationalEtfQuery, () => {})
 const items = computed(() => data.value?.items || [])
 const summary = computed(() => data.value?.summary || {})
 const signals = computed(() => data.value?.signals || null)
