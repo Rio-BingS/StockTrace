@@ -746,13 +746,18 @@ def build_sector_context(kind, name, lookback_days=SECTOR_CONTEXT_DAYS, snapshot
 def eval_vol_ratio_slope(ctx, params):
     """量比斜率（指数/个股）：RVOL 近几日的最小二乘斜率（日均漂移）。
 
-    为什么看斜率而不是当日 RVOL：平静判定已要求当日 RVOL ∈ [0.7, 1.5]，
-    「平静中的微变」体现在量比的缓慢趋势上——资金悄悄回流的最早形态
-    就是量比温和抬升，而不是放量本身。
+    为什么看斜率而不是当日 RVOL：平静判定已要求当日 RVOL 不出现突变（见
+    PRICE_CALM_PARAMS 的 rvol 区间），「平静中的微变」体现在量比的缓慢趋势上
+    ——资金悄悄回流的最早形态就是量比温和抬升，而不是放量本身。
     噪声校准（ALG-04）：斜率用 slope_days+1 个点的 OLS 而不是两端点差分，
     且 |斜率| 须超出自身历史斜率的 noise_pct 分位才投票。
+    量能口径（#15）：优先用取数层给的送转/新股校正量 volume_adj（与 volume 等长
+    时），送转除权日的成交量台阶不会被当成量比抬升；没有时退回原始成交量。
     """
     volumes = ctx.get('volume')
+    adj = ctx.get('volume_adj')
+    if adj and volumes and len(adj) == len(volumes):
+        volumes = adj
     window, slope_days = params['window'], params['slope_days']
     need = window + slope_days + 1
     if not volumes or len(volumes) < need:

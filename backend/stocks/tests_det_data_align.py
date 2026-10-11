@@ -342,6 +342,22 @@ class AdjustedVolumeTests(TestCase):
         _v, basis = dimensions.adjusted_volume_series(ctx, listing_date=date(2020, 1, 1))
         self.assertEqual(basis, 'volume')
 
+    def test_vol_ratio_slope_reads_adjusted_volume(self):
+        # 集成（#15）：量比斜率优先读 volume_adj，送转台阶不再被当成量比抬升
+        from .detector.registry import DIMENSION_MAP
+
+        params = dict(DIMENSION_MAP['vol_ratio_slope']['defaults'])
+        ctx = self._ctx(split_at=76)
+        adj, _basis = dimensions.adjusted_volume_series(ctx)
+        ctx['volume_adj'] = adj
+        got = dimensions.eval_vol_ratio_slope(ctx, params)
+        want = dimensions.eval_vol_ratio_slope(dict(ctx, volume=adj, volume_adj=None), params)
+        self.assertEqual(got, want)
+        raw = dimensions.eval_vol_ratio_slope(dict(ctx, volume_adj=None), params)
+        self.assertNotEqual(raw['value'], got['value'])
+        # 长度对不上（异常输入）时退回原始成交量
+        bad = dimensions.eval_vol_ratio_slope(dict(ctx, volume_adj=adj[:-1]), params)
+        self.assertEqual(bad, raw)
 
     def test_contexts_carry_volume_adj(self):
         items = [{'date': (date(2025, 1, 1) + timedelta(days=i)).isoformat(), 'open': 1.0,
