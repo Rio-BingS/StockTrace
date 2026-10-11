@@ -60,7 +60,7 @@ logger = logging.getLogger(__name__)
 
 def _next_trading_days(after, n):
     """after 之后（不含）的 n 个交易日，升序；日历给不出结论（None/异常）返回 None。"""
-    from ..services import is_trading_day
+    from ..trading_calendar import is_trading_day
 
     days, day = [], after
     for _ in range(n * 3 + 15):
