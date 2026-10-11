@@ -4,7 +4,7 @@ import akshare as ak
 import pandas as pd
 from django.core.management.base import BaseCommand
 
-from stocks.market import _etf_row_to_item, _parse_fund_flow_table
+from stocks.market import etf_row_to_item, parse_fund_flow_table
 
 
 ETF_FIELDS = (
@@ -65,7 +65,7 @@ class Command(BaseCommand):
             samples = [str(value) for value in series.dropna().head(3).tolist()]
             self.stdout.write(f'{col}: 非空 {non_null}/{len(frame)} ({ratio:.1%})；样本 {samples}')
 
-        normalized = [_etf_row_to_item(row) for _, row in frame.iterrows()]
+        normalized = [etf_row_to_item(row) for _, row in frame.iterrows()]
         reason_counts = Counter(item['scope_match_reason'] for item in normalized)
         matched = [item for item in normalized if item['scope_match']]
         unmatched = [item for item in normalized if not item['scope_match']]
@@ -104,7 +104,7 @@ class Command(BaseCommand):
         ):
             try:
                 frame = loader()
-                parsed = _parse_fund_flow_table(frame, candidates)
+                parsed = parse_fund_flow_table(frame, candidates)
             except Exception as exc:
                 self._report_frame_error(f'{label}资金', exc)
                 continue

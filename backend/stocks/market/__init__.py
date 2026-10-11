@@ -28,7 +28,7 @@ from ._cache import _is_fresh  # noqa: F401  tests 使用
 from ._sources import get_source_health  # noqa: F401
 from .etf import (
     NATIONAL_TEAM_ETFS,
-    _etf_row_to_item,  # noqa: F401  validate_market_sources / tests 使用
+    _etf_row_to_item,  # noqa: F401  旧名保留一版，tests 使用
     get_etf_detail,
     get_etf_share_radar,
     get_national_team_etfs,
@@ -52,13 +52,17 @@ from .institutions import (
 )
 from .overview import get_market_overview, get_market_trend, warm_post_close_lagging
 from .sectors import (
-    _parse_fund_flow_table,  # noqa: F401  validate_market_sources / tests 使用
+    _parse_fund_flow_table,  # noqa: F401  旧名保留一版，tests 使用
     _parse_sector_rank_table,  # noqa: F401  tests 使用
     _sector_payload,  # noqa: F401  tests 使用
     fetch_concept_fund_flow,
     fetch_industry_fund_flow,
     get_sector_rotation,
 )
+
+# 口径解析的公开名（validate_market_sources 使用，ARC-01）
+etf_row_to_item = _etf_row_to_item
+parse_fund_flow_table = _parse_fund_flow_table
 
 __all__ = [
     # 视图 / 调度主入口
@@ -87,6 +91,9 @@ __all__ = [
     'fetch_northbound_flow_series',
     'fetch_stock_institution_detail',
     'get_source_health',
+    # 口径解析（校验命令用）
+    'etf_row_to_item',
+    'parse_fund_flow_table',
     # 常量
     'MAJOR_INDICES',
     'TREND_INDICES',
