@@ -16,6 +16,7 @@ import { formatPct, formatNum, formatRate, pctClass } from '../utils/format.js'
 import { intradayBase, signedPctText as pctTextFrom } from '../utils/intraday.js'
 import { formatVolume } from '../utils/marketFormat.js'
 import { escapeHtml } from '../utils/escapeHtml.js'
+import { byKey } from '../utils/sortBy.js'
 
 use([
   LineChart,
@@ -81,9 +82,7 @@ function findLocalExtrema(prices, windowSize = 20) {
 const chartOption = computed(() => {
   if (!props.minuteData.length) return {}
 
-  const sorted = [...props.minuteData].sort(
-    (a, b) => new Date(a.datetime) - new Date(b.datetime)
-  )
+  const sorted = [...props.minuteData].sort(byKey('datetime'))
 
   const times = sorted.map(d => d.datetime.slice(11, 16))
   const prices = sorted.map(d => Number(d.close))
@@ -328,9 +327,7 @@ const tableData = computed(() => {
 // 阶段高低点列表
 const extremaList = computed(() => {
   if (!props.minuteData.length) return []
-  const sorted = [...props.minuteData].sort(
-    (a, b) => new Date(a.datetime) - new Date(b.datetime)
-  )
+  const sorted = [...props.minuteData].sort(byKey('datetime'))
   const prices = sorted.map(d => Number(d.close))
   const { peaks, valleys } = findLocalExtrema(prices)
 

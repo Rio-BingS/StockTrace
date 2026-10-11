@@ -15,6 +15,7 @@ import { CanvasRenderer } from 'echarts/renderers'
 import { formatNum, formatPct, formatRate, pctFrom } from '../utils/format.js'
 import { formatAmount, formatVolume } from '../utils/marketFormat.js'
 import { escapeHtml } from '../utils/escapeHtml.js'
+import { byKey } from '../utils/sortBy.js'
 
 use([
   CandlestickChart,
@@ -36,8 +37,8 @@ const emit = defineEmits(['date-click'])
 
 // 排序后的数据供点击事件与图表配置共用
 const sortedData = computed(() =>
-  // 按日期正序排列
-  [...props.data].sort((a, b) => new Date(a.trade_date) - new Date(b.trade_date))
+  // 按日期正序排列（字符串比较，避免 Safari 日期解析问题）
+  [...props.data].sort(byKey('trade_date'))
 )
 
 // 将日K数据转为 ECharts 格式
