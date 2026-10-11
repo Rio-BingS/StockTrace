@@ -502,6 +502,19 @@ def run_screener(spec):
     return rows
 
 
+def _sort_key(order_by, desc):
+    """排序键：无值的行无论升序降序都排在最后（ALG-12）。
+
+    旧实现用 -inf 代替 None，升序时无值的股票排在最前面。
+    """
+    def key(row):
+        v = row.get(order_by)
+        if v is None:
+            return (1, 0.0)
+        return (0, -v if desc else v)
+    return key
+
+
 def run_screener_with_meta(spec):
     """执行筛选，返回 (rows, meta)；meta 含 as_of 与未参与股票列表（excluded）。"""
     _validate(spec)
@@ -540,10 +553,7 @@ def run_screener_with_meta(spec):
     order_by = spec.get('order_by')
     if order_by:
         desc = spec.get('order_dir', 'desc') != 'asc'
-        rows.sort(
-            key=lambda r: r.get(order_by) if r.get(order_by) is not None else float('-inf'),
-            reverse=desc,
-        )
+        rows.sort(key=_sort_key(order_by, desc))
     limit = spec.get('limit')
     if isinstance(limit, int) and limit > 0:
         rows = rows[:limit]

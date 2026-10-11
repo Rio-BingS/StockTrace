@@ -949,3 +949,25 @@ class ScreenerIndicatorConventionTests(TestCase):
         highs = [10.5] * 20
         _screener_bars(self.stock, closes, self.start, highs=highs)
         self.assertEqual(self._values()['new_high_20d'], 0)
+
+
+@patch('stocks.ai.valuation.fetch_valuation_map', new=lambda codes: {})
+class ScreenerSortTests(TestCase):
+    """ALG-12：排序字段无值的行无论升序还是降序都排在最后。"""
+
+    def test_none_sorted_last_both_directions(self):
+        from datetime import date
+
+        from .ai.screener import run_screener
+        from .models import Stock
+
+        start = date(2026, 1, 1)
+        long_ = Stock.objects.create(code='600001', name='长')
+        short = Stock.objects.create(code='600002', name='短')
+        _screener_bars(long_, [10.0 + i * 0.1 for i in range(30)], start)
+        _screener_bars(short, [10.0, 10.0], start + timedelta(days=28))  # rsi_14 无值
+        for direction in ('asc', 'desc'):
+            rows = run_screener({'logic': 'all', 'conditions': [
+                {'field': 'close_price', 'op': 'gt', 'value': 0}],
+                'order_by': 'rsi_14', 'order_dir': direction})
+            self.assertEqual([r['code'] for r in rows], ['600001', '600002'], direction)
