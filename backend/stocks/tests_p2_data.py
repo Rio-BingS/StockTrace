@@ -265,3 +265,20 @@ class IndexTrendEndOnlyTests(SimpleTestCase):
         items = data['series'][0]['items']
         self.assertEqual([i['date'] for i in items], ['2026-09-03', '2026-09-04', '2026-09-05'])
         self.assertEqual(data['end'], '2026-09-05')
+
+
+class HolderShareUnitTests(SimpleTestCase):
+    """DAT-20：持有人结构总份额统一为「份」并带单位字段。"""
+
+    def test_total_shares_in_units_of_share(self):
+        html = (
+            'var apidata={ content:"<table><thead><tr><th>公告日期</th><th>机构持有比例</th>'
+            '<th>个人持有比例</th><th>内部持有比例</th><th>总份额（亿份）</th></tr></thead><tbody>'
+            '<tr><td>2026-06-30</td><td>61.65%</td><td>32.95%</td><td>5.40%</td><td>2.5</td></tr>'
+            '</tbody></table>"};'
+        )
+        resp = type('R', (), {'text': html, 'raise_for_status': lambda self: None})()
+        with patch('stocks.market.holders.requests.get', return_value=resp):
+            d = market.holders.fetch_holder_structure('510300', force=True)
+        self.assertEqual(d['items'][0]['total_shares'], 2.5e8)
+        self.assertEqual(d['items'][0]['total_shares_unit'], '份')

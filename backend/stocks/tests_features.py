@@ -1529,7 +1529,7 @@ class HolderStructureTests(SimpleTestCase):
         self.assertTrue(d['available'])
         self.assertEqual(len(d['items']), 2)
         self.assertEqual(d['items'][0]['institution_pct'], 61.65)  # % 已清洗
-        self.assertEqual(d['items'][0]['total_shares'], 189.15)
+        self.assertAlmostEqual(d['items'][0]['total_shares'], 189.15e8)  # 亿份→份（DAT-20）
         self.assertIn('间接观察', d['meta']['disclaimer'])
 
     def test_upstream_fail_degrades(self):

@@ -62,12 +62,15 @@ def fetch_holder_structure(code, ttl=_HOLDER_TTL, force=False):
 
     items = []
     for _, row in tables[0].iterrows():
+        total_yi = _to_float(row.get('总份额（亿份）'))
         items.append({
             'announce_date': str(row.get('公告日期', ''))[:10],
             'institution_pct': _to_float(str(row.get('机构持有比例', '')).strip('%')),
             'individual_pct': _to_float(str(row.get('个人持有比例', '')).strip('%')),
             'internal_pct': _to_float(str(row.get('内部持有比例', '')).strip('%')),
-            'total_shares': _to_float(row.get('总份额（亿份）')),
+            # 上游单位亿份，统一换算为「份」，与 ETF 现货/快照的 share 同口径（DAT-20）
+            'total_shares': total_yi * 1e8 if total_yi is not None else None,
+            'total_shares_unit': '份',
         })
     items = [i for i in items if i['announce_date'] and i['announce_date'] != 'nan']
     if not items:

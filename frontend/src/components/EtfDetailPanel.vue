@@ -152,14 +152,14 @@ onUnmounted(() => guard.abort())
           </span>
         </div>
         <table class="holders-table">
-          <thead><tr><th>公告期</th><th>机构</th><th>个人</th><th>内部</th><th>总份额（亿份）</th></tr></thead>
+          <thead><tr><th>公告期</th><th>机构</th><th>个人</th><th>内部</th><th>总份额</th></tr></thead>
           <tbody>
             <tr v-for="h in holders.items.slice(0, 4)" :key="h.announce_date">
               <td>{{ h.announce_date }}</td>
               <td>{{ h.institution_pct ?? '-' }}%</td>
               <td>{{ h.individual_pct ?? '-' }}%</td>
               <td>{{ h.internal_pct ?? '-' }}%</td>
-              <td>{{ h.total_shares ?? '-' }}</td>
+              <td>{{ formatShare(h.total_shares) }}</td>
             </tr>
           </tbody>
         </table>
