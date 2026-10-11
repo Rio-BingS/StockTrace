@@ -13,8 +13,8 @@ import time
 
 import requests
 
+from ..common.codes import exchange_prefix
 from ..market._cache import cache_set, is_fresh, stale_or
-from ..services import _to_shsz_prefix
 
 logger = logging.getLogger(__name__)
 
@@ -55,7 +55,7 @@ def _parse_row(parts):
 
 
 def _fetch_raw(codes):
-    symbols = ','.join(_to_shsz_prefix(c) for c in codes)
+    symbols = ','.join(exchange_prefix(c) for c in codes)
     url = f'https://qt.gtimg.cn/q={symbols}'
     resp = requests.get(url, timeout=_REQUEST_TIMEOUT)
     resp.raise_for_status()

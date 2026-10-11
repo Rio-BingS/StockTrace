@@ -29,6 +29,7 @@ from django.db import transaction
 from django.utils import timezone
 
 from . import trading_calendar
+from .common.codes import exchange, exchange_prefix
 # BaoStock 会话串行化与交易日历已分别抽到 baostock_session / trading_calendar（ARC-02），
 # 旧名保留供既有调用方使用
 from .baostock_session import bs_lock as _bs_lock, bs_session as _bs_session  # noqa: F401
@@ -44,23 +45,13 @@ _STOCK_LIST_TTL = 1800
 # 工具函数
 # ============================================================
 
-def _exchange(code):
-    """6位代码所属交易所（DAT-12）：'sh' / 'sz' / 'bj'
-
-    北交所 92/4/8 开头（先于 9 判断）；沪市 5（ETF/LOF）/6/9（B 股）开头；其余深市。
-    """
-    code = str(code).zfill(6)
-    if code.startswith(('92', '4', '8')):
-        return 'bj'
-    if code.startswith(('5', '6', '9')):
-        return 'sh'
-    return 'sz'
+# 交易所判定与前缀格式已抽到 common.codes（ARC-01 / A-28），旧私有名保留一版
+_exchange = exchange
 
 
 def _to_shsz_prefix(code):
     """6位代码转为交易所前缀格式: 600000→sh600000, 000001→sz000001, 830799→bj830799"""
-    code = code.zfill(6)
-    return f'{_exchange(code)}{code}'
+    return exchange_prefix(code)
 
 
 def _to_numeric_cols(df, cols=('开盘', '收盘', '最高', '最低', '成交量', '成交额')):
@@ -184,7 +175,7 @@ class SinaSource(DataSource):
         # 新浪接口需要 sh/sz 前缀
         # 注意：akshare stock_zh_a_daily 内部已把 OHLC round 到 2 位，ETF 走此源时
         # 第 3 位小数已丢失；库字段虽为 3 位（DAT-11），此源无法恢复精度
-        bs_code = _to_shsz_prefix(symbol)
+        bs_code = exchange_prefix(symbol)
         df = ak.stock_zh_a_daily(
             symbol=bs_code, start_date=start_date,
             end_date=end_date, adjust="qfq"
@@ -212,7 +203,7 @@ class SinaSource(DataSource):
 
     def fetch_minute(self, symbol, start_dt, end_dt):
         # 新浪分钟线需要 sh 前缀
-        bs_code = _to_shsz_prefix(symbol)
+        bs_code = exchange_prefix(symbol)
         # 注意：该接口固定返回最近 1970 根 bar（约 8 个交易日），不接受日期参数；
         # 按请求区间过滤在 _try_sources 统一做（DAT-01）
         df = ak.stock_zh_a_minute(
@@ -246,7 +237,7 @@ class SinaSource(DataSource):
             # 新浪返回列名编码可能不同，用位置匹配
             code_col = df.columns[0]  # 代码列
             name_col = df.columns[1]  # 名称列
-            bs_code = _to_shsz_prefix(code)
+            bs_code = exchange_prefix(code)
             row = df[df[code_col] == bs_code]
             if not row.empty:
                 return row.iloc[0][name_col]
@@ -261,7 +252,7 @@ class TencentSource(DataSource):
 
     def fetch_daily(self, symbol, start_date, end_date):
         # 腾讯接口需要 sh/sz 前缀
-        bs_code = _to_shsz_prefix(symbol)
+        bs_code = exchange_prefix(symbol)
         df = ak.stock_zh_a_hist_tx(
             symbol=bs_code, period="daily",
             start_date=start_date, end_date=end_date, adjust="qfq"
@@ -297,11 +288,9 @@ class BaoStockSource(DataSource):
     @staticmethod
     def _format_code(code):
         """6位代码转 BaoStock 格式: sz.000001, sh.600000；北交所不支持返回 None"""
-        code = code.zfill(6)
-        prefix = _exchange(code)
-        if prefix == 'bj':
+        if exchange(code) == 'bj':
             return None
-        return f'{prefix}.{code}'
+        return exchange_prefix(code, sep='.')
 
     def fetch_daily(self, symbol, start_date, end_date):
         bs_code = self._format_code(symbol)
