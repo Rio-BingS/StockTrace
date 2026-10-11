@@ -158,6 +158,13 @@ _ths_token = {'v': None, 'at': 0.0}
 _ths_token_lock = threading.Lock()
 # 分页请求间隔（秒）：连续翻 50 页容易触发同花顺反爬封禁
 _THS_PAGE_INTERVAL = 0.5
+# 翻页排序键（DAT-17）：原先按涨跌幅（tradezdf）排序，盘中每翻一页排名都在变，
+# 收盘后涨跌幅相同的板块之间顺序也不固定，会出现跨页重复一行、同时漏掉一行。
+# 改按板块名（tradename，页面表头自带的排序字段）升序：名称当日不变且唯一，
+# 翻页结果稳定。2026-10-11 实测概念板块 386 行：按涨跌幅翻页只有 385 个不同
+# 板块，按名称翻页 386 个全齐。下游展示按 sort 参数重新排序，不依赖这里的顺序。
+_THS_SORT_FIELD = 'tradename'
+_THS_SORT_ORDER = 'asc'
 
 
 def _ths_hexin_v():
@@ -200,7 +207,7 @@ def _ths_fund_flow(board):
     headers = _ths_token_headers(base)
 
     def _page_html(page):
-        url = f'{base}field/tradezdf/order/desc/page/{page}/ajax/1/free/1/'
+        url = f'{base}field/{_THS_SORT_FIELD}/order/{_THS_SORT_ORDER}/page/{page}/ajax/1/free/1/'
         r = requests.get(url, headers=headers, timeout=10)
         r.raise_for_status()
         return r.text
@@ -224,7 +231,17 @@ def _ths_fund_flow(board):
     for page in range(2, page_num + 1):
         time.sleep(_THS_PAGE_INTERVAL)
         frames.append(_parse(_page_html(page), page))
+    _check_ths_pages(frames, board)
     df = pd.concat(frames, ignore_index=True)
+    # 翻页重叠兜底（DAT-17）：同名行只保留第一次出现的；出现重叠说明翻页期间
+    # 排序变了，通常还伴随等量漏行，记 warning 便于发现
+    name_col = names[1]
+    dup = df.duplicated(subset=[name_col], keep='first')
+    if dup.any():
+        logger.warning(
+            f'同花顺{board}资金流翻页出现 {int(dup.sum())} 行重复（已去重），可能有等量漏行'
+        )
+        df = df.loc[~dup].reset_index(drop=True)
     if '序号' in df.columns:
         df = df.drop(columns=['序号'])
     # 页面涨跌幅带 % 号（akshare 原封装同样先 strip 再返回）
@@ -232,6 +249,16 @@ def _ths_fund_flow(board):
         if str(col).endswith('涨跌幅'):
             df[col] = df[col].astype(str).str.strip('%')
     return df
+
+
+def _check_ths_pages(frames, board):
+    """非末页行数少于首页时记 warning：页面每页固定条数，中间页变短说明有行没取到。"""
+    if len(frames) < 2:
+        return
+    per_page = len(frames[0])
+    short = [i + 1 for i, f in enumerate(frames[:-1]) if len(f) < per_page]
+    if short:
+        logger.warning(f'同花顺{board}资金流第 {short} 页行数少于首页 {per_page} 行，疑似漏行')
 
 
 def _ths_fund_flow_df(board, source_name):

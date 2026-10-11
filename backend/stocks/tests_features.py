@@ -1285,7 +1285,7 @@ class ThsFundFlowTests(SimpleTestCase):
         trs = ''
         for i in range(rows):
             cells = [
-                str(i + 1), '养殖业', '3043.89', '4.36%', '54.33亿', '38.31亿',
+                str(i + 1), f'养殖业{page_info}-{i}', '3043.89', '4.36%', '54.33亿', '38.31亿',
                 '16.02亿', '36', '罗牛山', '10.05%', '10.88',
             ]
             trs += '<tr>' + ''.join(f'<td>{c}</td>' for c in cells) + '</tr>'
@@ -1296,7 +1296,7 @@ class ThsFundFlowTests(SimpleTestCase):
 
     def test_pagination_parse_and_pct_strip(self):
         html = self._html(10)
-        seq = [html, self._html(10, page_info='1/2')]
+        seq = [html, self._html(10, page_info='2/2')]
 
         def fake_get(url, **kwargs):
             self.assertIn('data.10jqka.com.cn', url)

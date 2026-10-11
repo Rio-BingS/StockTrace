@@ -146,7 +146,7 @@ class ThsVendoredTokenTests(SimpleTestCase):
         from .market import sectors
 
         def html(page_info):
-            cells = ['1', '半导体', '1000', '4.36%', '30', '14', '16.02', '50', '某股', '10.05%', '9.9']
+            cells = ['1', f'半导体{page_info}', '1000', '4.36%', '30', '14', '16.02', '50', '某股', '10.05%', '9.9']
             row = '<tr>' + ''.join(f'<td>{c}</td>' for c in cells) + '</tr>'
             return (f'<html><body><span class="page_info">{page_info}</span>'
                     f'<table>{row}</table></body></html>')
