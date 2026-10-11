@@ -1,14 +1,14 @@
 """进程内 TTL 缓存、交易日历感知新鲜度与统一 meta 构造（market 包共享）。
 
-新鲜度规则（_is_fresh）：
+新鲜度规则（is_fresh）：
 - TTL 内：新鲜。
 - TTL 外：若缓存写入时刻已覆盖「最近已完成交易日的收盘」，且当前不在
   数据变化窗口（交易日 09:15–21:00 之外：盘前/夜间/非交易日），也视为
   新鲜——周末与节假日不再触发上游重拉，数据本就不会变。
 
-空结果负缓存（DAT-10）：_cache_set 收到空结果（None/空容器/空 DataFrame/
+空结果负缓存（DAT-10）：cache_set 收到空结果（None/空容器/空 DataFrame/
 available=False）时只做 60 秒负缓存，不走上面的收盘后保鲜；已有好数据时不覆盖，
-只记下失败时刻，60 秒内 _cache_get 返回旧的好数据（meta 显示 stale），避免上游
+只记下失败时刻，60 秒内 cache_get 返回旧的好数据（meta 显示 stale），避免上游
 故障期间每个请求都重打上游，也避免一次失败把空结果「保鲜」到下个交易日。
 """
 
@@ -60,7 +60,7 @@ def _touch(key, item):
             _cache.move_to_end(key)
 
 
-def _cache_get(key, ttl):
+def cache_get(key, ttl):
     with _cache_lock:
         item = _cache.get(key)
     if not item:
@@ -69,7 +69,7 @@ def _cache_get(key, ttl):
     if item.get('neg'):
         # 负缓存只认 60 秒，不走收盘后保鲜
         return item['data'] if now - item['ts'] <= _NEG_TTL else None
-    if _is_fresh(item['ts'], ttl):
+    if is_fresh(item['ts'], ttl):
         _touch(key, item)
         return item['data']
     if now - (item.get('neg_ts') or 0) <= _NEG_TTL:
@@ -78,7 +78,7 @@ def _cache_get(key, ttl):
     return None
 
 
-def _cache_set(key, data):
+def cache_set(key, data):
     now = time.time()
     with _cache_lock:
         if _is_empty_payload(data):
@@ -100,7 +100,7 @@ def _cache_get_or_load(key, ttl, loader):
     其余线程等待首个线程加载完成后直接读缓存结果（含 60 秒负缓存）。
     loader 抛异常时向调用方抛出，不写缓存。
     """
-    cached = _cache_get(key, ttl)
+    cached = cache_get(key, ttl)
     if cached is not None:
         return cached
     with _cache_lock:
@@ -108,11 +108,11 @@ def _cache_get_or_load(key, ttl, loader):
         entry[1] += 1
     try:
         with entry[0]:
-            cached = _cache_get(key, ttl)
+            cached = cache_get(key, ttl)
             if cached is not None:
                 return cached
             data = loader()
-            _cache_set(key, data)
+            cache_set(key, data)
             return data
     finally:
         with _cache_lock:
@@ -130,7 +130,7 @@ def _cache_written_at(key):
     return item['ts']
 
 
-def _stale_or(key, default):
+def stale_or(key, default):
     with _cache_lock:
         item = _cache.get(key)
     return item['data'] if item and not item.get('neg') else default
@@ -170,7 +170,7 @@ def _data_changing_now(now):
     return trading_calendar.data_changing_now(now)
 
 
-def _is_fresh(ts, ttl):
+def is_fresh(ts, ttl):
     if time.time() - ts <= ttl:
         return True
     if not _calendar_enabled():
@@ -194,12 +194,12 @@ def _cache_meta(cache_key, ttl, source, available, source_data_date=None, discla
         cache_status = 'unavailable'
         fetched_at = None
     else:
-        cache_status = 'fresh' if _is_fresh(item['ts'], ttl) else 'stale'
+        cache_status = 'fresh' if is_fresh(item['ts'], ttl) else 'stale'
         fetched_at = _local_iso(item['ts'])
 
     # data_as_of 是数据本身所属日期（DAT-19）：优先上游给的数据日期；没有时按缓存
     # 写入时刻推算所属交易日；都不知道给 null。不再用「日历上最近收盘日」——
-    # _stale_or 返回几天前的旧数据时会被误标成最新交易日
+    # stale_or 返回几天前的旧数据时会被误标成最新交易日
     data_as_of = str(source_data_date)[:10] if source_data_date else None
     if data_as_of is None and item and not item.get('neg') and _calendar_enabled():
         try:
@@ -241,3 +241,11 @@ def _now_str():
     from django.utils import timezone
 
     return timezone.localtime().strftime('%Y-%m-%d %H:%M:%S')
+
+
+# 旧私有名保留一版（ARC-01）：market 包内部与既有测试仍在用；
+# 包外（ai/valuation 等）请用公开名 cache_get / cache_set / is_fresh / stale_or
+_cache_get = cache_get
+_cache_set = cache_set
+_is_fresh = is_fresh
+_stale_or = stale_or
