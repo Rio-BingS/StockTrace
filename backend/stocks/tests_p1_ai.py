@@ -315,10 +315,21 @@ class AiInputValidationTests(TestCase):
         user_msg = mock_cls.return_value.chat.call_args.args[0][1]['content']
         self.assertIn('000001 测试', user_msg)
         self.assertIn('5.0000%', user_msg)
-        self.assertIn('10.50元', user_msg)
+        # 库里价格为 3 位小数（DAT-11），提示里去掉多余尾零
+        self.assertIn('收盘 10.50元', user_msg)
+        self.assertNotIn('10.500元', user_msg)
         self.assertNotIn('99.9', user_msg)
         self.assertNotIn('伪造名', user_msg)
         self.assertIn('筛选命中 1 只', user_msg)  # 重复代码去重
+
+    def test_price_format_keeps_real_third_decimal(self):
+        from decimal import Decimal
+
+        from .ai.prompts import _fmt_price
+        self.assertEqual(_fmt_price(Decimal('10.500'), '元'), '10.50元')
+        self.assertEqual(_fmt_price(Decimal('1.234'), '元'), '1.234元')
+        self.assertEqual(_fmt_price(Decimal('10'), '元'), '10.00元')
+        self.assertEqual(_fmt_price(None, '元'), '无数据')
 
     def test_user_query_isolated(self):
         from .ai.prompts import build_comment_messages, build_translate_messages

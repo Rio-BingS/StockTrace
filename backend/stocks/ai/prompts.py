@@ -26,6 +26,20 @@ def _fmt(value, suffix=''):
     return f'{value}{suffix}'
 
 
+def _fmt_price(value, suffix=''):
+    """价格保留 2–3 位小数：库里统一存 3 位（DAT-11），10.500 显示为 10.50，
+    1.234（ETF/低价股）保留第 3 位，不丢真实精度也不带多余尾零。"""
+    if value is None:
+        return '无数据'
+    try:
+        text = f'{float(value):.3f}'
+    except (TypeError, ValueError):
+        return f'{value}{suffix}'
+    if text.endswith('0'):
+        text = text[:-1]
+    return f'{text}{suffix}'
+
+
 def build_stock_context(stock):
     """从本地数据库取真实数据，组装成给 LLM 的文本上下文"""
     quotes = list(
@@ -40,7 +54,7 @@ def build_stock_context(stock):
         latest = quotes[0]
         lines.append(f'最新交易日：{latest.trade_date}')
         lines.append(
-            f'最新收盘：{_fmt(latest.close_price, "元")}，'
+            f'最新收盘：{_fmt_price(latest.close_price, "元")}，'
             f'涨跌幅 {_fmt(latest.change_pct, "%")}（相对昨收），'
             f'日内振幅 {_fmt(latest.high_low_pct, "%")}'
         )
@@ -52,8 +66,8 @@ def build_stock_context(stock):
         lines.append('日期 | 开盘 | 收盘 | 最高 | 最低 | 涨跌幅% | 成交额(元)')
         for q in quotes:
             lines.append(
-                f'{q.trade_date} | {_fmt(q.open_price)} | {_fmt(q.close_price)} | '
-                f'{_fmt(q.high_price)} | {_fmt(q.low_price)} | '
+                f'{q.trade_date} | {_fmt_price(q.open_price)} | {_fmt_price(q.close_price)} | '
+                f'{_fmt_price(q.high_price)} | {_fmt_price(q.low_price)} | '
                 f'{_fmt(q.change_pct)} | {_fmt(q.turnover)}'
             )
 
@@ -141,7 +155,7 @@ def build_comment_messages(rows, user_query):
         + '\n'.join(
             f"{r['code']} {r.get('name') or '(名称未知)'}：交易日 {_fmt(r.get('trade_date'))}，"
             f"涨跌幅 {_fmt(r.get('change_pct'), '%')}，"
-            f"收盘 {_fmt(r.get('close_price'), '元')}，"
+            f"收盘 {_fmt_price(r.get('close_price'), '元')}，"
             f"成交额 {_fmt(r.get('turnover'), '元')}"
             for r in rows
         )
