@@ -146,21 +146,21 @@ def _stale_reason(ctx, trade_date):
 def _warm_review_sources():
     """回看前把指数日线拉进缓存，让 review_pending 在事务内不再触网。
 
-    个股/板块回看只读本地表；指数回看要上游日线（与 review._index_outcome
-    同一 days 参数即同一缓存键）。失败无妨：事务内会再试一次并如实跳过。
+    个股/板块的兑现判定只读本地表；指数回看要上游日线，相对基准超额要沪深300
+    日线（与 review._index_outcome / _benchmark_bars 同一 days 参数即同一缓存键）。
+    失败无妨：事务内会再试一次，指数如实跳过、超额留空。
     """
     from ..market import indices
 
-    codes = (
-        DetectorSignal.objects.filter(
-            target_kind='index',
-            status=DetectorSignal.STATUS_ACTIVE,
-            review_hit__isnull=True,
-        )
-        .values_list('target_code', flat=True)
-        .distinct()
+    pending = DetectorSignal.objects.filter(
+        status=DetectorSignal.STATUS_ACTIVE,
+        review_hit__isnull=True,
     )
-    for code in codes:
+    codes = set(pending.filter(target_kind='index').values_list('target_code', flat=True))
+    # 任何待回看信号都要算相对沪深300 的超额（#12），基准一并预热
+    if codes or pending.exists():
+        codes.add(review.BENCHMARK_CODE)
+    for code in sorted(codes):
         try:
             indices.fetch_index_daily_series(code, days=130)
         except Exception as e:  # noqa: BLE001 上游边界：预热失败不影响扫描，取数时各维度自行降级
@@ -459,6 +459,9 @@ def run_scan(trade_date=None, calendar=None):
             round(run.hit_count / run.reviewed_count, 3) if run.reviewed_count else None
         )
         run.adjustments = prev_adjustments + adjustments
+        # 基线/超额/独立样本数按判定日从库里重算（#7），重跑不会重复累加
+        for field, value in review.review_stats(trade_date).items():
+            setattr(run, field, value)
         # 扫描侧字段反映最近一次运行的盘面，直接覆盖
         run.status = 'partial' if degraded else 'ok'
         run.targets_scanned = scanned
@@ -483,6 +486,8 @@ def run_scan(trade_date=None, calendar=None):
         'hit_rate': review_summary.get('hit_rate'),
         # 同标的无条件基线命中率（ALG-05）：hit_rate 要和它比才有意义
         'baseline_rate': review_summary.get('baseline_rate'),
+        'excess_rate': run.excess_rate,
+        'independent_samples': run.independent_samples,
         'degraded_count': len(degraded),
         'adjustments': len(adjustments),
         # 多重检验报告（#11）：DetectorRun 暂无专门字段，摘要见 run.message

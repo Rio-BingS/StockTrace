@@ -538,6 +538,7 @@ def _always_trading(day=None):
     return True
 
 
+@patch('stocks.detector.review._benchmark_bars', lambda cache: {})
 @patch('stocks.trading_calendar.is_trading_day', _always_trading)
 class ReviewProtocolTests(TestCase):
     """ALG-05：回看要求满 5 个交易日、基期 T+1 开盘、MAE 先到判未兑现、基线比较、段首计样本。"""

@@ -106,6 +106,9 @@ def _scan_patches(targets=None, ctx_builder=None, calm_result=(False, {'reason':
     stack.enter_context(patch.object(scan, 'timezone', _after_close_clock()))
     stack.enter_context(patch.object(scan, 'save_margin_snapshot', return_value=0))
     stack.enter_context(patch.object(scan, 'build_index_context', return_value=(None, '指数日线不可用')))
+    # 回看的相对基准（沪深300）与指数日线预热同样断开上游（#12）
+    stack.enter_context(patch('stocks.market.indices.fetch_index_daily_series',
+                              return_value={'available': False, 'items': []}))
     if targets is not None:
         stack.enter_context(patch.object(scan, '_collect_targets', return_value=targets))
     if ctx_builder is not None:

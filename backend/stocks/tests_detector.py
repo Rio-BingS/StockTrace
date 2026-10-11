@@ -325,6 +325,7 @@ class SectorSignalScanTests(TestCase):
         )
 
 
+@patch('stocks.detector.review._benchmark_bars', lambda cache: {})
 class ReviewTests(TestCase):
     """回看与调参：兑现推进状态、权重有界调整、样本不足不动参数。
 
@@ -333,6 +334,7 @@ class ReviewTests(TestCase):
     - 信号日之前造 40 根「历史」日线，用来算 σ20 与基线：history='down' 为稳步
       下行（做多基线≈0，信号兑现即跑赢基线），'up' 为稳步上行（做多基线≈1）；
     - 信号日之后按 moves（相对信号日收盘的涨跌%）造后续日线，开盘=收盘。
+    基准（沪深300）默认取不到（断网），超额留空；需要基准的用例自己 patch。
     """
 
     def _make_stock_with_moves(self, code, moves, history='down'):

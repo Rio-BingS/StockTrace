@@ -1,4 +1,8 @@
-"""探测器复盘口径 v2 的回归测试（#12）：阈值 k·σ20·√h、板块 T+1 收盘基期。"""
+"""探测器复盘口径 v2 的回归测试（#7 #12）。
+
+- #12：阈值 k·σ20·√h、板块 T+1 收盘基期、h 日相对沪深300 超额落库；
+- #7：DetectorRun 落库基线/超额命中率/独立样本数，API 返回，旧行为空不报错。
+"""
 
 from __future__ import annotations
 
@@ -7,10 +11,11 @@ from datetime import timedelta
 from unittest.mock import patch
 
 from django.test import TestCase, override_settings
+from django.urls import reverse
 from django.utils import timezone
 
-from .detector import review
-from .models import DetectorSignal, MarketDailySnapshot
+from .detector import review, scan
+from .models import DetectorRun, DetectorSignal, MarketDailySnapshot
 
 _TODAY = timezone.localdate()
 
@@ -23,6 +28,10 @@ def _seeder():
     from .tests_detector import ReviewTests
 
     return ReviewTests()
+
+
+def _configs():
+    return {c['key']: c for c in scan.load_configs()}
 
 
 @patch('stocks.trading_calendar.is_trading_day', _always_trading)
@@ -47,7 +56,8 @@ class ThresholdTests(TestCase):
         seed = _seeder()
         _s, base_date = seed._make_stock_with_moves('600201', [0.0, 0.3, 0.3, 0.3, 0.3])
         sig = seed._make_signal('600201', base_date)
-        out = review._stock_outcome(sig, {})
+        with patch.object(review, '_benchmark_bars', lambda cache: {}):
+            out = review._stock_outcome(sig, {})
         self.assertIsNotNone(out)
         self.assertFalse(out['hit'])
         self.assertGreater(out['thr'], 0.3)
@@ -56,6 +66,10 @@ class ThresholdTests(TestCase):
 @patch('stocks.trading_calendar.is_trading_day', _always_trading)
 class SectorBaseTests(TestCase):
     """#12：板块以 T+1 收盘为基期，T→T+1 的隔夜跳空不再计入兑现。"""
+
+    @staticmethod
+    def _no_bench():
+        return {('benchmark', review.BENCHMARK_CODE): {}}
 
     def _seed(self, after_pcts):
         base_date = _TODAY - timedelta(days=12)
@@ -72,14 +86,24 @@ class SectorBaseTests(TestCase):
     def test_overnight_jump_into_t1_close_is_not_counted(self):
         # T+1 当天大涨 3%（旧口径以 T 收盘为基期，直接兑现），之后横盘
         sig = self._seed([3.0, 0.0, 0.05, -0.05, 0.0, 0.0])
-        out = review._sector_outcome(sig, {})
+        out = review._sector_outcome(sig, self._no_bench())
         self.assertIsNotNone(out)
         self.assertFalse(out['hit'])
+        self.assertAlmostEqual(out['fwd_return'], 0.0, places=3)
 
     def test_needs_h_days_after_t1(self):
         # 只有 T+1..T+5：T+1 收盘基期还差最后一天，保持待回看
         sig = self._seed([0.5, 0.6, 0.4, 0.3, 0.2])
-        self.assertIsNone(review._sector_outcome(sig, {}))
+        self.assertIsNone(review._sector_outcome(sig, self._no_bench()))
+
+    def test_sector_bench_uses_t1_close_basis(self):
+        sig = self._seed([0.0, 1.0, 1.0, 1.0, 1.0, 1.0])
+        t1 = sig.trade_date + timedelta(days=1)
+        end = sig.trade_date + timedelta(days=6)
+        bench = {t1: (90.0, 100.0), end: (101.0, 102.0)}
+        out = review._sector_outcome(sig, {('benchmark', review.BENCHMARK_CODE): bench})
+        self.assertAlmostEqual(out['bench_return'], 2.0)  # 100 → 102，而不是开盘 90 → 102
+        self.assertAlmostEqual(out['excess_return'], out['fwd_return'] - 2.0)
 
     def test_baseline_uses_same_offset(self):
         # 收盘基期的基线：起点 s 以 s+1 收盘为基期；只要求窗口落在 T 及之前
@@ -89,3 +113,121 @@ class SectorBaseTests(TestCase):
         rate = review._baseline(bars, 'up', 1.0, base_is_open=False)
         self.assertEqual(rate, 1.0)
         self.assertIsNone(review._baseline(bars[:20], 'up', 1.0, base_is_open=False))
+
+
+@patch('stocks.trading_calendar.is_trading_day', _always_trading)
+class ExcessReturnTests(TestCase):
+    """#12：h 日相对沪深300 超额落库；基准缺失时留空、不影响判定。"""
+
+    def _bench_for(self, base_date, start_open, end_close):
+        return {
+            base_date + timedelta(days=1): (start_open, start_open),
+            base_date + timedelta(days=review.REVIEW_LOOKBACK): (end_close, end_close),
+        }
+
+    def test_review_persists_forward_and_benchmark_returns(self):
+        seed = _seeder()
+        _s, base_date = seed._make_stock_with_moves('600211', [1.0, 1.5, 2.0, 2.5, 3.0])
+        seed._make_signal('600211', base_date)
+        bench = self._bench_for(base_date, 4000.0, 4040.0)  # 基准 +1%
+        with patch.object(review, '_benchmark_bars', lambda cache: bench):
+            review.review_pending(_TODAY, _configs())
+        sig = DetectorSignal.objects.get(target_code='600211')
+        # 基期 T+1 开盘 10.10，T+5 收盘 10.30
+        self.assertAlmostEqual(sig.fwd_return, (10.3 / 10.1 - 1) * 100, places=3)
+        self.assertAlmostEqual(sig.bench_return, 1.0, places=3)
+        self.assertAlmostEqual(sig.excess_return, sig.fwd_return - 1.0, places=3)
+        self.assertEqual(sig.benchmark_code, review.BENCHMARK_CODE)
+        self.assertEqual(sig.review_version, review.REVIEW_VERSION)
+        self.assertIsNotNone(sig.review_threshold)
+        self.assertIsNotNone(sig.review_baseline)
+
+    def test_missing_benchmark_leaves_excess_empty(self):
+        seed = _seeder()
+        _s, base_date = seed._make_stock_with_moves('600212', [1.0, 1.5, 2.0, 2.5, 3.0])
+        seed._make_signal('600212', base_date)
+        with patch.object(review, '_benchmark_bars', lambda cache: {}):
+            summary = review.review_pending(_TODAY, _configs())
+        self.assertEqual(summary['reviewed'], 1)
+        sig = DetectorSignal.objects.get(target_code='600212')
+        self.assertTrue(sig.review_hit)
+        self.assertIsNotNone(sig.fwd_return)
+        self.assertIsNone(sig.bench_return)
+        self.assertIsNone(sig.excess_return)
+        self.assertEqual(sig.benchmark_code, '')
+
+    def test_benchmark_fetch_failure_is_cached_as_empty(self):
+        cache = {}
+        with patch('stocks.market.indices.fetch_index_daily_series', side_effect=RuntimeError('x')) as m:
+            self.assertEqual(review._benchmark_bars(cache), {})
+            self.assertEqual(review._benchmark_bars(cache), {})
+        self.assertEqual(m.call_count, 1)
+
+
+class ReviewStatsTests(TestCase):
+    """#7：按判定日汇总 基线/超额命中率/独立样本数/方向调整后的相对基准超额。"""
+
+    def _row(self, code, kind='stock', day_offset=10, direction='up', hit=True, base=0.3,
+             excess=None, version=2):
+        return DetectorSignal.objects.create(
+            target_kind=kind, target_code=code, target_name=code,
+            trade_date=_TODAY - timedelta(days=day_offset), direction=direction, cycles=2,
+            status=DetectorSignal.STATUS_CONFIRMED if hit else DetectorSignal.STATUS_MISSED,
+            review_hit=hit, review_date=_TODAY, review_version=version,
+            review_baseline=base, excess_return=excess)
+
+    def test_clusters_and_rates(self):
+        # 同日同向的 3 只自选股 = 1 个样本；同日的板块与指数各自 1 簇；另一日 1 簇
+        self._row('600001', excess=2.0)
+        self._row('600002', hit=False, excess=-1.0)
+        self._row('600003')
+        self._row('甲', kind='industry')
+        self._row('乙', kind='concept')
+        self._row('sh000001', kind='index', direction='down', hit=False, excess=1.0)
+        self._row('600004', day_offset=11)
+        stats = review.review_stats(_TODAY)
+        self.assertEqual(stats['independent_samples'], 4)
+        self.assertAlmostEqual(stats['baseline_rate'], 0.3)
+        self.assertAlmostEqual(stats['excess_rate'], round(5 / 7 - 0.3, 3))
+        # 向下信号的超额按方向取反：(2 − 1 − 1) / 3
+        self.assertAlmostEqual(stats['avg_excess_return'], 0.0)
+
+    def test_legacy_rows_are_not_mixed_in(self):
+        self._row('600001', version=None)
+        self.assertEqual(review.review_stats(_TODAY), {
+            'baseline_rate': None, 'excess_rate': None,
+            'independent_samples': None, 'avg_excess_return': None,
+        })
+
+
+@patch('stocks.trading_calendar.is_trading_day', _always_trading)
+class ReviewApiTests(TestCase):
+    """#7：API 返回 命中/基线/超额/样本数；旧行字段为空时照常返回 None。"""
+
+    def test_run_brief_new_fields_and_legacy_nulls(self):
+        DetectorRun.objects.create(trade_date=_TODAY, reviewed_count=8, hit_count=4, hit_rate=0.5,
+                                   baseline_rate=0.21, excess_rate=0.29, independent_samples=3,
+                                   avg_excess_return=1.2)
+        DetectorRun.objects.create(trade_date=_TODAY - timedelta(days=1), reviewed_count=5,
+                                   hit_count=2, hit_rate=0.4)
+        latest = self.client.get(reverse('detector-signals')).json()['latest_run']
+        self.assertEqual(latest['baseline_rate'], 0.21)
+        self.assertEqual(latest['excess_rate'], 0.29)
+        self.assertEqual(latest['independent_samples'], 3)
+        self.assertEqual(latest['avg_excess_return'], 1.2)
+        self.assertEqual(latest['hit_count'], 4)
+        runs = self.client.get(reverse('detector-config')).json()['runs']
+        legacy = runs[1]
+        for key in ('baseline_rate', 'excess_rate', 'independent_samples', 'avg_excess_return'):
+            self.assertIsNone(legacy[key], key)
+
+    def test_signal_row_has_review_details(self):
+        DetectorRun.objects.create(trade_date=_TODAY)
+        DetectorSignal.objects.create(
+            target_kind='stock', target_code='600001', target_name='x', trade_date=_TODAY,
+            direction='up', cycles=2, review_version=2, review_threshold=0.45, review_baseline=0.2,
+            fwd_return=2.0, bench_return=0.5, excess_return=1.5, benchmark_code='sh000300')
+        item = self.client.get(reverse('detector-signals')).json()['items'][0]
+        self.assertEqual(item['excess_return'], 1.5)
+        self.assertEqual(item['benchmark_code'], 'sh000300')
+        self.assertEqual(item['review_version'], 2)

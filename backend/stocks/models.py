@@ -504,6 +504,19 @@ class DetectorSignal(models.Model):
     review_hit = models.BooleanField('回看是否兑现', null=True, blank=True)
     hit_date = models.DateField('兑现日期', null=True, blank=True)
     reviewed_at = models.DateTimeField('回看时间', null=True, blank=True)
+    # 回看明细（#7/#12）：全部可空——v1 口径（1×σ20、板块 T 收盘基期）判定的
+    # 旧行没有这些值，统计与展示按「缺失」处理，不与新口径混算。
+    # review_date 是做出判定的扫描日，DetectorRun 的基线/超额/独立样本数按它
+    # 从库里重算，同日重跑幂等。
+    review_date = models.DateField('回看判定日', null=True, blank=True, db_index=True)
+    review_version = models.PositiveSmallIntegerField('回看口径版本', null=True, blank=True)
+    review_threshold = models.FloatField('兑现阈值(%)', null=True, blank=True)
+    review_baseline = models.FloatField('同标的基线命中率', null=True, blank=True)
+    fwd_return = models.FloatField('h日收益(%)', null=True, blank=True)
+    bench_return = models.FloatField('基准h日收益(%)', null=True, blank=True)
+    # 原始差值（标的 − 基准），不乘方向；方向调整在统计时做
+    excess_return = models.FloatField('相对基准超额(%)', null=True, blank=True)
+    benchmark_code = models.CharField('基准代码', max_length=20, blank=True, default='')
     created_at = models.DateTimeField('创建时间', auto_now_add=True)
     updated_at = models.DateTimeField('更新时间', auto_now=True)
 
@@ -580,6 +593,12 @@ class DetectorRun(models.Model):
     reviewed_count = models.IntegerField('回看信号数', default=0)
     hit_count = models.IntegerField('回看命中数', default=0)
     hit_rate = models.FloatField('回看命中率', null=True, blank=True)
+    # 命中率要和基线比才有意义（#7）：零假设下绝对命中率本身不是有效性指标。
+    # 只统计新口径（review_version≥2）的回看；旧 run 行这些字段为空。
+    baseline_rate = models.FloatField('同标的基线命中率', null=True, blank=True)
+    excess_rate = models.FloatField('超额命中率', null=True, blank=True)
+    independent_samples = models.IntegerField('独立样本数(按日聚类)', null=True, blank=True)
+    avg_excess_return = models.FloatField('平均相对基准超额(%)', null=True, blank=True)
     degraded = models.JSONField('降级记录', default=list, blank=True)
     adjustments = models.JSONField('权重/阈值调整流水', default=list, blank=True)
     matrix = models.JSONField('板块微变矩阵', default=dict, blank=True)

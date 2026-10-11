@@ -96,6 +96,14 @@ def _signal_row(sig):
         'review_hit': sig.review_hit,
         'hit_date': sig.hit_date,
         'reviewed_at': sig.reviewed_at,
+        # 回看明细（#12）：v1 口径的旧行全部为 None / ''
+        'review_version': sig.review_version,
+        'review_threshold': sig.review_threshold,
+        'review_baseline': sig.review_baseline,
+        'fwd_return': sig.fwd_return,
+        'bench_return': sig.bench_return,
+        'excess_return': sig.excess_return,
+        'benchmark_code': sig.benchmark_code,
         'created_at': sig.created_at,
     }
 
@@ -192,7 +200,13 @@ def _run_brief(run):
         'signals_new': run.signals_new,
         'signals_sustained': run.signals_sustained,
         'reviewed_count': run.reviewed_count,
+        'hit_count': run.hit_count,
         'hit_rate': run.hit_rate,
+        # 命中率的参照系（#7）：旧 run 行为 None，前端显示「-」
+        'baseline_rate': run.baseline_rate,
+        'excess_rate': run.excess_rate,
+        'independent_samples': run.independent_samples,
+        'avg_excess_return': run.avg_excess_return,
         'message': run.message,
     }
 
@@ -339,10 +353,12 @@ def detector_config(request):
         # 规则直接引用 detector/constants 里的常量（ALG-15 / ARC-06）：实现与展示
         # 共用一份，旧实现在这里手写了一份副本，改阈值后配置页会与实际不一致
         'review_rules': {
+            'version': constants.REVIEW_VERSION,
             'lookback_days': constants.REVIEW_LOOKBACK,
             'hit_sigma_k': getattr(settings, 'DETECTOR_REVIEW_SIGMA_K', constants.HIT_SIGMA_K),
             'sigma_window': constants.SIGMA_WINDOW,
             'hit_pct': constants.HIT_PCT,
+            'benchmark': constants.BENCHMARK_CODE,
             # 基期：指数/个股 T+1 开盘；板块无开盘价，T+1 收盘
             'base': {'index': 'open_t1', 'stock': 'open_t1', 'industry': 'close_t1', 'concept': 'close_t1'},
             'weight_bounds': list(constants.WEIGHT_BOUNDS),

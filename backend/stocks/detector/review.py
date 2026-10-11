@@ -11,11 +11,16 @@
 - 阈值：k × σ20 × √h（σ20 为 T 日及之前 20 个日涨跌幅的标准差）——旧口径 1×σ20
   是「日」尺度，5 日内随机游走约 45% 能触及；σ 不可得时以 HIT_PCT 作 σ；
 - 判定：窗口内按收盘价逐日推进，有利方向先达到 +阈值 记兑现；不利方向先
-  触及 −阈值（MAE 先到）或到期都没到，记未兑现。
+  触及 −阈值（MAE 先到）或到期都没到，记未兑现；
+- 另记 h 日收益与同区间沪深300 收益之差（相对基准超额），保留幅度信息；
+  基准取不到时超额留空，不影响兑现判定。判定明细与口径版本号落在信号行，
+  DetectorRun 的基线/超额命中率/独立样本数按判定日从库里汇总（#7）。
 
 调参口径：
 - 命中率与同标的「无条件基线」比较：用 T 日之前的历史，以同样的方向、阈值、
-  基期、窗口规则，统计任意起点的兑现率；看超额命中率而不是绝对值——旧口径下随机
+  基期、窗口规则，统计任意起点的兑现率；
+- 独立样本：同一交易日、同一方向、同一对象簇（板块一簇、指数一簇、自选股一簇）
+  的信号共享同一段市场走势，按簇计为一个样本；看超额命中率而不是绝对值——旧口径下随机
   游走的高波动股「命中率」超过 60%，会被当成维度太苛刻而自动放宽门槛；
 - 同一标的连续多日的 active 信号回看窗口高度重叠，只取信号段首个 active 日
   （cycles == 2）计入调参样本，其余照常判定但不参与调参；
@@ -43,6 +48,7 @@ from ..trading_calendar import MAX_LOOKBACK_DAYS, recent_trading_days
 # 阈值数值集中在 constants.py（ARC-06），这里保留同名引用，review.X 旧路径照常可用
 from .constants import (
     BASELINE_DAYS,
+    BENCHMARK_CODE,
     EXCESS_HIGH,
     EXCESS_LOW,
     HIT_PCT,
@@ -52,6 +58,7 @@ from .constants import (
     MIN_SCALE_BOUNDS,
     REVIEW_LOOKBACK,
     REVIEW_MAX_AGE_DAYS,
+    REVIEW_VERSION,
     SEGMENT_HEAD_CYCLES as _SEGMENT_HEAD_CYCLES,
     SIGMA_WINDOW,
     STEP,
@@ -163,12 +170,49 @@ def _baseline(bars, direction, thr, base_is_open):
     return hits / total
 
 
-def _evaluate_bars(signal, before, after, base_is_open, calendar=None):
+def _benchmark_bars(cache):
+    """基准（沪深300）日线 {date: (open, close)}；取不到返回 {}（超额留空）。"""
+    key = ('benchmark', BENCHMARK_CODE)
+    if key in cache:
+        return cache[key]
+    from datetime import date as _date
+
+    from ..market import indices
+
+    bars = {}
+    try:
+        # days 与 _index_outcome 一致：同一缓存键，scan 预热后事务内不触网
+        data = indices.fetch_index_daily_series(BENCHMARK_CODE, days=130)
+        if data.get('available'):
+            for it in data['items']:
+                bars[_date.fromisoformat(it['date'])] = (it.get('open'), it.get('close'))
+    except Exception:
+        logger.warning("复盘取基准 %s 日线失败，相对基准超额留空", BENCHMARK_CODE, exc_info=True)
+    cache[key] = bars
+    return bars
+
+
+def _bench_return(bench, base_date, end_date, base_is_open):
+    """基准在同一区间（同一基期口径）的收益（%）；缺数据返回 None。"""
+    if not bench:
+        return None
+    start, end = bench.get(base_date), bench.get(end_date)
+    if not start or not end:
+        return None
+    base = start[0] if base_is_open else start[1]
+    if not base or end[1] is None:
+        return None
+    return (end[1] / base - 1) * 100
+
+
+def _evaluate_bars(signal, before, after, base_is_open, bench=None, calendar=None):
     """统一判定：before = T 及之前的 bars（末根必须是 T），after = T 之后的 bars。
 
     base_is_open=True：T+1 开盘为基期，窗口 T+1..T+h；False：T+1 收盘为基期，
-    窗口 T+2..T+h+1（板块）。
-    返回 None（保持待回看）或 dict(hit, hit_date, mfe, thr, baseline)。
+    窗口 T+2..T+h+1（板块）。bench 为基准 {date: (open, close)} 或返回它的
+    无参函数（窗口凑齐后才调用，待回看的信号不触发基准取数），可缺。
+    返回 None（保持待回看）或 dict(hit, hit_date, mfe, thr, baseline,
+    fwd_return, bench_return, excess_return)。
     calendar 见 _next_trading_days（缺省不透传，测试 patch 旧签名照常生效）。
     """
     if not before or before[-1][0] != signal.trade_date:
@@ -191,13 +235,20 @@ def _evaluate_bars(signal, before, after, base_is_open, calendar=None):
     sigma = _sigma([c for _d, _o, c in before])
     thr = _threshold(sigma)
     hit, hit_date, mfe = _judge(base, [(d, c) for d, _o, c in window], signal.direction, thr)
+    fwd = (window[-1][2] / base - 1) * 100
+    if callable(bench):
+        bench = bench()
+    bench_ret = _bench_return(bench, span[0][0], window[-1][0], base_is_open)
     return {
         'hit': hit, 'hit_date': hit_date, 'mfe': mfe, 'thr': thr,
         'baseline': _baseline(before, signal.direction, thr, base_is_open),
+        'fwd_return': fwd,
+        'bench_return': bench_ret,
+        'excess_return': (fwd - bench_ret) if bench_ret is not None else None,
     }
 
 
-def _stock_outcome(signal, _cache):
+def _stock_outcome(signal, cache):
     from ..models import Stock
 
     stock = Stock.objects.filter(code=signal.target_code).first()
@@ -222,10 +273,11 @@ def _stock_outcome(signal, _cache):
         return [(d, float(o) if o is not None else None, float(c) if c is not None else None)
                 for d, o, c in rows]
 
-    return _evaluate_bars(signal, conv(before), conv(after), base_is_open=True)
+    return _evaluate_bars(signal, conv(before), conv(after), base_is_open=True,
+                          bench=lambda: _benchmark_bars(cache))
 
 
-def _index_outcome(signal, _cache):
+def _index_outcome(signal, cache):
     from datetime import date as _date
 
     from ..market import indices
@@ -241,7 +293,8 @@ def _index_outcome(signal, _cache):
             for it in data['items']]
     before = [b for b in bars if b[0] <= signal.trade_date]
     after = [b for b in bars if b[0] > signal.trade_date]
-    return _evaluate_bars(signal, before, after, base_is_open=True)
+    return _evaluate_bars(signal, before, after, base_is_open=True,
+                          bench=lambda: _benchmark_bars(cache))
 
 
 def _sector_outcome(signal, cache):
@@ -264,7 +317,8 @@ def _sector_outcome(signal, cache):
         bars.append((trade_date, None, level))
     before = [b for b in bars if b[0] <= signal.trade_date]
     after = [b for b in bars if b[0] > signal.trade_date]
-    return _evaluate_bars(signal, before, after, base_is_open=False)
+    return _evaluate_bars(signal, before, after, base_is_open=False,
+                          bench=lambda: _benchmark_bars(cache))
 
 
 def _recent_days(n, end_date, calendar=None):
@@ -324,7 +378,19 @@ def review_pending(scan_date, configs, calendar=None):
         sig.status = (
             DetectorSignal.STATUS_CONFIRMED if hit else DetectorSignal.STATUS_MISSED
         )
-        sig.save(update_fields=['review_hit', 'hit_date', 'reviewed_at', 'status', 'updated_at'])
+        sig.review_date = scan_date
+        sig.review_version = REVIEW_VERSION
+        sig.review_threshold = _round(outcome['thr'], 4)
+        sig.review_baseline = _round(outcome['baseline'], 4)
+        sig.fwd_return = _round(outcome['fwd_return'], 4)
+        sig.bench_return = _round(outcome['bench_return'], 4)
+        sig.excess_return = _round(outcome['excess_return'], 4)
+        sig.benchmark_code = BENCHMARK_CODE if outcome['bench_return'] is not None else ''
+        sig.save(update_fields=[
+            'review_hit', 'hit_date', 'reviewed_at', 'status', 'review_date', 'review_version',
+            'review_threshold', 'review_baseline', 'fwd_return', 'bench_return', 'excess_return',
+            'benchmark_code', 'updated_at',
+        ])
         reviewed += 1
         hits += 1 if hit else 0
         baseline = outcome['baseline']
@@ -353,6 +419,50 @@ def review_pending(scan_date, configs, calendar=None):
         'baseline_rate': round(sum(baselines) / len(baselines), 3) if baselines else None,
         'adjustments': adjustments,
     }
+
+
+def _round(value, digits):
+    return round(value, digits) if value is not None else None
+
+
+def _cluster_key(sig):
+    """独立样本的聚类键：同交易日、同方向、同对象簇的信号共享同一段市场走势。
+
+    对象簇：行业/概念板块一簇（板块间相关很高），指数一簇，自选股一簇
+    （Stock 表没有行业字段，无法再细分；偏保守，样本数只会被低估）。
+    """
+    group = 'sector' if sig.target_kind in ('industry', 'concept') else sig.target_kind
+    return (sig.trade_date, sig.direction, group)
+
+
+def review_stats(review_date):
+    """某扫描日做出的 v2 口径判定的汇总：命中/基线/超额命中/独立样本/相对基准超额。
+
+    从库里按 review_date 重算（而不是累加），同日重跑幂等。没有 v2 判定时各项为 None。
+    """
+    rows = list(
+        DetectorSignal.objects.filter(review_date=review_date, review_version__gte=2)
+        .only('trade_date', 'direction', 'target_kind', 'review_hit',
+              'review_baseline', 'excess_return')
+    )
+    empty = {'baseline_rate': None, 'excess_rate': None,
+             'independent_samples': None, 'avg_excess_return': None}
+    if not rows:
+        return empty
+    with_base = [r for r in rows if r.review_baseline is not None]
+    out = dict(empty)
+    out['independent_samples'] = len({_cluster_key(r) for r in rows})
+    if with_base:
+        base = sum(r.review_baseline for r in with_base) / len(with_base)
+        rate = sum(1 for r in with_base if r.review_hit) / len(with_base)
+        out['baseline_rate'] = round(base, 3)
+        # 只在有基线的同一批样本上比，避免分子分母样本不一致
+        out['excess_rate'] = round(rate - base, 3)
+    rets = [(1 if r.direction == 'up' else -1) * r.excess_return
+            for r in rows if r.excess_return is not None]
+    if rets:
+        out['avg_excess_return'] = round(sum(rets) / len(rets), 3)
+    return out
 
 
 def _adjust_dim(key, stat, configs):
