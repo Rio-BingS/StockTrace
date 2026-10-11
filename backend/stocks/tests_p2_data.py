@@ -247,3 +247,21 @@ class MetaAccuracyTests(SimpleTestCase):
         share_meta = data['share_history']['meta']
         self.assertEqual(share_meta['cache_status'], 'fresh')
         self.assertEqual(share_meta['data_as_of'], '2026-08-03')
+
+
+class IndexTrendEndOnlyTests(SimpleTestCase):
+    """DAT-20：指数走势只传 end 时不再被忽略。"""
+
+    def test_end_only_cuts_tail_before_end(self):
+        from .market.indices import fetch_index_trend
+
+        df = pd.DataFrame({
+            'date': pd.date_range('2026-09-01', periods=10, freq='D'),
+            'close': [float(i) for i in range(1, 11)],
+            'volume': [1.0] * 10,
+        })
+        with patch('akshare.stock_zh_index_daily', return_value=df):
+            data = fetch_index_trend(days=3, end='2026-09-05')
+        items = data['series'][0]['items']
+        self.assertEqual([i['date'] for i in items], ['2026-09-03', '2026-09-04', '2026-09-05'])
+        self.assertEqual(data['end'], '2026-09-05')
