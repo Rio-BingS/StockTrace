@@ -47,6 +47,8 @@ from .constants import (
 DIMENSIONS = [
     {
         'key': 'big_order_net',
+        'group': 'funds',  # 投票信息组（#4，见 signals 模块 docstring）
+        'role': 'direction',
         'name': '板块资金净额',
         # 指数不在 targets（ALG-09）：build_index_context 从未提供净额序列，指数上
         # 该维度恒为「不可用」；大盘资金快照是全市场口径，即便接入也会给 5 个
@@ -64,6 +66,8 @@ DIMENSIONS = [
     },
     {
         'key': 'vol_ratio_slope',
+        'group': 'volume',  # 投票信息组（#4，见 signals 模块 docstring）
+        'role': 'strength',
         'name': '量比斜率',
         'targets': ('index', 'stock'),
         'enabled': True,
@@ -73,6 +77,8 @@ DIMENSIONS = [
     },
     {
         'key': 'vol_compress',
+        'group': 'price',  # 投票信息组（#4，见 signals 模块 docstring）
+        'role': 'direction',
         'name': '波动率压缩',
         'targets': ('index', 'stock', 'industry', 'concept'),
         'enabled': True,
@@ -87,6 +93,8 @@ DIMENSIONS = [
     },
     {
         'key': 'turnover_pct',
+        'group': 'volume',  # 投票信息组（#4，见 signals 模块 docstring）
+        'role': 'strength',
         'name': '换手率分位',
         'targets': ('index', 'stock'),
         'enabled': True,
@@ -101,6 +109,8 @@ DIMENSIONS = [
     },
     {
         'key': 'margin_north',
+        'group': 'leverage',  # 投票信息组（#4，见 signals 模块 docstring）
+        'role': 'direction',
         'name': '融资余额',
         'targets': ('index',),
         'enabled': True,
@@ -114,6 +124,8 @@ DIMENSIONS = [
     },
     {
         'key': 'ma_relation',
+        'group': 'price',  # 投票信息组（#4，见 signals 模块 docstring）
+        'role': 'direction',
         'name': '价格与均线关系',
         'targets': ('index', 'stock', 'industry', 'concept'),
         'enabled': True,

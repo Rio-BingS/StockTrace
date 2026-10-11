@@ -718,7 +718,7 @@ class SignalParamsSnapshotTests(TestCase):
 
         configs = [{'key': k, 'name': k, 'weight': 1.0, 'params': {'min': 0.123},
                     'targets': ('industry',), 'evaluate': ev, 'enabled': True, 'defaults': {}}
-                   for k in ('ma_relation', 'vol_compress')]
+                   for k in ('ma_relation', 'big_order_net')]
         ctx = {'kind': 'industry', 'code': '甲', 'name': '甲', 'as_of': _TODAY.isoformat()}
         data, dims = signals.evaluate_target(ctx, configs)
         sig, _ = signals.upsert_signal(data, dims)

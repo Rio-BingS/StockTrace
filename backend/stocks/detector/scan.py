@@ -33,6 +33,7 @@ from ..market.snapshots import save_margin_snapshot
 from ..models import DetectorDimConfig, DetectorRun, DetectorSignal, Stock
 from . import calm as calm_mod
 from . import registry, review, signals
+from .constants import ROLE_DIRECTION
 from .dimensions import (
     build_index_context,
     build_sector_context,
@@ -80,6 +81,9 @@ def load_configs(create=True):
             'evaluate': spec['evaluate'],
             'enabled': enabled,
             'defaults': spec['defaults'],
+            # 投票分组（#4）：注册表声明，未声明的维度自成方向组
+            'group': spec.get('group') or spec['key'],
+            'role': spec.get('role') or ROLE_DIRECTION,
         })
     return out
 

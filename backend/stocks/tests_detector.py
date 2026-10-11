@@ -242,7 +242,7 @@ class CycleAndPersistenceTests(TestCase):
 
 
 class SectorSignalScanTests(TestCase):
-    """端到端（板块路径）：工程化的快照序列应产出 2 票同向的信号。
+    """端到端（板块路径）：工程化的快照序列应产出「价格组 + 资金组」两组同向的信号。
 
     序列设计（45 日：均线窗口 + 噪声闸门基线）：
     - 前 36 日：涨跌幅为 σ≈0.5% 的固定噪声、净额正负交替且幅度不等（各维度与
@@ -251,6 +251,8 @@ class SectorSignalScanTests(TestCase):
       「此前平静」，近 3 日累计约 0.76% < 2.5σ√3（价格尚未大动）；vol_compress
       投 up（价格组）；净额由 +1e8 抬到 +4e8（资金面温和流入，未超历史 95 分位）
       → big_order_net 投 up（资金组）。
+    分组投票（#4）后 vol_compress 与 ma_relation 同属价格组只算一票，因此这里
+    必须有资金组的独立一票才出信号。
     """
 
     def setUp(self):
@@ -293,8 +295,9 @@ class SectorSignalScanTests(TestCase):
         self.assertIsNotNone(sig, summary)
         self.assertEqual(sig.direction, 'up')
         self.assertEqual(sig.cycles, 1)
-        voted = [k for k, v in sig.dimensions.items() if v['direction'] == 'up']
-        self.assertGreaterEqual(len(voted), 2, sig.dimensions)
+        counted = {k for k, v in sig.dimensions.items() if v['counted']}
+        self.assertEqual(counted, {'vol_compress', 'big_order_net'}, sig.dimensions)
+        self.assertEqual({sig.dimensions[k]['group'] for k in counted}, {'price', 'funds'})
         # 热力图矩阵里有该板块且分值非空
         run = DetectorRun.objects.get(trade_date=_TODAY)
         rows = run.matrix['industry']
