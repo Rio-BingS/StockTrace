@@ -363,6 +363,15 @@ class AiAnalysisFinalQuotesTests(TestCase):
         self.assertNotIn('2026-09-07', text)
         self.assertNotIn('11.11', text)
 
+    def test_context_volume_unit_is_shares(self):
+        # DailyQuote.volume 入库单位是「股」（DAT-03），提示词不能再写「手」
+        from stocks.ai.prompts import build_stock_context
+        _, stock = _ai_fixtures()
+        text = build_stock_context(stock)
+        self.assertIn('成交量', text)
+        self.assertNotIn('手', text.split('成交量', 1)[1].split('，', 1)[0])
+        self.assertIn('股', text.split('成交量', 1)[1].split('，', 1)[0])
+
 
 class SchedulerStepIsolationTests(TestCase):
     """REL-08：任务链逐步容错；探测器按快照依赖延后重试。"""

@@ -60,7 +60,7 @@ def build_stock_context(stock):
             f'日内振幅 {_fmt(latest.high_low_pct, "%")}'
         )
         lines.append(
-            f'成交量 {_fmt(latest.volume, "手")}，'
+            f'成交量 {_fmt(latest.volume, "股")}，'
             f'成交额 {_fmt(latest.turnover, "元")}'
         )
         lines.append(f'近 {len(quotes)} 个交易日日线（由新到旧）：')
