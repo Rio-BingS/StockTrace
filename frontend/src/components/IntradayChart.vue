@@ -12,7 +12,8 @@ import {
   MarkLineComponent,
 } from 'echarts/components'
 import { CanvasRenderer } from 'echarts/renderers'
-import { formatPct, formatNum, formatRate, pctClass, pctFrom } from '../utils/format.js'
+import { formatPct, formatNum, formatRate, pctClass } from '../utils/format.js'
+import { intradayBase, signedPctText as pctTextFrom } from '../utils/intraday.js'
 import { formatVolume } from '../utils/marketFormat.js'
 import { escapeHtml } from '../utils/escapeHtml.js'
 
@@ -33,22 +34,12 @@ const props = defineProps({
   date: { type: String, default: '' },
 })
 
-// 百分比基准：A 股惯例为昨收；拿不到昨收（如首个交易日）时才回退开盘价，并在界面注明基准
-const baseInfo = computed(() => {
-  const q = props.dailyQuote || {}
-  if (q.prev_close != null && Number(q.prev_close)) {
-    return { price: Number(q.prev_close), label: '较昨收', isPrevClose: true }
-  }
-  if (q.open_price != null && Number(q.open_price)) {
-    return { price: Number(q.open_price), label: '较开盘', isPrevClose: false }
-  }
-  return { price: null, label: '', isPrevClose: false }
-})
+// 百分比基准：A 股惯例为昨收；拿不到昨收（如首个交易日）时才回退开盘价，并在界面注明基准（FEF-13）
+const baseInfo = computed(() => intradayBase(props.dailyQuote))
 
 // 相对基准的带符号百分比文本，基准缺失时返回 ''
 function signedPctText(price) {
-  const v = pctFrom(price, baseInfo.value.price)
-  return v == null ? '' : formatPct(v)
+  return pctTextFrom(price, baseInfo.value.price)
 }
 
 // 局部极值检测

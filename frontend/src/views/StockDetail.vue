@@ -4,6 +4,7 @@ import { useRoute } from 'vue-router'
 import { stockApi, marketApi } from '../api/stocks.js'
 import { formatPct, formatNum, formatRate, formatSigned, formatDateTime, pctClass } from '../utils/format.js'
 import { formatAmount } from '../utils/marketFormat.js'
+import { quoteForDate } from '../utils/intraday.js'
 import KlineChart from '../components/KlineChart.vue'
 import IntradayChart from '../components/IntradayChart.vue'
 import AiAnalysisPanel from '../components/AiAnalysisPanel.vue'
@@ -72,9 +73,8 @@ async function loadData() {
 
 async function showIntraday(date) {
   intradayDate.value = date
-  // 从 dailyData 中找该日的行情数据
-  const dayQuote = dailyData.value.find(d => d.trade_date === date)
-  intradayQuote.value = dayQuote || latestQuote.value
+  // 只用同一交易日的行情做分时基准，找不到时不借用别的交易日的昨收（FEF-13）
+  intradayQuote.value = quoteForDate(dailyData.value, latestQuote.value, date)
   await loadMinuteData(date)
 }
 
