@@ -21,6 +21,12 @@ class Command(BaseCommand):
 
     def handle(self, *args, **options):
         from stocks.detector.scan import run_scan
+        from stocks.task_lock import task_lock
 
-        summary = run_scan()
+        # 与 17:15 定时扫描共用 detector_scan 任务锁（REL-04）
+        with task_lock('detector_scan', timeout=600) as ok:
+            if not ok:
+                self.stderr.write('探测器扫描任务锁被占用（已等待 600s），请稍后再试')
+                return
+            summary = run_scan()
         self.stdout.write(json.dumps(summary, ensure_ascii=False, indent=2, default=str))

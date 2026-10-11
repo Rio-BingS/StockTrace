@@ -207,3 +207,64 @@ class AddStockFetchResponseTests(TestCase):
             r2 = self.client.post('/api/stocks/', {'code': '600001'}, content_type='application/json')
         self.assertEqual(r2.status_code, 201)
         self.assertEqual(r2.json()['fetch']['status'], 'started')
+
+
+class GuardedJobTests(_TmpRunDirMixin, SimpleTestCase):
+    """REL-04：调度 job 经 _guarded 取锁；盘中忙则跳过，日度任务限时等待。"""
+
+    def test_registered_jobs_are_guarded(self):
+        from stocks import scheduler as sch
+
+        jobs = {j.id: j for j in sch.build_scheduler().get_jobs()}
+        self.assertEqual(jobs['intraday_fetch'].func.lock_name, 'stock_quotes')
+        self.assertEqual(jobs['intraday_fetch'].func.lock_wait, 0)
+        self.assertEqual(jobs['daily_summary'].func.lock_name, 'stock_quotes')
+        self.assertGreater(jobs['daily_summary'].func.lock_wait, 0)
+        self.assertEqual(jobs['preopen_incremental'].func.lock_name, 'stock_quotes')
+        self.assertEqual(jobs['detector_scan'].func.lock_name, 'detector_scan')
+        self.assertEqual(jobs['post_close_lagging'].func.lock_name, 'market_snapshots')
+
+    def test_guarded_skips_when_busy_and_runs_when_free(self):
+        from stocks import scheduler as sch
+
+        calls = []
+
+        def job():
+            calls.append(TaskLock('t_job').locked())
+            return 'done'
+
+        wrapped = sch._guarded(job, 't_job', 0)
+        holder = TaskLock('t_job')
+        self.assertTrue(holder.acquire(timeout=0))
+        try:
+            with self.assertLogs('stocks.scheduler', level='WARNING'):
+                self.assertIsNone(wrapped())
+        finally:
+            holder.release()
+        self.assertEqual(calls, [])
+        self.assertEqual(wrapped(), 'done')
+        self.assertEqual(calls, [True])
+        self.assertFalse(TaskLock('t_job').locked())
+
+    def test_commands_take_same_lock(self):
+        from io import StringIO
+
+        from django.core.management import call_command
+
+        err = StringIO()
+        with mock.patch('stocks.detector.scan.run_scan') as rs, \
+                mock.patch('stocks.task_lock.TaskLock.acquire', return_value=False) as acq:
+            call_command('run_detector_scan', stderr=err)
+        rs.assert_not_called()
+        self.assertIn('任务锁被占用', err.getvalue())
+        self.assertEqual(acq.call_count, 1)
+
+        out = StringIO()
+        with mock.patch('stocks.management.commands.fetch_stock_data.task_lock') as tl, \
+                mock.patch('stocks.management.commands.fetch_stock_data.fetch_all_active_stocks') as fa:
+            tl.return_value.__enter__.return_value = False
+            call_command('fetch_stock_data', '--all', stdout=out)
+        tl.assert_called_once()
+        self.assertEqual(tl.call_args.args[0], 'stock_quotes')
+        fa.assert_not_called()
+        self.assertIn('任务锁被占用', out.getvalue())

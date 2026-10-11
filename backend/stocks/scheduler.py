@@ -17,6 +17,7 @@ APScheduler 集成到 Django
 """
 
 import atexit
+import functools
 import json
 import logging
 import os
@@ -256,6 +257,32 @@ def _detector_scan_job():
         logger.error(f'探测器扫描失败: {e}')
 
 
+# 任务互斥（REL-04）：与手动拉取、管理命令共用 task_lock 的同名锁。
+# 盘中任务忙则直接跳过（下一轮 5 分钟后再来）；日度任务限时等待，等不到才跳过。
+_INTRADAY_SKIP = 0
+_DAILY_WAIT_SECONDS = 1800
+
+
+def _guarded(func, lock_name, wait=_INTRADAY_SKIP):
+    """包装定时任务：执行前取任务锁，取不到记 WARNING 并跳过本次。"""
+    from .task_lock import TaskLock
+
+    @functools.wraps(func)
+    def wrapper(*args, **kwargs):
+        lock = TaskLock(lock_name)
+        if not lock.acquire(timeout=wait):
+            logger.warning(f'定时任务 {func.__name__} 跳过：任务锁 {lock_name} 被占用（已等待 {wait}s）')
+            return None
+        try:
+            return func(*args, **kwargs)
+        finally:
+            lock.release()
+
+    wrapper.lock_name = lock_name
+    wrapper.lock_wait = wait
+    return wrapper
+
+
 def register_jobs(sched):
     """注册全部定时任务（Web 内启动与 run_scheduler 共用同一份注册）。
 
@@ -275,22 +302,26 @@ def register_jobs(sched):
         )
 
     # 开盘前：增量日线预热
-    add(_preopen_incremental_job, CronTrigger(hour=8, minute=50, timezone=SCHEDULER_TZ),
+    add(_guarded(_preopen_incremental_job, 'stock_quotes', _DAILY_WAIT_SECONDS),
+        CronTrigger(hour=8, minute=50, timezone=SCHEDULER_TZ),
         'preopen_incremental', 1800)
 
-    add(_intraday_job, CronTrigger(hour='9-14', minute='*/5', timezone=SCHEDULER_TZ),
+    add(_guarded(_intraday_job, 'stock_quotes', _INTRADAY_SKIP),
+        CronTrigger(hour='9-14', minute='*/5', timezone=SCHEDULER_TZ),
         'intraday_fetch', 240)
 
-    add(_daily_summary_job, CronTrigger(hour=15, minute=10, timezone=SCHEDULER_TZ),
+    add(_guarded(_daily_summary_job, 'stock_quotes', _DAILY_WAIT_SECONDS),
+        CronTrigger(hour=15, minute=10, timezone=SCHEDULER_TZ),
         'daily_summary', 3600)
 
     # 收盘后：15:30–21:00 每 30 分钟预热晚到行情（cron 含 15:00，由窗口守卫丢弃）
-    add(_post_close_lagging_job,
+    add(_guarded(_post_close_lagging_job, 'market_snapshots', 600),
         CronTrigger(day_of_week='mon-fri', hour='15,16,17,18,19,20,21', minute='0,30', timezone=SCHEDULER_TZ),
         'post_close_lagging', 900)
 
     # 探测器：交易日 17:15（板块/大盘快照已在前两轮预热落库）
-    add(_detector_scan_job, CronTrigger(day_of_week='mon-fri', hour=17, minute=15, timezone=SCHEDULER_TZ),
+    add(_guarded(_detector_scan_job, 'detector_scan', _DAILY_WAIT_SECONDS),
+        CronTrigger(day_of_week='mon-fri', hour=17, minute=15, timezone=SCHEDULER_TZ),
         'detector_scan', 3600)
     return sched
 

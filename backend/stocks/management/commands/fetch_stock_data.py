@@ -14,8 +14,10 @@ from stocks.models import Stock
 from stocks.services import (
     DATA_SOURCES, fetch_all_active_stocks, fetch_daily_data, fetch_stock_all_data,
 )
+from stocks.task_lock import task_lock
 
 _SOURCE_NAMES = [s.name for s in DATA_SOURCES]
+_LOCK_WAIT_SECONDS = 600
 
 
 class Command(BaseCommand):
@@ -52,6 +54,15 @@ class Command(BaseCommand):
             self.stdout.write(style(f"  {stock.code}: 全量重拉 {n} 条日K线"))
 
     def handle(self, *args, **options):
+        # 与定时任务、Web 手动拉取共用 stock_quotes 任务锁，避免并发写同一批行情（REL-04）
+        with task_lock('stock_quotes', timeout=_LOCK_WAIT_SECONDS) as ok:
+            if not ok:
+                self.stdout.write(self.style.ERROR(
+                    f'行情拉取任务锁被占用（已等待 {_LOCK_WAIT_SECONDS}s），请稍后再试'))
+                return
+            self._handle(**options)
+
+    def _handle(self, **options):
         if options['source'] and not options['full_daily']:
             self.stdout.write(self.style.ERROR('--source 仅能与 --full-daily 一起使用'))
             return
