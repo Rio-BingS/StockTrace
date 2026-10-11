@@ -33,6 +33,15 @@ _META_DISCLAIMER = (
 )
 
 
+# DetectorRun 里的大 JSON 字段：列表/元信息只用标量，读这些字段纯属浪费（PERF-09）
+_HEAVY_RUN_FIELDS = ('matrix', 'degraded', 'adjustments')
+
+
+def _runs_brief():
+    """只取标量字段的 DetectorRun 查询（meta/摘要用），按交易日倒序。"""
+    return DetectorRun.objects.defer(*_HEAVY_RUN_FIELDS).order_by('-trade_date')
+
+
 def _meta(latest_run, message=''):
     """探测器响应的统一 meta；fresh = 最近一次 run 覆盖了最近已完成交易日。"""
     cache_status = 'unavailable'
@@ -97,7 +106,7 @@ def detector_signals(request):
     target_kind(index/stock/industry/concept)、status、date=YYYY-MM-DD、
     all_dates=1（近 30 天历史，默认只看最新扫描日）。
     """
-    latest_run = DetectorRun.objects.order_by('-trade_date').first()
+    latest_run = _runs_brief().first()
 
     all_dates = request.query_params.get('all_dates') in ('1', 'true')
     date_raw = request.query_params.get('date')
@@ -253,7 +262,7 @@ def detector_signal_detail(request, pk):
                 dimension_series[key] = []
 
     return Response({
-        'meta': _meta(DetectorRun.objects.order_by('-trade_date').first(),
+        'meta': _meta(_runs_brief().first(),
                       message=(err or '') if ctx is None else ''),
         'signal': _signal_row(sig),
         'dimension_series': dimension_series,
@@ -278,7 +287,8 @@ def detector_heatmap(request):
 
     run = None
     rows = []
-    for candidate in DetectorRun.objects.order_by('-trade_date')[:5]:
+    # 只要矩阵与 meta 用到的标量；degraded/adjustments 不读
+    for candidate in DetectorRun.objects.defer('degraded', 'adjustments').order_by('-trade_date')[:5]:
         rows = (candidate.matrix or {}).get(board) or []
         if rows:
             run = candidate
@@ -330,9 +340,10 @@ def detector_config(request):
             'params': {**spec['defaults'], **((cfg.params or {}) if cfg else {})},
             'defaults': spec['defaults'],
         })
-    runs = [_run_brief(r) for r in DetectorRun.objects.order_by('-trade_date')[:10]]
+    run_rows = list(_runs_brief()[:10])
+    runs = [_run_brief(r) for r in run_rows]
     return Response({
-        'meta': _meta(DetectorRun.objects.order_by('-trade_date').first()),
+        'meta': _meta(run_rows[0] if run_rows else None),
         'dims': dims,
         'runs': runs,
         'review_rules': {

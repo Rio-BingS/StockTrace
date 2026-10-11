@@ -578,3 +578,34 @@ class ReviewProtocolTests(TestCase):
         # 删掉窗口内一天的快照 → 窗口不连续，保持待回看
         MarketDailySnapshot.objects.filter(trade_date=base_date + timedelta(days=3)).delete()
         self.assertIsNone(review._sector_outcome(sig, {}))
+
+
+@patch('stocks.services.is_trading_day', _always_trading)
+class DetectorRunDeferTests(TestCase):
+    """PERF-09：只读端点的 DetectorRun 查询不加载 matrix 等大 JSON。"""
+
+    def setUp(self):
+        from .models import DetectorRun
+
+        DetectorRun.objects.create(trade_date=_TODAY, matrix={'industry': [{'code': 'x'}] * 50},
+                                   degraded=[{'target': 'a', 'reason': 'b'}], adjustments=[])
+
+    def _run_selects(self, url):
+        from django.db import connection
+        from django.test.utils import CaptureQueriesContext
+
+        with CaptureQueriesContext(connection) as ctx:
+            resp = self.client.get(url)
+        self.assertEqual(resp.status_code, 200)
+        return [q['sql'] for q in ctx.captured_queries
+                if 'detectorrun' in q['sql'].lower() and q['sql'].lstrip().upper().startswith('SELECT')]
+
+    def test_signals_and_config_do_not_select_matrix(self):
+        from django.urls import reverse
+
+        for name in ('detector-signals', 'detector-config'):
+            selects = self._run_selects(reverse(name))
+            self.assertTrue(selects, name)
+            for sql in selects:
+                self.assertNotIn('"matrix"', sql, name)
+                self.assertNotIn('"adjustments"', sql, name)
