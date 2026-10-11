@@ -20,6 +20,7 @@ import socket
 import sys
 import threading
 import traceback
+from collections import Counter
 from pathlib import Path
 
 from django.test.runner import DiscoverRunner
@@ -60,6 +61,14 @@ def _call_site():
         return '<非项目代码>'
     inner = frames[-1]
     return f'{os.path.relpath(inner.filename, _BACKEND_DIR)}:{inner.lineno} ({inner.name})'
+
+
+def _format_hits(hits):
+    """同一 (目标, 调用点) 合并计数，避免重试循环刷屏。"""
+    return '\n'.join(
+        f'  - {what}  @ {site}' + (f'  ×{n}' if n > 1 else '')
+        for (what, site), n in Counter(hits).items()
+    )
 
 
 # ============================================================
@@ -209,7 +218,7 @@ class NetworkGuardResultMixin:
     def stopTest(self, test):
         hits = _guard.end_test()
         if hits:
-            detail = '\n'.join(f'  - {what}  @ {site}' for what, site in hits)
+            detail = _format_hits(hits)
             try:
                 raise AssertionError(f'用例尝试访问网络 {len(hits)} 次（须补 mock）：\n{detail}')
             except AssertionError:
@@ -253,7 +262,6 @@ class IsolatedTestRunner(DiscoverRunner):
         if self.network_guard_enabled and _guard.outside_hits:
             print(f'\n==== 用例之外的网络尝试 {len(_guard.outside_hits)} 次（运行判失败）====',
                   file=sys.stderr)
-            for what, site in _guard.outside_hits:
-                print(f'  - {what}  @ {site}', file=sys.stderr)
+            print(_format_hits(_guard.outside_hits), file=sys.stderr)
             failures += 1
         return failures
