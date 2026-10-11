@@ -32,6 +32,14 @@ from .market.periods import FULL_PRESETS, resolve_period
 logger = logging.getLogger(__name__)
 
 
+def _initial_fetch(stock_id):
+    """新增关注后的首拉：忙时排队而不是静默丢弃（REL-04），结果回给前端。"""
+    started, st = start_fetch_one(stock_id, light=True, queue_if_busy=True)
+    if started and not st.get('queued'):
+        return {'status': 'started'}
+    return {'status': 'queued', 'message': '已有拉取任务在执行，已排队，完成后自动补拉'}
+
+
 class StockViewSet(viewsets.ModelViewSet):
     """关注股票 CRUD"""
     queryset = Stock.objects.filter(is_active=True)
@@ -49,8 +57,9 @@ class StockViewSet(viewsets.ModelViewSet):
             existing.name = name
             existing.save()
             serializer = self.get_serializer(existing)
-            start_fetch_one(existing.id, light=True)
-            return Response(serializer.data, status=status.HTTP_201_CREATED)
+            data = dict(serializer.data)
+            data['fetch'] = _initial_fetch(existing.id)
+            return Response(data, status=status.HTTP_201_CREATED)
         try:
             with transaction.atomic():
                 response = super().create(request, *args, **kwargs)
@@ -60,7 +69,7 @@ class StockViewSet(viewsets.ModelViewSet):
         if response.status_code == status.HTTP_201_CREATED:
             stock_id = response.data.get('id')
             if stock_id:
-                start_fetch_one(stock_id, light=True)
+                response.data['fetch'] = _initial_fetch(stock_id)
         return response
 
     def perform_create(self, serializer):

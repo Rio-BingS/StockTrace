@@ -10,6 +10,7 @@ db.sqlite3-shm
 db.sqlite3-journal
 *.sqlite3.bak*
 backend/scheduler.lock
+backend/task-*.lock
 backend/scheduler_heartbeat.json
 backend/logs/
 

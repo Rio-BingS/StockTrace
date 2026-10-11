@@ -544,23 +544,25 @@ class FetchTaskWatchdogTests(SimpleTestCase):
             self.assertTrue(tasks._state['running'])
             self.assertEqual(tasks._state['last_status'], 'running')
 
-    def test_stale_running_task_recovered_to_error(self):
+    def test_stale_running_task_only_marked(self):
+        # REL-04：看门狗只标记 stale，不复位 running（旧线程仍持锁）
         self._claim_running('all')
         with tasks._lock:
             tasks._started_at = monotonic() - 31 * 60
             tasks._recover_stale_locked()
-            self.assertFalse(tasks._state['running'])
-            self.assertEqual(tasks._state['last_status'], 'error')
-            self.assertIn('看门狗', tasks._state['last_error'])
+            self.assertTrue(tasks._state['running'])
+            self.assertTrue(tasks._state['stale'])
+            self.assertIn('疑似挂死', tasks._state['last_error'])
 
-    def test_start_takes_over_stale_task(self):
+    def test_start_does_not_run_concurrently_with_stale_task(self):
         self._claim_running('all')
         with tasks._lock:
             tasks._started_at = monotonic() - 31 * 60
         with patch('stocks.tasks.threading.Thread') as thread_mock:
-            started, _ = tasks.start_fetch_one(1)
-        self.assertTrue(started)
-        thread_mock.assert_called_once()
+            started, st = tasks.start_fetch_one(1)
+        self.assertFalse(started)
+        self.assertTrue(st['stale'])
+        thread_mock.assert_not_called()
 
 
 class UpstreamTimeoutSettingsTests(SimpleTestCase):
