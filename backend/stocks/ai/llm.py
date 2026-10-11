@@ -3,6 +3,7 @@ import ipaddress
 import json
 import logging
 import random
+import re
 import socket
 import threading
 import time
@@ -200,12 +201,8 @@ class LlmClient:
         except ValueError as exc:
             raise LlmError(f'接口地址不安全：{exc}', kind='config') from exc
 
-        payload = {
-            'model': self.provider.model,
-            'messages': messages,
-            'temperature': temperature,
-            'max_tokens': max_tokens,
-        }
+        # 推理模型不传 temperature、OpenAI 推理模型用 max_completion_tokens（AIX-07）
+        payload = build_payload(self.provider, messages, temperature, max_tokens)
         if extra:
             payload.update(extra)
 
@@ -292,6 +289,77 @@ class LlmClient:
         if obj is None:
             raise LlmError('LLM 未返回合法 JSON 对象', kind='bad_response', usage=usage)
         return obj, usage
+
+
+# ---- 多服务商（AIX-07）----
+
+def _provider_has_field(name):
+    from ..models import AiProvider
+    try:
+        AiProvider._meta.get_field(name)
+        return True
+    except Exception:  # noqa: BLE001  FieldDoesNotExist
+        return False
+
+
+def provider_ordering():
+    """服务商选择/回退顺序：有 priority 字段时按优先级（小的先），再按录入顺序。"""
+    return ('priority', 'id') if _provider_has_field('priority') else ('id',)
+
+
+def enabled_providers():
+    from ..models import AiProvider
+    return list(AiProvider.objects.filter(is_enabled=True).order_by(*provider_ordering()))
+
+
+# 可回退到下一个服务商的错误：上游没有产出结果、换一家可能成功。
+# 不回退：busy（本机并发满）、timeout（上游可能已计费仍在生成）、
+# bad_response/empty/truncated（已计费，换一家等于重复花钱）
+_FALLBACK_KINDS = ('config', 'network', 'auth', 'rate_limit', 'redirect')
+
+
+def can_fallback(exc):
+    kind = getattr(exc, 'kind', None) or ('config' if isinstance(exc, ValueError) else None)
+    if kind in _FALLBACK_KINDS:
+        return True
+    code = getattr(exc, 'status_code', None)
+    return kind == 'upstream' and code is not None and (code >= 500 or code == 404)
+
+
+# 推理模型参数风格：
+# - standard：temperature + max_tokens
+# - reasoning：不传 temperature（DeepSeek-R1/QwQ 等会忽略或拒绝），仍用 max_tokens
+# - openai_reasoning：OpenAI o 系列/gpt-5，不传 temperature，改用 max_completion_tokens
+PARAM_STANDARD = 'standard'
+PARAM_REASONING = 'reasoning'
+PARAM_OPENAI_REASONING = 'openai_reasoning'
+_OPENAI_REASONING_RE = re.compile(r'^(o\d+|gpt-5)([-.:]|$)')
+_REASONING_RE = re.compile(r'reasoner|(^|[-_.:])r1($|[-_.:])|qwq|thinking')
+
+
+def param_style(provider):
+    """按服务商配置（param_style 字段，待迁移）或模型名判断请求参数风格。"""
+    explicit = getattr(provider, 'param_style', None)
+    if explicit in (PARAM_STANDARD, PARAM_REASONING, PARAM_OPENAI_REASONING):
+        return explicit
+    name = (getattr(provider, 'model', '') or '').strip().lower().rsplit('/', 1)[-1]
+    if _OPENAI_REASONING_RE.match(name):
+        return PARAM_OPENAI_REASONING
+    if _REASONING_RE.search(name):
+        return PARAM_REASONING
+    return PARAM_STANDARD
+
+
+def build_payload(provider, messages, temperature, max_tokens):
+    payload = {'model': provider.model, 'messages': messages}
+    style = param_style(provider)
+    if style == PARAM_STANDARD:
+        payload['temperature'] = temperature
+    if style == PARAM_OPENAI_REASONING:
+        payload['max_completion_tokens'] = max_tokens
+    else:
+        payload['max_tokens'] = max_tokens
+    return payload
 
 
 def _retryable(exc):

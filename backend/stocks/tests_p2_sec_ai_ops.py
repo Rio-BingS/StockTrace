@@ -244,3 +244,80 @@ class AiCallLogObservabilityTests(TestCase):
         self.assertIsNotNone(log.latency_ms)
         self.assertEqual(log.error, 'auth HTTP 401')
         self.assertEqual(log.status, 'failed')
+
+
+class AiMultiProviderTests(TestCase):
+    """AIX-07：按顺序回退、推理模型参数、列表顺序与选择一致。"""
+
+    def setUp(self):
+        from stocks.ai.crypto import encrypt_api_key
+        from stocks.models import AiProvider
+        self.p1, self.stock = _ai_fixtures()
+        self.p2 = AiProvider.objects.create(
+            name='P2', base_url='https://b.com', model='m2',
+            api_key_encrypted=encrypt_api_key('sk-p2-1111'),
+        )
+        self.post = _ai_patches(self)
+        self.client = APIClient()
+
+    def _urls(self):
+        return [c.args[0] for c in self.post.call_args_list]
+
+    def test_fallback_on_auth_error(self):
+        from stocks.models import AiCallLog
+        from stocks.tests_ai import _fake_response
+        from stocks.tests_p1_ai import _ok
+        self.post.side_effect = [_fake_response(401, text='no'), _ok('第二家')]
+        r = self.client.post(f'/api/stocks/{self.stock.id}/ai-analysis/')
+        self.assertEqual(r.status_code, 200)
+        self.assertEqual(r.data['analysis'], '第二家')
+        self.assertEqual(self._urls(), ['https://mock.local/chat/completions',
+                                        'https://b.com/chat/completions'])
+        # 一个请求只占一条流水，记在实际成功的服务商上
+        log = AiCallLog.objects.get()
+        self.assertTrue(log.success)
+        self.assertEqual(log.provider_id, self.p2.id)
+
+    def test_no_fallback_on_charged_errors(self):
+        from stocks.tests_p1_ai import _ok
+        self.post.return_value = _ok('半截', finish_reason='length')
+        r = self.client.post(f'/api/stocks/{self.stock.id}/ai-analysis/')
+        self.assertEqual(r.status_code, 502)
+        self.assertEqual(r.data['error'], 'truncated')
+        self.assertEqual(self.post.call_count, 1)
+
+    def test_disabled_and_order_consistent_with_list(self):
+        from stocks.tests_p1_ai import _ok
+        self.p1.is_enabled = False
+        self.p1.save()
+        self.post.return_value = _ok('ok')
+        self.client.post('/api/screener/ai/comment/', {'query': '', 'results': [{'code': '000001'}]},
+                         format='json')
+        self.assertEqual(self._urls(), ['https://b.com/chat/completions'])
+        body = self.client.get('/api/ai-providers/').json()
+        rows = body['results'] if isinstance(body, dict) else body
+        listed = [p['id'] for p in rows]
+        self.assertEqual(listed[0], self.p2.id)
+
+    def test_reasoning_param_styles(self):
+        from types import SimpleNamespace
+        from stocks.ai.llm import build_payload, param_style
+        cases = {
+            'deepseek-chat': 'standard', 'gpt-4o': 'standard', 'qwen-max': 'standard',
+            'deepseek-reasoner': 'reasoning', 'deepseek-r1': 'reasoning', 'qwq-32b': 'reasoning',
+            'o1-mini': 'openai_reasoning', 'o3': 'openai_reasoning', 'gpt-5': 'openai_reasoning',
+            'openai/o4-mini': 'openai_reasoning',
+        }
+        for model, style in cases.items():
+            self.assertEqual(param_style(SimpleNamespace(model=model)), style, model)
+        p = build_payload(SimpleNamespace(model='o1'), [], 0.3, 100)
+        self.assertNotIn('temperature', p)
+        self.assertNotIn('max_tokens', p)
+        self.assertEqual(p['max_completion_tokens'], 100)
+        p = build_payload(SimpleNamespace(model='deepseek-reasoner'), [], 0.3, 100)
+        self.assertNotIn('temperature', p)
+        self.assertEqual(p['max_tokens'], 100)
+        p = build_payload(SimpleNamespace(model='deepseek-chat'), [], 0.3, 100)
+        self.assertEqual((p['temperature'], p['max_tokens']), (0.3, 100))
+        # 显式配置优先于模型名推断
+        self.assertEqual(param_style(SimpleNamespace(model='o1', param_style='standard')), 'standard')

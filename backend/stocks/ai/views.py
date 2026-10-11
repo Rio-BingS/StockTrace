@@ -1,6 +1,8 @@
 """AI 功能视图：Provider 配置、个股分析、条件选股、AI 翻译与点评"""
 import logging
+import time
 
+from django.conf import settings
 from rest_framework import viewsets, status
 from rest_framework.decorators import action, api_view
 from rest_framework.response import Response
@@ -12,7 +14,7 @@ from ..ai_serializers import (
     ScreenerCommentInputSerializer,
     first_error_text,
 )
-from .llm import LlmClient, LlmError
+from .llm import LlmClient, LlmError, can_fallback, enabled_providers, provider_ordering
 from .prompts import (
     DISCLAIMER,
     build_analysis_messages,
@@ -34,6 +36,10 @@ class AiProviderViewSet(viewsets.ModelViewSet):
     """AI 服务商配置 CRUD"""
     queryset = AiProvider.objects.all()
     serializer_class = AiProviderSerializer
+
+    def get_queryset(self):
+        # 列表顺序与调用时的选择/回退顺序一致：启用的在前，再按优先级（AIX-07）
+        return AiProvider.objects.order_by('-is_enabled', *provider_ordering())
 
     @action(detail=True, methods=['post'], url_path='test')
     def test_connection(self, request, pk=None):
@@ -113,14 +119,16 @@ def _test_failed(kind, status_code):
     )
 
 
-def _llm_failed(exc, purpose, call_log, stock=None):
+def _llm_failed(exc, purpose, call_log, stock=None, provider=None, attempted=False):
     """AI 端点调用失败的统一出口：回填流水、写日志，对外只给通用分类（SEC-07）。"""
     kind = getattr(exc, 'kind', None) or 'config'
-    if kind == 'busy':
+    if kind == 'busy' and not attempted:
+        # 并发已满且没有调用过任何上游：撤销占位，不占额度
         cancel_call(call_log)
         return _busy_response()
     status_code = getattr(exc, 'status_code', None)
-    finish_call(call_log, False, usage=getattr(exc, 'usage', None), error=exc)
+    finish_call(call_log, False, usage=getattr(exc, 'usage', None), error=exc,
+                provider=provider)
     logger.warning('AI 调用失败 purpose=%s stock=%s kind=%s status=%s: %s',
                    purpose, stock.code if stock else '-', kind, status_code, exc)
     message = _TEST_ERROR_TEXT.get(kind, _TEST_ERROR_TEXT['upstream'])
@@ -132,15 +140,64 @@ def _llm_failed(exc, purpose, call_log, stock=None):
     )
 
 
-def _get_active_provider():
-    # 显式按录入顺序取第一个启用的服务商，多个启用时行为可预期
-    provider = AiProvider.objects.filter(is_enabled=True).order_by('pk').first()
-    if provider is None:
-        return None, ('未配置可用的 AI 服务商，请先在设置页添加')
-    try:
-        return LlmClient(provider), None
-    except ValueError as exc:
-        return None, str(exc)
+def _active_clients():
+    """按选择顺序（与设置页列表一致）构造所有启用服务商的客户端。
+
+    返回 (clients, 错误文案)。Key 解不开的服务商跳过；一个都用不了时返回错误。
+    """
+    providers = enabled_providers()
+    if not providers:
+        return [], '未配置可用的 AI 服务商，请先在设置页添加'
+    clients, first_err = [], None
+    for provider in providers:
+        try:
+            clients.append(LlmClient(provider))
+        except ValueError as exc:
+            logger.warning('AI 服务商 %s 不可用：%s', provider.pk, exc)
+            first_err = first_err or str(exc)
+    if not clients:
+        return [], first_err
+    return clients, None
+
+
+def _run_llm(purpose, invoke, stock=None):
+    """预占额度后按顺序调用服务商，可回退的错误换下一个（AIX-07）。
+
+    invoke(client) 返回 (结果, usage)。返回 (结果, None) 或 (None, 错误 Response)。
+    整个请求只占一条流水与一次额度；回退只发生在上游明确未产出结果、
+    且耗时未超过总时长三分之一时，避免超过 gunicorn/nginx 超时。
+    """
+    clients, err = _active_clients()
+    if err:
+        return None, Response({'detail': err}, status=status.HTTP_400_BAD_REQUEST)
+
+    call_log, reason = reserve_call(purpose, provider=clients[0].provider, stock=stock)
+    if call_log is None:
+        return None, Response({'detail': reason}, status=status.HTTP_429_TOO_MANY_REQUESTS)
+
+    started = time.monotonic()
+    budget = float(getattr(settings, 'STOCKTRACE_LLM_TOTAL_TIMEOUT', 90)) / 3
+    attempted = False
+    for idx, client in enumerate(clients):
+        try:
+            result, usage = invoke(client)
+        except (LlmError, ValueError) as exc:
+            if getattr(exc, 'kind', None) != 'busy':
+                attempted = True
+            has_next = idx + 1 < len(clients)
+            if has_next and can_fallback(exc) and time.monotonic() - started < budget:
+                logger.warning('AI 服务商 %s 调用失败（kind=%s status=%s），回退到下一个',
+                               client.provider.pk, getattr(exc, 'kind', None),
+                               getattr(exc, 'status_code', None))
+                continue
+            return None, _llm_failed(exc, purpose, call_log, stock=stock,
+                                     provider=client.provider, attempted=attempted)
+        except Exception as exc:
+            # 意外异常也要回填占位，避免"进行中"流水一直挡住冷却
+            finish_call(call_log, False, error=exc, provider=client.provider)
+            raise
+        finish_call(call_log, True, usage=usage, provider=client.provider)
+        return result, None
 
 
 @api_view(['POST'])
@@ -150,24 +207,11 @@ def stock_ai_analysis(request, pk):
     if stock is None:
         return Response({'detail': '股票不存在'}, status=status.HTTP_404_NOT_FOUND)
 
-    client, err = _get_active_provider()
-    if err:
-        return Response({'detail': err}, status=status.HTTP_400_BAD_REQUEST)
-
-    call_log, reason = reserve_call('analysis', provider=client.provider, stock=stock)
-    if call_log is None:
-        return Response({'detail': reason}, status=status.HTTP_429_TOO_MANY_REQUESTS)
-
-    try:
-        text, usage = client.chat(build_analysis_messages(stock), max_tokens=1500)
-    except (LlmError, ValueError) as exc:
-        return _llm_failed(exc, 'analysis', call_log, stock=stock)
-    except Exception as exc:
-        # 意外异常也要回填占位，避免"进行中"流水一直挡住冷却
-        finish_call(call_log, False, error=exc)
-        raise
-
-    finish_call(call_log, True, usage=usage)
+    messages = build_analysis_messages(stock)
+    text, failed = _run_llm(
+        'analysis', lambda c: c.chat(messages, max_tokens=1500), stock=stock)
+    if failed:
+        return failed
     return Response({'analysis': text, 'disclaimer': DISCLAIMER})
 
 
@@ -189,24 +233,10 @@ def screener_ai(request):
         return _invalid_input(ser.errors)
     query = ser.validated_data['query']
 
-    client, err = _get_active_provider()
-    if err:
-        return Response({'detail': err}, status=status.HTTP_400_BAD_REQUEST)
-
-    call_log, reason = reserve_call('screener_translate', provider=client.provider)
-    if call_log is None:
-        return Response({'detail': reason}, status=status.HTTP_429_TOO_MANY_REQUESTS)
-
-    try:
-        spec, usage = client.chat_json(build_translate_messages(query))
-    except (LlmError, ValueError) as exc:
-        return _llm_failed(exc, 'screener_translate', call_log)
-    except Exception as exc:
-        # 意外异常也要回填占位，避免"进行中"流水一直挡住冷却
-        finish_call(call_log, False, error=exc)
-        raise
-
-    finish_call(call_log, True, usage=usage)
+    messages = build_translate_messages(query)
+    spec, failed = _run_llm('screener_translate', lambda c: c.chat_json(messages))
+    if failed:
+        return failed
 
     try:
         rows = run_screener(spec)
@@ -259,22 +289,9 @@ def screener_ai_comment(request):
         return Response({'detail': '结果中的股票都不在自选股池中'},
                         status=status.HTTP_400_BAD_REQUEST)
 
-    client, err = _get_active_provider()
-    if err:
-        return Response({'detail': err}, status=status.HTTP_400_BAD_REQUEST)
-
-    call_log, reason = reserve_call('screener_comment', provider=client.provider)
-    if call_log is None:
-        return Response({'detail': reason}, status=status.HTTP_429_TOO_MANY_REQUESTS)
-
-    try:
-        text, usage = client.chat(build_comment_messages(rows, query), max_tokens=800)
-    except (LlmError, ValueError) as exc:
-        return _llm_failed(exc, 'screener_comment', call_log)
-    except Exception as exc:
-        # 意外异常也要回填占位，避免"进行中"流水一直挡住冷却
-        finish_call(call_log, False, error=exc)
-        raise
-
-    finish_call(call_log, True, usage=usage)
+    messages = build_comment_messages(rows, query)
+    text, failed = _run_llm(
+        'screener_comment', lambda c: c.chat(messages, max_tokens=800))
+    if failed:
+        return failed
     return Response({'comment': text, 'disclaimer': DISCLAIMER})
