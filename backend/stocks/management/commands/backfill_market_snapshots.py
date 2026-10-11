@@ -62,7 +62,7 @@ class Command(BaseCommand):
 
         try:
             hist = flows.fetch_market_fund_flow_hist(days=days, force=True)
-        except Exception as e:
+        except Exception as e:  # noqa: BLE001 上游边界：akshare 异常类型不固定，提示后重跑即可
             self.stderr.write(f'大盘资金流历史回补失败（上游恢复后重跑即可）: {e}')
             return
         hist = hist or {}
@@ -82,7 +82,7 @@ class Command(BaseCommand):
         for item in hist.get('items', []):
             try:
                 day = pd.to_datetime(item.get('date')).date()
-            except Exception:
+            except (TypeError, ValueError):
                 skipped_invalid += 1
                 continue
             if not isinstance(day, date_cls) or day > cutoff or item.get('main_net') is None:

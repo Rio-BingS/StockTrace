@@ -55,7 +55,7 @@ class Command(BaseCommand):
         for stock in stocks:
             try:
                 n = fetch_daily_data(stock, full=True, sources=sources)
-            except Exception as e:  # noqa: BLE001  单只失败不影响其余
+            except Exception as e:  # noqa: BLE001 命令边界：单只失败不影响其余
                 self.stdout.write(self.style.ERROR(f"  {stock.code}: 失败 - {e}"))
                 failed += 1
                 continue
@@ -90,7 +90,7 @@ class Command(BaseCommand):
                     count = fetch_stock_all_data(stock, light=True)
                 else:
                     count = fetch_stock_all_data(stock, days_back=days)
-            except Exception as e:  # noqa: BLE001  单只失败不影响其余
+            except Exception as e:  # noqa: BLE001 命令边界：单只失败不影响其余
                 failed += 1
                 self.stdout.write(self.style.ERROR(f"  {stock.code}: 失败 - {e}"))
             else:
@@ -131,7 +131,7 @@ class Command(BaseCommand):
             self.stdout.write(f'正在拉取 {stock.code} {stock.name} 数据...')
             try:
                 count = fetch_stock_all_data(stock, days_back=options['days'] or 5)
-            except Exception as e:  # noqa: BLE001
+            except Exception as e:  # noqa: BLE001 命令边界：单只拉取失败转为命令失败退出码
                 self._fail(f'{stock.code}: 失败 - {e}')
             self.stdout.write(
                 self.style.SUCCESS(f"完成，{count} 条日K线数据")

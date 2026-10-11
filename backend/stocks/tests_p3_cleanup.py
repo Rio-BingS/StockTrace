@@ -237,3 +237,32 @@ class AlertPushTests(SimpleTestCase):
                 patch('stocks.alerts.requests.post', side_effect=requests.ConnectionError('down')), \
                 self.assertLogs('stocks.alerts', level='WARNING'):
             self.assertFalse(alerts.push_message('t', 'd'))
+
+
+class BackfillInvalidDateTests(TestCase):
+    """5d 管理命令：大盘资金流回补的日期解析收窄到 TypeError/ValueError 后，坏日期仍只计入跳过"""
+
+    def test_bad_dates_are_skipped_not_raised(self):
+        from io import StringIO
+
+        from django.core.management import call_command
+
+        from stocks.market import flows
+
+        good = timezone.localdate() - timedelta(days=5)
+        items = [
+            {'date': 'x', 'main_net': 1.0},
+            {'date': [1], 'main_net': 1.0},
+            {'date': good.isoformat(), 'main_net': 1.0e10, 'small_net': 1.0, 'mid_net': 1.0,
+             'large_net': 1.0, 'super_net': 1.0},
+        ]
+        hist = {'available': True, 'source': flows.MARKET_FUND_SOURCE_EM, 'items': items, 'message': ''}
+        out = StringIO()
+        with patch('stocks.market.flows.fetch_market_fund_flow_hist', return_value=hist), \
+                patch('stocks.trading_calendar.expected_latest_date', return_value=good):
+            call_command('backfill_market_snapshots', stdout=out, stderr=StringIO())
+        from stocks.models import MarketDailySnapshot
+
+        self.assertTrue(MarketDailySnapshot.objects.filter(
+            kind=MarketDailySnapshot.KIND_MARKET_FF, trade_date=good).exists())
+        self.assertIn('无效/未收盘跳过 2 天', out.getvalue())

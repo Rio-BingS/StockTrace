@@ -49,8 +49,8 @@ class Command(BaseCommand):
                     days.append(day)
                     if len(days) == n_days:
                         break
-            except Exception:
-                self.stderr.write('交易日历查询异常，中止')
+            except Exception as e:  # noqa: BLE001 命令边界：日历任何异常都中止回补并提示原因
+                self.stderr.write(f'交易日历查询异常，中止: {e}')
                 return
             day -= timedelta(days=1)
         if not days:
