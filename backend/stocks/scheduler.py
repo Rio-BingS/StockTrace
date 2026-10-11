@@ -117,13 +117,13 @@ def _acquire_lock():
         _lock_fh.write(str(os.getpid()))
         _lock_fh.flush()
         return True
-    except Exception as e:
-        logger.warning(f"调度文件锁获取失败: {e}")
+    except OSError as e:
+        logger.warning("调度文件锁获取失败: %s", e)
         if _lock_fh is not None:
             try:
                 _lock_fh.close()
-            except Exception:
-                pass
+            except OSError:
+                logger.debug("关闭调度锁文件失败", exc_info=True)
             _lock_fh = None
         return False
 
@@ -143,12 +143,13 @@ def _release_lock():
         else:
             import fcntl
             fcntl.flock(_lock_fh.fileno(), fcntl.LOCK_UN)
-    except Exception:
-        pass
+    except OSError:
+        # 进程退出时内核也会释放 flock，解锁失败不影响后续
+        logger.debug("释放调度锁失败", exc_info=True)
     try:
         _lock_fh.close()
-    except Exception:
-        pass
+    except OSError:
+        logger.debug("关闭调度锁文件失败", exc_info=True)
     _lock_fh = None
 
 
@@ -162,10 +163,11 @@ def _run_steps(job_name, steps):
         try:
             step()
         except Exception:
+            # 任务链边界：任一步骤的任何异常都不能跳过后面的步骤
             failed.append(name)
-            logger.exception(f'定时任务 {job_name} 的步骤「{name}」失败，继续后续步骤')
+            logger.exception("定时任务 %s 的步骤「%s」失败，继续后续步骤", job_name, name)
     if failed:
-        logger.error(f'定时任务 {job_name} 完成，失败步骤：{"、".join(failed)}')
+        logger.error("定时任务 %s 完成，失败步骤：%s", job_name, "、".join(failed))
     return failed
 
 
@@ -193,7 +195,7 @@ def _evaluate_alerts():
     from .alerts import evaluate_alerts
     try:
         evaluate_alerts()
-    except Exception:
+    except Exception:  # 边界：提醒评估失败不影响主任务
         logger.exception("价格提醒评估失败")
 
 
@@ -208,9 +210,9 @@ def _cleanup_ai_logs():
         cutoff = timezone.now() - timedelta(days=days)
         deleted, _ = AiCallLog.objects.filter(created_at__lt=cutoff).delete()
         if deleted:
-            logger.info(f"清理 {days} 天前的 AI 调用记录 {deleted} 条")
-    except Exception as e:
-        logger.error(f"AI 调用记录清理失败: {e}")
+            logger.info("清理 %s 天前的 AI 调用记录 %s 条", days, deleted)
+    except Exception as e:  # 边界：清理失败只记日志，不影响同一任务链的其他步骤
+        logger.exception("AI 调用记录清理失败: %s", e)
 
 
 def _cleanup_ai_jobs():
@@ -223,7 +225,7 @@ def _cleanup_ai_jobs():
     interrupted, expired = ai_jobs.recover_stale()
     deleted = ai_jobs.prune()
     if interrupted or expired or deleted:
-        logger.info(f"AI 后台任务清理：中断 {interrupted}、排队超时 {expired}、删除 {deleted} 条")
+        logger.info("AI 后台任务清理：中断 %s、排队超时 %s、删除 %s 条", interrupted, expired, deleted)
 
 
 def _cleanup_market_snapshots():
@@ -237,9 +239,9 @@ def _cleanup_market_snapshots():
         cutoff = timezone.localdate() - timedelta(days=days)
         deleted, _ = MarketDailySnapshot.objects.filter(trade_date__lt=cutoff).delete()
         if deleted:
-            logger.info(f"清理 {days} 天前的市场日度快照 {deleted} 行")
-    except Exception as e:
-        logger.error(f"市场日度快照清理失败: {e}")
+            logger.info("清理 %s 天前的市场日度快照 %s 行", days, deleted)
+    except Exception as e:  # 边界：清理失败只记日志，不影响同一任务链的其他步骤
+        logger.exception("市场日度快照清理失败: %s", e)
 
 
 MINUTE_BAR_DELETE_BATCH = 5000
@@ -268,7 +270,7 @@ def _minute_bar_cleanup_job():
         if deleted < MINUTE_BAR_DELETE_BATCH:
             break
     if total:
-        logger.info(f"清理 {days} 天前的分钟K线 {total} 行")
+        logger.info("清理 %s 天前的分钟K线 %s 行", days, total)
     return total
 
 
@@ -323,9 +325,9 @@ def _detector_dependencies_ready(trade_date):
     if not missing:
         return True, 'ready'
     if timezone.localtime().time() >= _DETECTOR_LAST_ATTEMPT:
-        logger.warning(f'探测器最后一次尝试：当日快照仍缺 {missing}，降级扫描')
+        logger.warning("探测器最后一次尝试：当日快照仍缺 %s，降级扫描", missing)
         return True, 'degraded'
-    logger.warning(f'探测器延后：当日快照未落库 {missing}，30 分钟后重试')
+    logger.warning("探测器延后：当日快照未落库 %s，30 分钟后重试", missing)
     return False, 'waiting'
 
 
@@ -358,7 +360,7 @@ def _detector_scan_job():
 
     try:
         run_scan()
-    except Exception:
+    except Exception:  # 边界：扫描失败只记日志，不影响调度器
         logger.exception('探测器扫描失败')
 
 
@@ -376,7 +378,7 @@ def _guarded(func, lock_name, wait=_INTRADAY_SKIP):
     def wrapper(*args, **kwargs):
         lock = TaskLock(lock_name)
         if not lock.acquire(timeout=wait):
-            logger.warning(f'定时任务 {func.__name__} 跳过：任务锁 {lock_name} 被占用（已等待 {wait}s）')
+            logger.warning("定时任务 %s 跳过：任务锁 %s 被占用（已等待 %ss）", func.__name__, lock_name, wait)
             return None
         try:
             return func(*args, **kwargs)
@@ -477,7 +479,7 @@ def write_heartbeat(sched, running=True):
             if job.id == HEARTBEAT_JOB_ID:
                 continue
             jobs.append({'id': job.id, 'next_run_time': _iso(getattr(job, 'next_run_time', None))})
-    except Exception:
+    except Exception:  # 边界：心跳不能因读取任务列表失败而中断
         logger.exception('读取调度任务列表失败')
     with _hb_lock:
         payload = {
@@ -496,8 +498,8 @@ def write_heartbeat(sched, running=True):
             with open(tmp, 'w', encoding='utf-8') as fh:
                 json.dump(payload, fh, ensure_ascii=False)
             os.replace(tmp, path)
-        except Exception as e:
-            logger.warning(f'调度心跳写入失败 {path}: {e}')
+        except (OSError, TypeError, ValueError) as e:
+            logger.warning("调度心跳写入失败 %s: %s", path, e)
 
 
 def _make_job_listener(sched):
@@ -507,10 +509,10 @@ def _make_job_listener(sched):
         if event.code == EVENT_JOB_ERROR:
             status = 'error'
             # APScheduler 自身已在 apscheduler.executors.* 记录带堆栈的 ERROR，这里补一条业务口径
-            logger.error(f'定时任务 {event.job_id} 执行失败: {event.exception!r}')
+            logger.error("定时任务 %s 执行失败: %r", event.job_id, event.exception)
         elif event.code == EVENT_JOB_MISSED:
             status = 'missed'
-            logger.warning(f'定时任务 {event.job_id} 错过执行时间 {event.scheduled_run_time}（超出 misfire 宽限）')
+            logger.warning("定时任务 %s 错过执行时间 %s（超出 misfire 宽限）", event.job_id, event.scheduled_run_time)
         else:
             status = 'ok'
         with _hb_lock:
@@ -564,14 +566,14 @@ def _start_web_scheduler_locked():
     scheduler = attach_heartbeat(build_scheduler(), mode='web')
     scheduler.start()
     write_heartbeat(scheduler)
-    logger.info(_STARTED_MSG + "，运行于 Web 进程（兼容模式）")
+    logger.info("%s，运行于 Web 进程（兼容模式）", _STARTED_MSG)
 
 
 def _retry_lock_loop(interval):
     """后台线程：每 interval 秒重试一次调度锁，拿到即启动调度器；stop() 置位后退出。"""
     while not _retry_stop.wait(interval):
         if not _acquire_lock():
-            logger.warning(f"调度锁仍被其他进程持有，{interval}s 后重试")
+            logger.warning("调度锁仍被其他进程持有，%ss 后重试", interval)
             continue
         with _start_mutex:
             if _retry_stop.is_set() or scheduler is not None:
@@ -603,7 +605,7 @@ def start(retry_seconds=None):
         if _acquire_lock():
             _start_web_scheduler_locked()
             return
-        logger.warning(f"APScheduler 暂未启动：其他进程已持有调度锁，后台每 {interval}s 重试")
+        logger.warning("APScheduler 暂未启动：其他进程已持有调度锁，后台每 %ss 重试", interval)
         _retry_thread = threading.Thread(
             target=_retry_lock_loop, args=(interval,), daemon=True, name='scheduler-lock-retry',
         )
@@ -618,7 +620,8 @@ def stop():
             try:
                 scheduler.shutdown(wait=False)
             except Exception:
-                pass
+                # 边界：已停止（SchedulerNotRunningError）等任何异常都不能阻止释放锁
+                logger.debug("调度器停止异常", exc_info=True)
             write_heartbeat(scheduler, running=False)
             scheduler = None
         _release_lock()
@@ -635,7 +638,7 @@ def run_forever(stop_event, lock_retry_seconds=60):
     """
     global scheduler
     while not _acquire_lock():
-        logger.warning(f"调度锁被其他进程持有，{lock_retry_seconds}s 后重试")
+        logger.warning("调度锁被其他进程持有，%ss 后重试", lock_retry_seconds)
         if stop_event.wait(lock_retry_seconds):
             return False
 
@@ -644,14 +647,14 @@ def run_forever(stop_event, lock_retry_seconds=60):
     try:
         sched.start()
         write_heartbeat(sched)
-        logger.info(_STARTED_MSG + f"，独立进程 pid={os.getpid()}")
+        logger.info("%s，独立进程 pid=%s", _STARTED_MSG, os.getpid())
         stop_event.wait()
         logger.info("收到退出信号，等待正在执行的任务结束后关闭调度器")
     finally:
         try:
             if sched.running:
                 sched.shutdown(wait=True)
-        except Exception:
+        except Exception:  # 边界：关闭异常不能阻止写心跳与释放锁
             logger.exception("调度器关闭异常")
         write_heartbeat(sched, running=False)
         scheduler = None

@@ -103,3 +103,45 @@ class DataSourceLoggingTests(SimpleTestCase):
         with patch('stocks.trading_calendar.is_trading_day', side_effect=RuntimeError('x')):
             with self.assertLogs('stocks.trading_calendar', level='WARNING'):
                 self.assertIsNone(trading_calendar.expected_latest_date())
+
+
+class SchedulerLoggingTests(SimpleTestCase):
+    """5d 调度：文件锁收窄到 OSError，原先静默吞掉的解锁/关闭/停止失败补 debug 日志"""
+
+    def test_lock_open_failure_returns_false(self):
+        from stocks import scheduler as sch
+
+        with patch.object(sch, '_lock_fh', None), \
+                patch('builtins.open', side_effect=PermissionError('ro')), \
+                self.assertLogs('stocks.scheduler', level='WARNING') as cm:
+            self.assertFalse(sch._acquire_lock())
+        self.assertIn('调度文件锁获取失败', cm.output[0])
+
+    def test_release_close_failure_logged(self):
+        from unittest.mock import MagicMock
+
+        from stocks import scheduler as sch
+
+        fh = MagicMock()
+        fh.close.side_effect = OSError('io')
+        with patch.object(sch, '_lock_fh', fh), patch('fcntl.flock'), \
+                self.assertLogs('stocks.scheduler', level='DEBUG') as cm:
+            sch._release_lock()
+            self.assertIsNone(sch._lock_fh)
+        self.assertTrue(any('关闭调度锁文件失败' in m for m in cm.output))
+
+    def test_stop_shutdown_error_still_releases(self):
+        from unittest.mock import MagicMock
+
+        from stocks import scheduler as sch
+
+        fake = MagicMock()
+        fake.shutdown.side_effect = RuntimeError('not running')
+        with patch.object(sch, 'scheduler', fake), patch.object(sch, 'write_heartbeat'), \
+                patch.object(sch, '_release_lock') as rel, \
+                self.assertLogs('stocks.scheduler', level='DEBUG') as cm:
+            sch.stop()
+            self.assertIsNone(sch.scheduler)
+        rel.assert_called_once()
+        self.assertTrue(any('调度器停止异常' in m for m in cm.output))
+        sch._retry_stop.clear()

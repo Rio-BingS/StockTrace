@@ -145,8 +145,8 @@ def _drain_pending(run_id):
             _state['task'] = 'one'
         try:
             done.append(_do_one(run_id, stock_id, True))
-        except Exception:
-            logger.exception(f"补拉排队股票 {stock_id} 失败")
+        except Exception:  # 边界：单只补拉失败不影响其余排队股票
+            logger.exception("补拉排队股票 %s 失败", stock_id)
 
 
 def _worker(run_id, job, args, lock, lock_held):
@@ -164,8 +164,8 @@ def _worker(run_id, job, args, lock, lock_held):
         if extra:
             result = {'main': result, 'pending': extra}
         _finish(run_id, last_results=result, last_status='success', last_error=None)
-    except Exception as e:
-        logger.exception(f"后台拉取任务 {job.__name__} 失败")
+    except Exception as e:  # 后台线程边界：任何异常都要落到任务状态里，否则前端一直显示运行中
+        logger.exception("后台拉取任务 %s 失败", job.__name__)
         try:
             _drain_pending(run_id)
         except Exception:
@@ -201,7 +201,7 @@ def _start(task, job, args, queue_stock_id=None):
     t = threading.Thread(target=_worker, args=(run_id, job, args, lock, lock_held), daemon=True)
     try:
         t.start()
-    except Exception:
+    except Exception:  # 只做清理后原样抛出
         if lock_held:
             lock.release()
         _finish(run_id, last_status='error', last_error='后台线程启动失败')
