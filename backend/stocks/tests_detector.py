@@ -319,11 +319,14 @@ class SectorSignalScanTests(TestCase):
 class ReviewTests(TestCase):
     """回看与调参：兑现推进状态、权重有界调整、样本不足不动参数。
 
-    每个信号用独立的股票（信号日=基期日，基期日必有行情）：
-    回看的基期收盘取信号日当天的 quote，信号日之后还要有 ≥1 根行情。
+    口径（ALG-05）：后续必须凑满 5 个交易日、基期为 T+1 开盘、阈值 k×σ20、
+    命中率与同标的无条件基线比较。每个信号用独立的股票：
+    - 信号日之前造 40 根「历史」日线，用来算 σ20 与基线：history='down' 为稳步
+      下行（做多基线≈0，信号兑现即跑赢基线），'up' 为稳步上行（做多基线≈1）；
+    - 信号日之后按 moves（相对信号日收盘的涨跌%）造后续日线，开盘=收盘。
     """
 
-    def _make_stock_with_moves(self, code, moves):
+    def _make_stock_with_moves(self, code, moves, history='down'):
         """造自选股 + 日线。DailyQuote 的派生字段有 NOT NULL 约束，
         必须先算（compute_derived_fields）再存。moves 为信号日后逐日涨跌%。"""
         stock = Stock.objects.create(code=code, name=code)
@@ -332,8 +335,8 @@ class ReviewTests(TestCase):
         def _quote(day, close, prev_close=None):
             q = DailyQuote(
                 stock=stock, trade_date=day,
-                open_price=close, close_price=close,
-                high_price=close * 1.01, low_price=close * 0.99,
+                open_price=round(close, 3), close_price=round(close, 3),
+                high_price=round(close * 1.01, 3), low_price=round(close * 0.99, 3),
                 volume=1000000,
             )
             q.prev_close = prev_close
@@ -341,6 +344,14 @@ class ReviewTests(TestCase):
             q.save()
             return q
 
+        # 历史：交替 -0.2%/-0.6%（或 +0.6%/+0.2%）的稳步漂移，σ20≈0.2
+        steps = [-0.2, -0.6] if history == 'down' else [0.6, 0.2]
+        closes = [10.0]
+        for i in range(40):
+            closes.append(closes[-1] / (1 + steps[i % 2] / 100))
+        closes.reverse()  # closes[-1] == 10 落在信号日
+        for i, close in enumerate(closes[:-1]):
+            _quote(base_date - timedelta(days=len(closes) - 1 - i), close)
         _quote(base_date, 10)
         prev = 10
         for i, pct in enumerate(moves, start=1):
@@ -349,10 +360,10 @@ class ReviewTests(TestCase):
             prev = close
         return stock, base_date
 
-    def _make_signal(self, code, base_date, direction='up', dims=None):
+    def _make_signal(self, code, base_date, direction='up', dims=None, cycles=2):
         return DetectorSignal.objects.create(
             target_kind='stock', target_code=code, target_name=code,
-            trade_date=base_date, direction=direction, cycles=2, score=60,
+            trade_date=base_date, direction=direction, cycles=cycles, score=60,
             severity=DetectorSignal.SEVERITY_MEDIUM,
             status=DetectorSignal.STATUS_ACTIVE,
             dimensions=dims or {
@@ -363,9 +374,9 @@ class ReviewTests(TestCase):
             },
         )
 
-    def _seed_hit_signals(self, prefix, n=3):
+    def _seed_hit_signals(self, prefix, n=review.MIN_ADJ_SAMPLES):
         for i in range(n):
-            _stock, base_date = self._make_stock_with_moves(f'6001{i}0', [0.5, 1.2, 2.2])
+            _stock, base_date = self._make_stock_with_moves(f'6001{i}0', [0.5, 1.2, 2.2, 2.5, 2.8])
             self._make_signal(f'6001{i}0', base_date)
         return base_date
 
@@ -374,9 +385,11 @@ class ReviewTests(TestCase):
         configs = {c['key']: c for c in scan.load_configs()}
         with patch('stocks.services.is_trading_day', _trading_true):
             summary = review.review_pending(_TODAY, configs)
-        self.assertEqual(summary['reviewed'], 3)
-        self.assertEqual(summary['hits'], 3)
+        n = review.MIN_ADJ_SAMPLES
+        self.assertEqual(summary['reviewed'], n)
+        self.assertEqual(summary['hits'], n)
         self.assertEqual(summary['hit_rate'], 1.0)
+        self.assertLess(summary['baseline_rate'], 0.2)
         for sig in DetectorSignal.objects.all():
             self.assertEqual(sig.status, DetectorSignal.STATUS_CONFIRMED)
             self.assertTrue(sig.review_hit)
@@ -384,19 +397,22 @@ class ReviewTests(TestCase):
         self.assertGreater(cfg.weight, 1.0)
 
     def test_miss_marks_and_adjusts_weight_down(self):
-        for i in range(3):
-            _stock, base_date = self._make_stock_with_moves(f'6002{i}0', [-0.5, -1.0, -1.5])
+        # 后续 5 日完整、一路下跌；历史稳步上行，做多基线≈1 → 明显跑输基线
+        for i in range(review.MIN_ADJ_SAMPLES):
+            _stock, base_date = self._make_stock_with_moves(
+                f'6002{i}0', [-0.5, -1.0, -1.5, -1.8, -2.0], history='up')
             self._make_signal(f'6002{i}0', base_date)
         configs = {c['key']: c for c in scan.load_configs()}
         with patch('stocks.services.is_trading_day', _trading_true):
             summary = review.review_pending(_TODAY, configs)
         self.assertEqual(summary['hits'], 0)
+        self.assertEqual(summary['reviewed'], review.MIN_ADJ_SAMPLES)
         cfg = DetectorDimConfig.objects.get(key='vol_ratio_slope')
         self.assertLess(cfg.weight, 1.0)
 
     def test_weight_adjustment_is_bounded(self):
-        for i in range(3):
-            _stock, base_date = self._make_stock_with_moves(f'6003{i}0', [3.0, 3.0, 3.0])
+        for i in range(review.MIN_ADJ_SAMPLES):
+            _stock, base_date = self._make_stock_with_moves(f'6003{i}0', [3.0, 3.0, 3.0, 3.5, 4.0])
             self._make_signal(f'6003{i}0', base_date)
         DetectorDimConfig.objects.create(
             key='vol_ratio_slope', name='量比斜率', weight=1.98,
@@ -410,11 +426,12 @@ class ReviewTests(TestCase):
         self.assertLessEqual(cfg.weight, 2.0)
 
     def test_single_sample_does_not_adjust(self):
-        _stock, base_date = self._make_stock_with_moves('600004', [2.0])
+        _stock, base_date = self._make_stock_with_moves('600004', [2.0, 2.1, 2.2, 2.3, 2.4])
         self._make_signal('600004', base_date)
         configs = {c['key']: c for c in scan.load_configs()}
         with patch('stocks.services.is_trading_day', _trading_true):
-            review.review_pending(_TODAY, configs)
+            summary = review.review_pending(_TODAY, configs)
+        self.assertEqual(summary['reviewed'], 1)
         cfg = DetectorDimConfig.objects.get(key='vol_ratio_slope')
         self.assertEqual(cfg.weight, 1.0)
 

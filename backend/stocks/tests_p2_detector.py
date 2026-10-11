@@ -466,3 +466,115 @@ class CycleCountTests(TestCase):
             data, _ = signals.evaluate_target(ctx, configs)
         self.assertEqual(data['cycles'], 1)
         self.assertTrue(data['cycles_unknown'])
+
+
+def _always_trading(day=None):
+    return True
+
+
+@patch('stocks.services.is_trading_day', _always_trading)
+class ReviewProtocolTests(TestCase):
+    """ALG-05：回看要求满 5 个交易日、基期 T+1 开盘、MAE 先到判未兑现、基线比较、段首计样本。"""
+
+    def setUp(self):
+        from .tests_detector import ReviewTests
+
+        self.seed = ReviewTests()
+
+    def _review_outcome(self, code, base_date, direction='up', cycles=2):
+        from .detector import review
+
+        sig = self.seed._make_signal(code, base_date, direction=direction, cycles=cycles)
+        return review._stock_outcome(sig, {})
+
+    def test_incomplete_window_stays_pending(self):
+        _s, base_date = self.seed._make_stock_with_moves('600101', [2.0, 2.5, 3.0])
+        self.assertIsNone(self._review_outcome('600101', base_date))
+
+    def test_gap_inside_window_stays_pending(self):
+        from .models import DailyQuote
+
+        _s, base_date = self.seed._make_stock_with_moves('600102', [1.0, 2.0, 2.5, 3.0, 3.5, 3.6])
+        DailyQuote.objects.filter(stock__code='600102', trade_date=base_date + timedelta(days=2)).delete()
+        self.assertIsNone(self._review_outcome('600102', base_date))
+
+    def test_adverse_excursion_first_is_a_miss(self):
+        # 先跌 3% 再涨回 +3%：旧口径（只看 MFE）算兑现，新口径 MAE 先触及阈值 → 未兑现
+        _s, base_date = self.seed._make_stock_with_moves('600103', [0.0, -3.0, -1.0, 2.0, 3.0])
+        out = self._review_outcome('600103', base_date)
+        self.assertIsNotNone(out)
+        self.assertFalse(out['hit'])
+        self.assertLess(out['thr'], 3.0)  # 窗口末 +3% 早已超过阈值，但 MAE 先到
+
+    def test_base_is_next_day_open(self):
+        from decimal import Decimal
+
+        from .models import DailyQuote
+
+        # T+1 跳空高开 3%，之后窗口内基本横盘：相对 T 日收盘涨了 3%，但 T 日收盘买不到
+        _s, base_date = self.seed._make_stock_with_moves('600104', [3.0, 3.0, 3.05, 3.0, 2.95])
+        DailyQuote.objects.filter(stock__code='600104', trade_date=base_date + timedelta(days=1)) \
+            .update(open_price=Decimal('10.300'))
+        out = self._review_outcome('600104', base_date)
+        self.assertIsNotNone(out)
+        self.assertFalse(out['hit'])
+
+    def test_threshold_scales_with_own_volatility(self):
+        from .detector import review
+
+        _s, base_date = self.seed._make_stock_with_moves('600105', [0.5, 1.0, 1.5, 2.0, 2.5])
+        out = self._review_outcome('600105', base_date)
+        self.assertIsNotNone(out)
+        self.assertLess(out['thr'], review.HIT_PCT)  # 历史 σ≈0.2，低于固定 1.5%
+        self.assertIsNotNone(out['baseline'])
+
+    def test_only_segment_head_counts_for_tuning(self):
+        from .detector import review, scan
+        from .models import DetectorDimConfig
+
+        for i in range(review.MIN_ADJ_SAMPLES):
+            code = f'6006{i}0'
+            _s, base_date = self.seed._make_stock_with_moves(code, [0.5, 1.2, 2.2, 2.5, 2.8])
+            self.seed._make_signal(code, base_date, cycles=3)  # 信号段中段，窗口与段首重叠
+        configs = {c['key']: c for c in scan.load_configs()}
+        summary = review.review_pending(_TODAY, configs)
+        self.assertEqual(summary['reviewed'], review.MIN_ADJ_SAMPLES)
+        self.assertEqual(summary['adjustments'], [])
+        self.assertEqual(DetectorDimConfig.objects.get(key='vol_ratio_slope').weight, 1.0)
+
+    def test_hits_matching_baseline_do_not_tune(self):
+        from .detector import review, scan
+        from .models import DetectorDimConfig
+
+        # 历史稳步上行（做多基线≈1），信号也兑现：命中率≈基线，没有超额，不调参
+        for i in range(review.MIN_ADJ_SAMPLES):
+            code = f'6007{i}0'
+            _s, base_date = self.seed._make_stock_with_moves(
+                code, [0.5, 1.2, 2.2, 2.5, 2.8], history='up')
+            self.seed._make_signal(code, base_date)
+        configs = {c['key']: c for c in scan.load_configs()}
+        summary = review.review_pending(_TODAY, configs)
+        self.assertEqual(summary['hits'], review.MIN_ADJ_SAMPLES)
+        self.assertEqual(summary['adjustments'], [])
+        self.assertEqual(DetectorDimConfig.objects.get(key='vol_ratio_slope').weight, 1.0)
+
+    def test_sector_review_needs_full_window_and_uses_signal_close(self):
+        from .detector import review
+        from .models import DetectorSignal, MarketDailySnapshot
+
+        base_date = _TODAY - timedelta(days=10)
+        pcts = [(-0.3 if i % 2 else -0.1) for i in range(40)] + [0.0] + [0.5, 0.6, 0.4, 0.3, 0.2]
+        start = base_date - timedelta(days=40)
+        for i, pct in enumerate(pcts):
+            MarketDailySnapshot.objects.create(
+                kind=MarketDailySnapshot.KIND_INDUSTRY_FF, trade_date=start + timedelta(days=i),
+                payload=[{'name': '甲', 'net': 1e8, 'change_pct': pct}])
+        sig = DetectorSignal.objects.create(
+            target_kind='industry', target_code='甲', target_name='甲', trade_date=base_date,
+            direction='up', cycles=2, status=DetectorSignal.STATUS_ACTIVE)
+        out = review._sector_outcome(sig, {})
+        self.assertIsNotNone(out)
+        self.assertTrue(out['hit'])
+        # 删掉窗口内一天的快照 → 窗口不连续，保持待回看
+        MarketDailySnapshot.objects.filter(trade_date=base_date + timedelta(days=3)).delete()
+        self.assertIsNone(review._sector_outcome(sig, {}))

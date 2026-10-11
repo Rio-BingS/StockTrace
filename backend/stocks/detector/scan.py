@@ -133,7 +133,7 @@ def _stale_reason(ctx, trade_date):
 def _warm_review_sources():
     """回看前把指数日线拉进缓存，让 review_pending 在事务内不再触网。
 
-    个股/板块回看只读本地表；指数回看要上游日线（与 review._index_move
+    个股/板块回看只读本地表；指数回看要上游日线（与 review._index_outcome
     同一 days 参数即同一缓存键）。失败无妨：事务内会再试一次并如实跳过。
     """
     from ..market import indices
@@ -337,6 +337,8 @@ def run_scan(trade_date=None):
         'reviewed': review_summary.get('reviewed', 0),
         'hits': review_summary.get('hits', 0),
         'hit_rate': review_summary.get('hit_rate'),
+        # 同标的无条件基线命中率（ALG-05）：hit_rate 要和它比才有意义
+        'baseline_rate': review_summary.get('baseline_rate'),
         'degraded_count': len(degraded),
         'adjustments': len(adjustments),
     }

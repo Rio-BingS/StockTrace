@@ -595,22 +595,24 @@ class FinalBarReadersTests(TestCase):
     def test_review_ignores_intraday_bars(self):
         from types import SimpleNamespace
 
-        from .detector.review import _stock_move
+        from .detector.review import _stock_outcome
         self._bar(date(2026, 9, 1), 10)
         self._bar(date(2026, 9, 2), 10.2)
         self._bar(date(2026, 9, 3), 12, is_final=False)  # 盘中价不算兑现
         signal = SimpleNamespace(target_code='600000', trade_date=date(2026, 9, 1),
-                                 score=1.0, direction='up')
-        move, hit_date = _stock_move(signal)
-        self.assertAlmostEqual(move, 2.0)
-        self.assertEqual(hit_date, date(2026, 9, 2))
+                                 score=1.0, direction='up', cycles=2)
+        # 盘中 bar 不计入后续窗口：已收盘的后续行情不满 5 个交易日，保持待回看（ALG-05）
+        with patch('stocks.services.is_trading_day', lambda d=None: True):
+            self.assertIsNone(_stock_outcome(signal, {}))
 
     def test_review_base_must_be_final(self):
         from types import SimpleNamespace
 
-        from .detector.review import _stock_move
+        from .detector.review import _stock_outcome
         self._bar(date(2026, 9, 1), 10, is_final=False)
-        self._bar(date(2026, 9, 2), 10.2)
+        for day in range(2, 7):
+            self._bar(date(2026, 9, day), 10.2)
         signal = SimpleNamespace(target_code='600000', trade_date=date(2026, 9, 1),
-                                 score=1.0, direction='up')
-        self.assertEqual(_stock_move(signal), (None, None))
+                                 score=1.0, direction='up', cycles=2)
+        with patch('stocks.services.is_trading_day', lambda d=None: True):
+            self.assertIsNone(_stock_outcome(signal, {}))

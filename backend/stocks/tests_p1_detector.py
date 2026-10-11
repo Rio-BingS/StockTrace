@@ -9,7 +9,7 @@ from unittest.mock import patch
 
 from django.test import TestCase
 
-from .detector import dimensions, scan, signals
+from .detector import dimensions, review, scan, signals
 from .models import DetectorDimConfig, DetectorSignal
 from .tests_detector import _TODAY, _trading_true, _vote_config
 
@@ -176,10 +176,11 @@ class SameDayRerunTests(TestCase):
         from .tests_detector import ReviewTests
 
         seeder = ReviewTests()
-        seeder._seed_hit_signals('6001')  # 3 条可回看且全部命中的 active 信号
+        seeder._seed_hit_signals('6001')  # MIN_ADJ_SAMPLES 条可回看且全部命中的 active 信号
+        n = review.MIN_ADJ_SAMPLES
         with _scan_patches(targets=[]):
             first = scan.run_scan()
-        self.assertEqual(first['reviewed'], 3)
+        self.assertEqual(first['reviewed'], n)
         self.assertTrue(first['adjustments'])
         run = DetectorRun.objects.get(trade_date=_TODAY)
         audit = list(run.adjustments)
@@ -190,8 +191,8 @@ class SameDayRerunTests(TestCase):
         self.assertEqual(second['reviewed'], 0)
         run.refresh_from_db()
         self.assertEqual(run.adjustments, audit)  # 第二次没有用空值覆盖
-        self.assertEqual(run.reviewed_count, 3)
-        self.assertEqual(run.hit_count, 3)
+        self.assertEqual(run.reviewed_count, n)
+        self.assertEqual(run.hit_count, n)
         self.assertEqual(run.hit_rate, 1.0)
 
     def test_rerun_without_signal_deletes_today_row(self):
