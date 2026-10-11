@@ -3,6 +3,8 @@ import axios from 'axios'
 const api = axios.create({
   baseURL: '/api',
   timeout: 15000,
+  // 后端据此区分前端 XHR 与跨站表单提交（SEC-03），勿删
+  headers: { 'X-Requested-With': 'XMLHttpRequest' },
 })
 
 // 股票相关 API

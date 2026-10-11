@@ -117,7 +117,10 @@ MIDDLEWARE = [
     'django.contrib.sessions.middleware.SessionMiddleware',
     'corsheaders.middleware.CorsMiddleware',
     'django.middleware.common.CommonMiddleware',
-    # CsrfViewMiddleware 已移除：纯 API 项目，访问控制在 Nginx Basic Auth 层完成
+    # 恢复 CsrfViewMiddleware 保护 admin（SEC-03）；DRF 视图自带 csrf_exempt 不受影响
+    'django.middleware.csrf.CsrfViewMiddleware',
+    # /api/ 写请求的来源校验（SEC-03），规则见 StockTrace/middleware.py
+    'StockTrace.middleware.ApiOriginCheckMiddleware',
     'django.contrib.auth.middleware.AuthenticationMiddleware',
     'django.contrib.messages.middleware.MessageMiddleware',
     'django.middleware.clickjacking.XFrameOptionsMiddleware',
@@ -226,6 +229,11 @@ CSRF_TRUSTED_ORIGINS = list(STOCKTRACE_TRUSTED_ORIGINS)
 # CSRF Origin 校验（https 源 vs http 请求）必然 403。Nginx 必须覆盖写入该头
 # （proxy_set_header X-Forwarded-Proto $scheme），否则客户端可伪造。
 SECURE_PROXY_SSL_HEADER = ('HTTP_X_FORWARDED_PROTO', 'https')
+# /api/ 写请求：浏览器发出（带 Origin/Sec-Fetch-*/Referer）却缺少 X-Requested-With 时拒绝（SEC-03）。
+# 跨站/不受信 Origin 无论此开关一律拒绝；仅在排查兼容问题时临时设 0
+STOCKTRACE_CSRF_REQUIRE_HEADER = (
+    os.environ.get('STOCKTRACE_CSRF_REQUIRE_HEADER', '1').lower() not in ('0', 'false', 'no')
+)
 # 生产默认 Cookie 只走 HTTPS；本地 http 调试 admin 时可设 STOCKTRACE_SECURE_COOKIES=0
 _secure_cookies = os.environ.get('STOCKTRACE_SECURE_COOKIES', '')
 SECURE_COOKIES = (
@@ -241,7 +249,7 @@ SECURE_HSTS_INCLUDE_SUBDOMAINS = (
 )
 
 # DRF
-# ⚠️ 安全边界：本应用自身没有任何认证/授权（AllowAny、无 CSRF），
+# ⚠️ 安全边界：本应用自身没有任何认证/授权（AllowAny；CSRF 仅靠 /api/ 来源校验中间件），
 # 所有访问控制都依赖反向代理层的 Nginx HTTP Basic Auth。
 # 因此：
 #   1. Gunicorn 只绑定 127.0.0.1，绝不能直接对公网暴露 8000 端口；

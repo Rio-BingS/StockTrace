@@ -242,3 +242,89 @@ class AdminLoginBehindHttpsProxyTests(TestCase):
     def test_untrusted_origin_still_rejected(self):
         resp = self._login(HTTP_ORIGIN='https://evil.example.com')
         self.assertEqual(resp.status_code, 403)
+
+
+@override_settings(ALLOWED_HOSTS=[_HOST, 'testserver'], STOCKTRACE_TRUSTED_ORIGINS=[_ORIGIN])
+class ApiOriginCheckTests(TestCase):
+    """SEC-03：/api/ 写请求的来源校验，挡住借缓存 Basic Auth 的跨站表单"""
+
+    url = '/api/stock-groups/'
+    _n = 0
+
+    def _post(self, form=False, **headers):
+        ApiOriginCheckTests._n += 1
+        data = {'name': f'g{ApiOriginCheckTests._n}'}
+        if form:
+            return self.client.post(self.url, data, **headers)
+        return self.client.post(self.url, data, content_type='application/json', **headers)
+
+    def test_cross_site_form_post_rejected(self):
+        resp = self._post(
+            form=True, HTTP_ORIGIN='https://evil.example.com', HTTP_SEC_FETCH_SITE='cross-site',
+        )
+        self.assertEqual(resp.status_code, 403)
+
+    def test_null_origin_rejected(self):
+        resp = self._post(form=True, HTTP_ORIGIN='null')
+        self.assertEqual(resp.status_code, 403)
+
+    def test_untrusted_origin_rejected_even_with_header(self):
+        resp = self._post(HTTP_ORIGIN='https://evil.example.com', HTTP_X_REQUESTED_WITH='XMLHttpRequest')
+        self.assertEqual(resp.status_code, 403)
+
+    def test_cross_site_fetch_without_origin_rejected(self):
+        resp = self._post(HTTP_SEC_FETCH_SITE='cross-site', HTTP_X_REQUESTED_WITH='XMLHttpRequest')
+        self.assertEqual(resp.status_code, 403)
+
+    def test_same_site_sibling_subdomain_rejected(self):
+        resp = self._post(
+            HTTP_ORIGIN='https://other.yumeat.cc.cd', HTTP_SEC_FETCH_SITE='same-site',
+            HTTP_X_REQUESTED_WITH='XMLHttpRequest',
+        )
+        self.assertEqual(resp.status_code, 403)
+
+    def test_frontend_xhr_allowed(self):
+        resp = self._post(
+            HTTP_HOST=_HOST, HTTP_X_FORWARDED_PROTO='https', HTTP_ORIGIN=_ORIGIN,
+            HTTP_SEC_FETCH_SITE='same-origin', HTTP_X_REQUESTED_WITH='XMLHttpRequest',
+        )
+        self.assertEqual(resp.status_code, 201)
+
+    def test_browser_request_without_header_rejected(self):
+        resp = self._post(HTTP_HOST=_HOST, HTTP_ORIGIN=_ORIGIN, HTTP_SEC_FETCH_SITE='same-origin')
+        self.assertEqual(resp.status_code, 403)
+
+    @override_settings(STOCKTRACE_CSRF_REQUIRE_HEADER=False)
+    def test_header_requirement_can_be_disabled(self):
+        resp = self._post(HTTP_HOST=_HOST, HTTP_ORIGIN=_ORIGIN, HTTP_SEC_FETCH_SITE='same-origin')
+        self.assertEqual(resp.status_code, 201)
+        # 跨站来源不受开关影响
+        resp = self._post(form=True, HTTP_ORIGIN='https://evil.example.com')
+        self.assertEqual(resp.status_code, 403)
+
+    def test_cli_request_without_browser_signals_allowed(self):
+        self.assertEqual(self._post().status_code, 201)
+
+    def test_referer_only_counts_as_browser_signal(self):
+        resp = self._post(form=True, HTTP_REFERER='https://evil.example.com/x')
+        self.assertEqual(resp.status_code, 403)
+
+    def test_same_origin_without_configured_origin_allowed(self):
+        # 换域名部署忘改 STOCKTRACE_TRUSTED_ORIGINS 时，同源前端仍可用
+        with override_settings(STOCKTRACE_TRUSTED_ORIGINS=[]):
+            resp = self._post(
+                HTTP_HOST=_HOST, HTTP_X_FORWARDED_PROTO='https', HTTP_ORIGIN=_ORIGIN,
+                HTTP_X_REQUESTED_WITH='XMLHttpRequest',
+            )
+        self.assertEqual(resp.status_code, 201)
+
+    def test_safe_methods_and_non_api_paths_untouched(self):
+        resp = self.client.get(self.url, HTTP_ORIGIN='https://evil.example.com')
+        self.assertEqual(resp.status_code, 200)
+
+    def test_admin_protected_by_csrf_middleware(self):
+        get_user_model().objects.create_superuser('admin', 'a@example.com', 'pw-Very-Long-123')
+        client = Client(enforce_csrf_checks=True)
+        resp = client.post('/admin/login/', {'username': 'admin', 'password': 'pw-Very-Long-123'})
+        self.assertEqual(resp.status_code, 403)
+        self.assertIn('django.middleware.csrf.CsrfViewMiddleware', settings.MIDDLEWARE)
