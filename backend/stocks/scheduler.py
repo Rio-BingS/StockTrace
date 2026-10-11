@@ -11,7 +11,8 @@ APScheduler 集成到 Django
 运行方式（REL-01）：
 - 生产：独立进程 `python manage.py run_scheduler`（systemd 单元 stocktrace-scheduler），
   不再寄生在 Gunicorn worker 里——worker 被 max_requests 回收/重启时会杀掉长任务、错过定时点。
-- 兼容：设置 STOCKTRACE_RUN_SCHEDULER_IN_WEB=1 时仍由 AppConfig.ready() 在 Web 进程内启动。
+- 兼容：设置 STOCKTRACE_RUN_SCHEDULER_IN_WEB=1 时仍由 AppConfig.ready() 在 Web 进程内启动
+  （白名单：仅 gunicorn 或 runserver 子进程；锁被占用时后台每 60s 重试）。
 两种方式都用同一把文件锁（STOCKTRACE_SCHEDULER_LOCK，默认 <STOCKTRACE_RUN_DIR>/scheduler.lock）
 保证全机只有一个进程持有调度器。
 """
@@ -39,14 +40,12 @@ logger = logging.getLogger(__name__)
 scheduler = None
 _lock_fh = None
 
-_SKIP_COMMANDS = {
-    'migrate', 'makemigrations', 'showmigrations', 'sqlmigrate',
-    'collectstatic', 'shell', 'dbshell', 'test', 'check',
-    'createsuperuser', 'changepassword', 'flush', 'loaddata',
-    'dumpdata', 'inspectdb',
-    # 独立调度进程自己管理调度器，ready() 不能再在同进程内启动一份
-    'run_scheduler',
-}
+# Web 内兼容模式下，调度锁被占用时的后台重试间隔（秒）（REL-03）
+LOCK_RETRY_SECONDS = 60
+_start_mutex = threading.Lock()
+_retry_stop = threading.Event()
+_retry_thread = None
+_atexit_registered = False
 
 # A 股交易时间天然是北京时间：trigger 显式带时区，不依赖服务器/进程的本地时区
 SCHEDULER_TZ = ZoneInfo('Asia/Shanghai')
@@ -64,20 +63,28 @@ _POST_CLOSE_START = dt_time(15, 30)
 _POST_CLOSE_END = dt_time(21, 0)
 
 
+def _is_web_server_process():
+    """当前进程是否为 Web 服务进程：gunicorn（含 python -m gunicorn），或 runserver 的
+    reloader 子进程（只有子进程 RUN_MAIN=true）。管理命令、shell、测试等一律不是。"""
+    if sys.argv and 'gunicorn' in sys.argv[0].lower():
+        return True
+    argv = [a.lower() for a in sys.argv[1:]]
+    return 'runserver' in argv and os.environ.get('RUN_MAIN') == 'true'
+
+
 def _should_start_scheduler():
+    """白名单（REL-03）：全局开关未关、STOCKTRACE_RUN_SCHEDULER_IN_WEB=1，且确实是 Web 服务进程。
+
+    旧实现靠 argv 黑名单，漏掉的管理命令（fetch_stock_data、backfill_* 等）会在 CLI 进程里
+    启动调度器、抢走调度锁，甚至以 root 身份建出锁文件。
+    """
     if os.environ.get('STOCKTRACE_SCHEDULER', '1').lower() in ('0', 'false', 'no', 'off'):
         return False
+    from .apps import run_scheduler_in_web
 
-    argv = [a.lower() for a in sys.argv]
-    for cmd in _SKIP_COMMANDS:
-        if cmd in argv:
-            return False
-
-    # Django runserver reloader: only the child process has RUN_MAIN=true
-    if 'runserver' in argv and os.environ.get('RUN_MAIN') != 'true':
+    if not run_scheduler_in_web():
         return False
-
-    return True
+    return _is_web_server_process()
 
 
 def _acquire_lock():
@@ -447,37 +454,70 @@ _STARTED_MSG = (
 )
 
 
-def start():
-    """Web 进程内启动 APScheduler（兼容模式；带启动条件与单实例文件锁）"""
+def _start_web_scheduler_locked():
+    """已持有调度锁：构造并启动 Web 内调度器。调用方需持有 _start_mutex。"""
     global scheduler
-    if scheduler is not None:
-        return
-
-    if not _should_start_scheduler():
-        logger.debug("跳过 APScheduler 启动（命令或环境禁用）")
-        return
-
-    if not _acquire_lock():
-        logger.info("APScheduler 未启动：其他进程已持有调度锁")
-        return
-
     scheduler = attach_heartbeat(build_scheduler(), mode='web')
     scheduler.start()
     write_heartbeat(scheduler)
-    atexit.register(stop)
     logger.info(_STARTED_MSG + "，运行于 Web 进程（兼容模式）")
+
+
+def _retry_lock_loop(interval):
+    """后台线程：每 interval 秒重试一次调度锁，拿到即启动调度器；stop() 置位后退出。"""
+    while not _retry_stop.wait(interval):
+        if not _acquire_lock():
+            logger.warning(f"调度锁仍被其他进程持有，{interval}s 后重试")
+            continue
+        with _start_mutex:
+            if _retry_stop.is_set() or scheduler is not None:
+                _release_lock()
+                return
+            _start_web_scheduler_locked()
+        return
+
+
+def start(retry_seconds=None):
+    """Web 进程内启动 APScheduler（兼容模式；白名单启动条件 + 单实例文件锁）。
+
+    锁被占用（如独立调度进程或另一个 worker 持有）时不再只试一次就放弃，
+    而是起后台线程每 LOCK_RETRY_SECONDS 秒重试并记 WARNING（REL-03）。
+    """
+    global _retry_thread, _atexit_registered
+    if not _should_start_scheduler():
+        logger.debug("跳过 APScheduler 启动（非 Web 服务进程或环境禁用）")
+        return
+
+    interval = LOCK_RETRY_SECONDS if retry_seconds is None else retry_seconds
+    with _start_mutex:
+        if scheduler is not None or (_retry_thread is not None and _retry_thread.is_alive()):
+            return
+        if not _atexit_registered:
+            atexit.register(stop)
+            _atexit_registered = True
+        _retry_stop.clear()
+        if _acquire_lock():
+            _start_web_scheduler_locked()
+            return
+        logger.warning(f"APScheduler 暂未启动：其他进程已持有调度锁，后台每 {interval}s 重试")
+        _retry_thread = threading.Thread(
+            target=_retry_lock_loop, args=(interval,), daemon=True, name='scheduler-lock-retry',
+        )
+        _retry_thread.start()
 
 
 def stop():
     global scheduler
-    if scheduler is not None:
-        try:
-            scheduler.shutdown(wait=False)
-        except Exception:
-            pass
-        write_heartbeat(scheduler, running=False)
-        scheduler = None
-    _release_lock()
+    _retry_stop.set()
+    with _start_mutex:
+        if scheduler is not None:
+            try:
+                scheduler.shutdown(wait=False)
+            except Exception:
+                pass
+            write_heartbeat(scheduler, running=False)
+            scheduler = None
+        _release_lock()
 
 
 def run_forever(stop_event, lock_retry_seconds=60):

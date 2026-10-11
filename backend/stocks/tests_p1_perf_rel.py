@@ -1,5 +1,6 @@
 """P1 调度可靠性与性能修复的回归测试（REL-03 / REL-04 / REL-05 / PERF-02 / PERF-03 / PERF-05）。"""
 
+import os
 import shutil
 import subprocess
 import sys
@@ -268,3 +269,61 @@ class GuardedJobTests(_TmpRunDirMixin, SimpleTestCase):
         self.assertEqual(tl.call_args.args[0], 'stock_quotes')
         fa.assert_not_called()
         self.assertIn('任务锁被占用', out.getvalue())
+
+
+class SchedulerStartWhitelistTests(_TmpRunDirMixin, SimpleTestCase):
+    """REL-03：Web 内启动改白名单；调度锁被占用时后台定期重试。"""
+
+    def _should(self, argv, env):
+        from stocks import scheduler as sch
+
+        base = {'STOCKTRACE_SCHEDULER': '1', 'STOCKTRACE_RUN_SCHEDULER_IN_WEB': '1', 'RUN_MAIN': ''}
+        base.update(env)
+        with mock.patch.dict(os.environ, base), mock.patch.object(sch.sys, 'argv', argv):
+            return sch._should_start_scheduler()
+
+    def test_whitelist(self):
+        self.assertTrue(self._should(['/opt/venv/bin/gunicorn', 'StockTrace.wsgi'], {}))
+        self.assertTrue(self._should(['/usr/lib/python3/site-packages/gunicorn/__main__.py'], {}))
+        self.assertTrue(self._should(['manage.py', 'runserver'], {'RUN_MAIN': 'true'}))
+        self.assertFalse(self._should(['manage.py', 'runserver'], {}))  # reloader 父进程
+        for cmd in ('fetch_stock_data', 'backfill_market_snapshots', 'validate_market_sources',
+                    'run_detector_scan', 'run_scheduler', 'shell', 'migrate'):
+            self.assertFalse(self._should(['manage.py', cmd], {'RUN_MAIN': 'true'}), cmd)
+        self.assertFalse(self._should(['/opt/venv/bin/gunicorn'], {'STOCKTRACE_RUN_SCHEDULER_IN_WEB': '0'}))
+        self.assertFalse(self._should(['/opt/venv/bin/gunicorn'], {'STOCKTRACE_SCHEDULER': '0'}))
+
+    def test_retries_lock_in_background_then_starts(self):
+        from stocks import scheduler as sch
+
+        self.assertIsNone(sch.scheduler)
+        hb = override_settings(
+            STOCKTRACE_SCHEDULER_LOCK=self.run_dir / 'scheduler.lock',
+            STOCKTRACE_SCHEDULER_HEARTBEAT=self.run_dir / 'hb.json',
+        )
+        hb.enable()
+        self.addCleanup(hb.disable)
+        results = iter([False, False, True])
+        fake_sched = mock.MagicMock()
+        with mock.patch.object(sch, '_should_start_scheduler', return_value=True), \
+                mock.patch.object(sch, '_acquire_lock', side_effect=lambda: next(results)) as acq, \
+                mock.patch.object(sch, '_release_lock'), \
+                mock.patch.object(sch, 'build_scheduler', return_value=fake_sched), \
+                mock.patch.object(sch, 'attach_heartbeat', side_effect=lambda s, mode: s), \
+                mock.patch.object(sch, 'write_heartbeat'), \
+                mock.patch.object(sch.atexit, 'register'), \
+                self.assertLogs('stocks.scheduler', level='WARNING'):
+            sch.start(retry_seconds=0.05)
+            self.assertIsNone(sch.scheduler)  # 首次没拿到锁，不阻塞请求/启动
+            sch.start(retry_seconds=0.05)  # 重试线程在跑时不重复起线程
+            for _ in range(100):
+                if sch.scheduler is not None:
+                    break
+                time.sleep(0.02)
+            try:
+                self.assertIs(sch.scheduler, fake_sched)
+                fake_sched.start.assert_called_once()
+                self.assertEqual(acq.call_count, 3)
+            finally:
+                sch.stop()
+        self.assertIsNone(sch.scheduler)
