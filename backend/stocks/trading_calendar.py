@@ -75,11 +75,12 @@ def _refresh_trade_calendar(now):
         _trade_calendar_set = days
         _trade_calendar_range = (min(days), max(days))
         _trade_calendar_expires = now + _TRADE_CAL_TTL
-    except Exception as e:
+    except Exception as e:  # noqa: BLE001 上游边界：akshare 异常类型不固定，失败进入冷却并沿用旧表
         _calendar_fail_until['sina'] = now + _CALENDAR_FAIL_TTL
         logger.warning(
-            f"新浪交易日历获取失败（{_CALENDAR_FAIL_TTL}s 内不再重试）"
-            f"{'，沿用旧表' if _trade_calendar_set is not None else ''}: {e}"
+            "新浪交易日历获取失败（%ss 内不再重试）"
+            "%s: %s",
+            _CALENDAR_FAIL_TTL, '，沿用旧表' if _trade_calendar_set is not None else '', e
         )
 
 
@@ -97,9 +98,9 @@ def _baostock_is_trading_day(date, now):
             while rs.next():
                 row = rs.get_row_data()
                 return row[1] == '1'
-    except Exception as e:
+    except Exception as e:  # noqa: BLE001 上游边界：BaoStock 异常类型不固定，失败进入冷却
         _calendar_fail_until['baostock'] = now + _CALENDAR_FAIL_TTL
-        logger.warning(f"BaoStock交易日历获取失败（{_CALENDAR_FAIL_TTL}s 内不再重试）: {e}")
+        logger.warning("BaoStock交易日历获取失败（%ss 内不再重试）: %s", _CALENDAR_FAIL_TTL, e)
     return None
 
 
@@ -134,7 +135,7 @@ def is_trading_day(date=None):
         return result
 
     # 兜底: 未知（不缓存结论；上游失败已有冷却，不会逐日重复请求）
-    logger.debug(f"交易日历无法判定 {date}，返回未知")
+    logger.debug("交易日历无法判定 %s，返回未知", date)
     return None
 
 
@@ -193,6 +194,8 @@ def expected_latest_date():
                 if is_trading_day(day):
                     return day
             except Exception:
+                # is_trading_day 已吞掉上游异常，走到这里是意外错误：按「无法校验时效」处理并留痕
+                logger.warning("推算最近完成交易日失败，按无法校验时效处理", exc_info=True)
                 return None
         day -= timedelta(days=1)
     return None
@@ -244,6 +247,8 @@ def last_session_close():
                     break
             day -= timedelta(days=1)
     except Exception:
+        # 同上：意外错误按「无已收盘时点」处理并留痕
+        logger.warning("推算最近收盘时点失败，按未知处理", exc_info=True)
         close = None
     _session_close_memo['close'] = close
     _session_close_memo['at'] = now.timestamp()

@@ -1,9 +1,13 @@
 """新浪数据源（AkShare stock_zh_a_daily / stock_zh_a_minute）。"""
 
+import logging
+
 import akshare as ak
 
 from ..common.codes import exchange_prefix
 from .base import DAILY_ALIASES, MINUTE_ALIASES, DataSource, _normalize_ohlcv, _to_numeric_cols
+
+logger = logging.getLogger(__name__)
 
 
 class SinaSource(DataSource):
@@ -43,6 +47,6 @@ class SinaSource(DataSource):
             row = df[df[code_col] == bs_code]
             if not row.empty:
                 return row.iloc[0][name_col]
-        except Exception:
-            pass
+        except Exception as e:  # noqa: BLE001 上游边界：akshare 异常类型不固定，失败交给下一个名称源
+            logger.warning("新浪获取 %s 名称失败: %s", code, e)
         return None

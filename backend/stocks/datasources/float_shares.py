@@ -101,17 +101,17 @@ def fetch_float_share_history(code):
     try:
         data = _download(code)
     except Exception as e:  # noqa: BLE001  任何失败都降级为「股本数据缺失」
-        logger.warning(f'流通股本获取失败 {code}: {e}')
+        logger.warning("流通股本获取失败 %s: %s", code, e)
         with _lock:
             _cache[code] = (now, _NEG_TTL, None)
             _fail_state['count'] += 1
             if _fail_state['count'] >= _BREAK_AFTER:
                 _fail_state['until'] = now + _BREAK_SECONDS
                 _fail_state['count'] = 0
-                logger.warning(f'流通股本接口连续失败 {_BREAK_AFTER} 次，暂停 {_BREAK_SECONDS}s')
+                logger.warning("流通股本接口连续失败 %s 次，暂停 %ss", _BREAK_AFTER, _BREAK_SECONDS)
         return None
     if not data:
-        logger.info(f'流通股本：{code} 上游无数据（ETF/退市等），按股本数据缺失处理')
+        logger.info("流通股本：%s 上游无数据（ETF/退市等），按股本数据缺失处理", code)
     with _lock:
         _cache[code] = (now, _TTL, data or None)
         _fail_state['count'] = 0

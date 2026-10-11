@@ -22,10 +22,11 @@ def _get_stock_list():
         df = ak.stock_info_a_code_name()
         _stock_list_cache['df'] = df
         _stock_list_cache['expires'] = now + _STOCK_LIST_TTL
-        logger.info(f"A股列表缓存刷新，共 {len(df)} 条")
+        logger.info("A股列表缓存刷新，共 %s 条", len(df))
         return df
     except Exception as e:
-        logger.error(f"获取A股列表失败: {e}")
+        # 上游边界：akshare 异常类型不固定；有旧缓存用旧缓存，否则返回空表降级
+        logger.warning("获取A股列表失败: %s", e, exc_info=True)
         if _stock_list_cache['df'] is not None:
             return _stock_list_cache['df']
         return pd.DataFrame(columns=['code', 'name'])

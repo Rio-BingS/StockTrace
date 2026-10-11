@@ -38,6 +38,7 @@ def _source_call(source, method_name, attempts=None):
         try:
             result = getattr(source, method_name)(*args, **kwargs)
         except Exception as e:
+            # 只记录后原样抛出，由 SourceChain 统一做 failover 与冷却
             if attempts is not None:
                 attempts.append((source.name, e))
             raise
@@ -49,8 +50,9 @@ def _source_call(source, method_name, attempts=None):
             result = _filter_minute_range(result, args[1], args[2])
             if before and (result is None or result.empty):
                 logger.info(
-                    f"数据源 {source.name} 分钟线 {before} 根均不在 "
-                    f"{args[1]}~{args[2]} 内，尝试下一个"
+                    "数据源 %s 分钟线 %s 根均不在 "
+                    "%s~%s 内，尝试下一个",
+                    source.name, before, args[1], args[2]
                 )
         return result
     return call
@@ -88,15 +90,16 @@ def _try_sources(method_name, *args, sources=None, **kwargs):
         if errors:
             name, err = errors[-1]
             logger.error(
-                f"所有数据源获取 {method_name} 均失败（{len(errors)} 个源抛异常），"
-                f"最后错误 [{name}]: {err}"
+                "所有数据源获取 %s 均失败（%s 个源抛异常），"
+                "最后错误 [%s]: %s",
+                method_name, len(errors), name, err
             )
         elif attempts:
             # 源都正常返回、只是没有数据（如该区间无成交、北交所不支持）：不是故障
-            logger.warning(f"所有数据源获取 {method_name} 均返回空数据（无异常）")
+            logger.warning("所有数据源获取 %s 均返回空数据（无异常）", method_name)
         else:
-            logger.warning(f"所有数据源获取 {method_name} 均处于冷却，本次未请求上游")
+            logger.warning("所有数据源获取 %s 均处于冷却，本次未请求上游", method_name)
         return None, None
     source = by_name[chain_name]
-    logger.info(f"数据源 {source.name} 获取 {method_name} 成功")
+    logger.info("数据源 %s 获取 %s 成功", source.name, method_name)
     return source, result

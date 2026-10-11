@@ -29,5 +29,5 @@ def bs_session():
         finally:
             try:
                 bs.logout()
-            except Exception as e:
-                logger.debug(f"BaoStock 登出失败: {e}")
+            except Exception as e:  # noqa: BLE001 上游边界：登出失败不影响已取到的结果
+                logger.debug("BaoStock 登出失败: %s", e)
