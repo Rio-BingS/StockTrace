@@ -134,6 +134,12 @@ async function load(code = null) {
   }
 }
 
+// 内联多语句处理器在 Prettier（semi: false）格式化后会变成无分号多行，Vue 模板编译失败，改为函数（OPS-10）
+function showDetail(code) {
+  stockCode.value = code
+  loadDetail()
+}
+
 async function loadDetail() {
   const code = (stockCode.value || '').trim()
   if (!code) {
@@ -323,7 +329,7 @@ onUnmounted(() => { northGuard.abort(); detailGuard.abort() })
           <tbody>
             <tr v-for="row in stockItems" :key="row.code">
               <td>
-                <button class="link-btn" @click="stockCode = row.code; loadDetail()">
+                <button class="link-btn" @click="showDetail(row.code)">
                   {{ row.code }}
                 </button>
               </td>

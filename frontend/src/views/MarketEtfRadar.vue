@@ -92,6 +92,12 @@ async function load(resetPage = false) {
 function select(row) { selectedCode.value = row.code; syncUrl() }
 function changePage(delta) { page.value += delta; load() }
 function changeRank(value) { rank.value = value; sort.value = ''; order.value = 'desc'; load(true) }
+// 内联多语句处理器在 Prettier（semi: false）格式化后会变成无分号多行，Vue 模板编译失败，改为函数（OPS-10）
+function resetFilters() {
+  q.value = ''
+  minTurnoverYi.value = ''
+  load(true)
+}
 function changeScope(value) { scope.value = value; load(true) }
 function sortBy(field) {
   if (sort.value === field) order.value = order.value === 'desc' ? 'asc' : 'desc'
@@ -137,7 +143,7 @@ onUnmounted(() => guard.abort())
       <input v-model.trim="q" placeholder="搜索 ETF 名称或代码" @keyup.enter="load(true)" />
       <input v-model="minTurnoverYi" type="number" min="0" placeholder="最低成交额（亿）" @keyup.enter="load(true)" />
       <button @click="load(true)">筛选</button>
-      <button class="ghost" @click="q=''; minTurnoverYi=''; load(true)">重置</button>
+      <button class="ghost" @click="resetFilters">重置</button>
     </div>
 
     <div v-if="data?.supported_metrics && !data.supported_metrics.share_change_1d" class="metric-note">
