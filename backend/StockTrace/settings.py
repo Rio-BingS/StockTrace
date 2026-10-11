@@ -303,6 +303,10 @@ STOCKTRACE_HEARTBEAT_STALE_SECONDS = int(os.environ.get('STOCKTRACE_HEARTBEAT_ST
 # 同步拉上游的市场接口总时限（秒，REL-05）：须小于 nginx proxy_read_timeout 120s
 STOCKTRACE_REQUEST_DEADLINE = float(os.environ.get('STOCKTRACE_REQUEST_DEADLINE', '100'))
 
+# 市场缓存是否用交易日历判断新鲜度 / data_as_of（ARC-02）：生产恒为 True；
+# 测试 runner（IsolatedTestRunner）关掉它以免触网、保持确定性，取代原先嗅探 sys.argv
+STOCKTRACE_MARKET_CALENDAR_ENABLED = True
+
 
 # Logging（REL-02）
 # 之前没有 LOGGING：INFO（调度启动、清理条数、拉取结果）全部丢失，WARNING 以上只经 lastResort

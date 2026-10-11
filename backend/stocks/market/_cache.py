@@ -14,7 +14,6 @@ available=False）时只做 60 秒负缓存，不走上面的收盘后保鲜；�
 
 from __future__ import annotations
 
-import sys
 import threading
 import time
 from collections import OrderedDict
@@ -37,8 +36,10 @@ _inflight = {}
 
 
 def _calendar_enabled():
-    """manage.py test 进程不做日历判断（避免测试触网，保持确定性）。"""
-    return 'test' not in [a.lower() for a in sys.argv]
+    """是否用交易日历判断新鲜度（settings 开关，测试 runner 关闭；ARC-02 不再嗅探 sys.argv）"""
+    from django.conf import settings
+
+    return getattr(settings, 'STOCKTRACE_MARKET_CALENDAR_ENABLED', True)
 
 
 def _is_empty_payload(data):

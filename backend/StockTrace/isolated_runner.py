@@ -7,6 +7,7 @@
   用例之外（setUpClass、模块导入等）的尝试在结尾列出，并使整次运行失败。
 - 每个用例开始前清空 market/_sources/services 等模块级缓存，避免用例间串扰。
 - STOCKTRACE_TEST_ALLOW_NETWORK=1 关闭断网闸（仅本地临时排查用）。
+- 测试期间 STOCKTRACE_MARKET_CALENDAR_ENABLED=False：市场缓存不查交易日历（ARC-02）。
 
 注意：本模块名不能以 test 开头，否则会被测试发现当成测试模块导入。
 """
@@ -24,6 +25,7 @@ from collections import Counter
 from pathlib import Path
 
 from django.test.runner import DiscoverRunner
+from django.test.utils import override_settings
 
 _BACKEND_DIR = str(Path(__file__).resolve().parent.parent)
 _THIS_FILE = str(Path(__file__).resolve())
@@ -249,6 +251,9 @@ class IsolatedTestRunner(DiscoverRunner):
 
     def setup_test_environment(self, **kwargs):
         super().setup_test_environment(**kwargs)
+        # 市场缓存新鲜度不查交易日历（避免触网、保持确定性）；需要的用例自行 patch
+        self._calendar_override = override_settings(STOCKTRACE_MARKET_CALENDAR_ENABLED=False)
+        self._calendar_override.enable()
         if self.network_guard_enabled:
             _guard.outside_hits = []
             _guard.install()
@@ -257,6 +262,9 @@ class IsolatedTestRunner(DiscoverRunner):
 
     def teardown_test_environment(self, **kwargs):
         _guard.uninstall()
+        override = getattr(self, '_calendar_override', None)
+        if override is not None:
+            override.disable()
         super().teardown_test_environment(**kwargs)
 
     def suite_result(self, suite, result, **kwargs):

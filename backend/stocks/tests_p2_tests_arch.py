@@ -166,3 +166,23 @@ class LegacyWrapperTests(SimpleTestCase):
         services._reset_trade_calendar_cache()
         self.assertEqual(cal._trade_day_cache, {})
         self.assertEqual(cal._calendar_fail_until['sina'], 0)
+
+
+class CalendarSwitchTests(SimpleTestCase):
+    """市场缓存的日历开关走 settings，不再嗅探 sys.argv（ARC-02）。"""
+
+    def test_runner_disables_calendar(self):
+        from stocks.market._cache import _calendar_enabled
+        self.assertFalse(settings.STOCKTRACE_MARKET_CALENDAR_ENABLED)
+        self.assertFalse(_calendar_enabled())
+
+    def test_switch_follows_settings_not_argv(self):
+        from django.test import override_settings
+
+        from stocks.market._cache import _calendar_enabled
+        with override_settings(STOCKTRACE_MARKET_CALENDAR_ENABLED=True), \
+                patch('sys.argv', ['manage.py', 'test']):
+            self.assertTrue(_calendar_enabled())
+
+    def test_cache_module_does_not_read_argv(self):
+        self.assertNotIn('sys', _imported_modules(_STOCKS_DIR / 'market' / '_cache.py'))
