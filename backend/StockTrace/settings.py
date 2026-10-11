@@ -185,6 +185,10 @@ DATABASES = {
 if __import__('django').VERSION >= (5, 1):
     DATABASES['default']['OPTIONS']['transaction_mode'] = 'IMMEDIATE'
 
+# 主键类型显式钉住（ARC-08）：现有迁移全部是 BigAutoField，与 Django 6.0 的默认值
+# 一致；显式写出后即便降到 4.2/5.x（默认 AutoField）也不会凭空生成改主键的迁移
+DEFAULT_AUTO_FIELD = 'django.db.models.BigAutoField'
+
 
 # Password validation
 # https://docs.djangoproject.com/en/6.0/ref/settings/#auth-password-validators
