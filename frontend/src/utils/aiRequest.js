@@ -70,3 +70,25 @@ export function createAiTask() {
     },
   }
 }
+
+const FIELD_LABELS = { base_url: '接口地址', api_key: 'API Key', name: '名称', model: '模型' }
+
+/**
+ * DRF 字段校验错误 → 一行文字：优先 base_url、api_key，再其他字段；取不到返回 ''。
+ * 例：{ base_url: ['接口地址必须以 https:// 开头'] } → '接口地址：接口地址必须以 https:// 开头'
+ */
+export function fieldErrorText(data) {
+  if (!data || typeof data !== 'object' || Array.isArray(data)) return ''
+  if (typeof data.detail === 'string' && data.detail.trim()) return data.detail
+  const keys = ['base_url', 'api_key', ...Object.keys(data).filter(k => k !== 'base_url' && k !== 'api_key')]
+  for (const key of keys) {
+    const value = data[key]
+    // DRF 字段错误是字符串数组；其他字段（如 status: 'failed'）不是错误文案
+    const list = Array.isArray(value) ? value : (FIELD_LABELS[key] ? [value] : [])
+    const msg = list.find(v => typeof v === 'string' && v.trim())
+    if (!msg) continue
+    if (key === 'non_field_errors') return msg
+    return FIELD_LABELS[key] ? `${FIELD_LABELS[key]}：${msg}` : msg
+  }
+  return ''
+}

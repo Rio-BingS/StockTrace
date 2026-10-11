@@ -6,6 +6,7 @@ import {
   aiDisclaimer,
   aiErrorText,
   createAiTask,
+  fieldErrorText,
   isCanceled,
 } from '../aiRequest.js'
 
@@ -49,4 +50,20 @@ test('createAiTask：新请求取消旧请求，旧响应失效', () => {
   task.cancel()
   assert.ok(b.signal.aborted)
   assert.ok(!b.isCurrent())
+})
+
+test('fieldErrorText：同时识别 base_url 与 api_key 字段错误', () => {
+  assert.equal(fieldErrorText({ base_url: ['接口地址必须以 https:// 开头'] }),
+    '接口地址：接口地址必须以 https:// 开头')
+  assert.equal(fieldErrorText({ api_key: '修改接口地址时必须重新录入 API Key' }),
+    'API Key：修改接口地址时必须重新录入 API Key')
+  assert.equal(fieldErrorText({ api_key: ['k'], base_url: ['u'] }), '接口地址：u')
+  assert.equal(fieldErrorText({ non_field_errors: ['冲突'] }), '冲突')
+  assert.equal(fieldErrorText({ base_url: [{ x: 1 }] }), '')
+  assert.equal(fieldErrorText(null), '')
+  // test 端点失败体：取 detail，不把 status: 'failed' 当文案
+  assert.equal(fieldErrorText({ status: 'failed', error: 'auth', detail: '认证失败，请检查 API Key' }),
+    '认证失败，请检查 API Key')
+  assert.equal(fieldErrorText({ status: 'failed', upstream_status: 500 }), '')
+  assert.equal(fieldErrorText(['x']), '')
 })

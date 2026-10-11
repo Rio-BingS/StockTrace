@@ -1,6 +1,7 @@
 <script setup>
 import { ref, onMounted } from 'vue'
 import { aiApi } from '../api/stocks.js'
+import { aiErrorText, fieldErrorText } from '../utils/aiRequest.js'
 
 const providers = ref([])
 const loading = ref(false)
@@ -26,12 +27,9 @@ async function load() {
   }
 }
 
+// 字段校验错误（base_url / api_key 等）优先展示，其余统一转成字符串，避免 [object Object]
 function errText(e) {
-  const data = e.response?.data
-  if (typeof data === 'string') return data
-  if (data?.detail) return data.detail
-  if (data?.api_key) return Array.isArray(data.api_key) ? data.api_key[0] : data.api_key
-  return e.message || '未知错误'
+  return fieldErrorText(e.response?.data) || aiErrorText(e)
 }
 
 function openCreate() {
