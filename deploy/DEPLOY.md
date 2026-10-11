@@ -65,7 +65,7 @@ pip install -r backend/requirements.lock   # 锁文件，全量精确版本（OP
 sudo cp deploy/env.example /etc/stocktrace/env
 sudo nano /etc/stocktrace/env   # 填 SECRET_KEY、ALLOWED_HOSTS
 # 可选：STOCKTRACE_PUSH_URL（Server酱兼容；价格提醒 + 快照自检告警推送，
-# 未配置则静默跳过）、MARKET_SNAPSHOT_RETENTION_DAYS（快照保留天数，默认 600）
+# 未配置则静默跳过）、MARKET_SNAPSHOT_RETENTION_DAYS（快照保留天数，默认 600，下限 400）
 
 # 数据库
 cd /opt/stocktrace/backend

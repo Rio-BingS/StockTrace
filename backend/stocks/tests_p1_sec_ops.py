@@ -366,3 +366,71 @@ class NginxRateLimitConfigTests(TestCase):
         doc = (REPO_DIR / 'deploy' / 'DEPLOY.md').read_text(encoding='utf-8')
         self.assertNotIn('.htpasswd_stocktrace stocktrace', doc)
         self.assertIn('<username>', doc)
+
+
+class SnapshotRetentionSettingTests(TestCase):
+    """OPS-06：MARKET_SNAPSHOT_RETENTION_DAYS 接线到 settings，下限 400，清理处使用"""
+
+    def test_env_var_wired_and_clamped(self):
+        v = _settings_values({'MARKET_SNAPSHOT_RETENTION_DAYS': '800'}, 'MARKET_SNAPSHOT_RETENTION_DAYS')
+        self.assertEqual(v['MARKET_SNAPSHOT_RETENTION_DAYS'], 800)
+        v = _settings_values({'MARKET_SNAPSHOT_RETENTION_DAYS': '30'}, 'MARKET_SNAPSHOT_RETENTION_DAYS')
+        self.assertEqual(v['MARKET_SNAPSHOT_RETENTION_DAYS'], 400)
+        v = _settings_values({}, 'MARKET_SNAPSHOT_RETENTION_DAYS')
+        self.assertEqual(v['MARKET_SNAPSHOT_RETENTION_DAYS'], 600)
+
+    @override_settings(MARKET_SNAPSHOT_RETENTION_DAYS=450)
+    def test_cleanup_uses_setting(self):
+        from datetime import timedelta
+
+        from django.utils import timezone
+
+        from .models import MarketDailySnapshot
+        from .scheduler import _cleanup_market_snapshots
+
+        today = timezone.localdate()
+        kind = MarketDailySnapshot._meta.get_field('kind').choices[0][0]
+        old = MarketDailySnapshot.objects.create(kind=kind, trade_date=today - timedelta(days=460), payload={})
+        keep = MarketDailySnapshot.objects.create(kind=kind, trade_date=today - timedelta(days=440), payload={})
+        _cleanup_market_snapshots()
+        self.assertFalse(MarketDailySnapshot.objects.filter(pk=old.pk).exists())
+        self.assertTrue(MarketDailySnapshot.objects.filter(pk=keep.pk).exists())
+
+
+class EnvExampleTests(TestCase):
+    """OPS-06：env.example 的每个变量都被代码读取；代码读取的环境变量都写进了 env.example"""
+
+    # Django/系统内部变量，不属于部署配置
+    _INTERNAL = {'RUN_MAIN', 'DJANGO_SETTINGS_MODULE'}
+
+    def _example_vars(self):
+        import re
+        text = (REPO_DIR / 'deploy' / 'env.example').read_text(encoding='utf-8')
+        return set(re.findall(r'^#?\s*([A-Z][A-Z0-9_]+)=', text, flags=re.M))
+
+    def _code_sources(self):
+        files = [p for p in BACKEND_DIR.rglob('*.py')
+                 if 'venv' not in p.parts and 'migrations' not in p.parts
+                 and not p.name.startswith('tests')]
+        files += list((REPO_DIR / 'deploy').glob('*.py'))
+        return {p: p.read_text(encoding='utf-8') for p in files}
+
+    def test_every_example_var_is_read_by_code(self):
+        import re
+        sources = self._code_sources()
+        missing = []
+        for name in sorted(self._example_vars()):
+            pat = re.compile(r'''(environ\.get|getenv|environ\[)\(?\s*['"]%s['"]''' % name)
+            if not any(pat.search(src) for src in sources.values()):
+                missing.append(name)
+        self.assertEqual(missing, [], 'env.example 中这些变量没有被代码读取')
+
+    def test_every_env_var_read_by_code_is_documented(self):
+        import re
+        pat = re.compile(r'''(?:environ\.get|getenv)\(\s*['"]([A-Z][A-Z0-9_]+)['"]|environ\[\s*['"]([A-Z][A-Z0-9_]+)['"]''')
+        read = set()
+        for src in self._code_sources().values():
+            for a, b in pat.findall(src):
+                read.add(a or b)
+        undocumented = sorted(read - self._example_vars() - self._INTERNAL)
+        self.assertEqual(undocumented, [], '代码读取了这些环境变量，但 env.example 未列出')

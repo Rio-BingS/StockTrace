@@ -197,7 +197,7 @@ def _cleanup_market_snapshots():
 
     from .models import MarketDailySnapshot
 
-    days = getattr(settings, 'MARKET_SNAPSHOT_RETENTION_DAYS', 600)
+    days = settings.MARKET_SNAPSHOT_RETENTION_DAYS  # settings 已接线环境变量并保证下限（OPS-06）
     try:
         cutoff = timezone.localdate() - timedelta(days=days)
         deleted, _ = MarketDailySnapshot.objects.filter(trade_date__lt=cutoff).delete()

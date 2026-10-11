@@ -94,6 +94,13 @@ DETECTOR_SIGNAL_RETENTION_DAYS = int(os.environ.get('DETECTOR_SIGNAL_RETENTION_D
 DETECTOR_RUN_RETENTION_DAYS = int(os.environ.get('DETECTOR_RUN_RETENTION_DAYS', '120'))
 # 分钟 K 线保留天数（PERF-02）：每日 02:30 分批清理更早的 MinuteBar
 MINUTE_BAR_RETENTION_DAYS = int(os.environ.get('MINUTE_BAR_RETENTION_DAYS', '120'))
+# 市场日度快照保留天数（OPS-06）：之前文档写了该变量但 settings 未接线，环境变量从不生效。
+# 快照只能向前积累、无法重新拉取，且 1y 区间约需 525 自然日，故设下限 400，配错也不会误删一年内数据
+MARKET_SNAPSHOT_RETENTION_MIN_DAYS = 400
+MARKET_SNAPSHOT_RETENTION_DAYS = max(
+    MARKET_SNAPSHOT_RETENTION_MIN_DAYS,
+    int(os.environ.get('MARKET_SNAPSHOT_RETENTION_DAYS', '600')),
+)
 
 
 # Application definition
