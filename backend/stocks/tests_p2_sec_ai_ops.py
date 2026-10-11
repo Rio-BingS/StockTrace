@@ -45,3 +45,57 @@ class UpstreamErrorNoEchoTests(TestCase):
         from stocks.market import etf_flow
         data = etf_flow._unavailable_payload('k', 60, '1m', None, 'HTTPConnectionPool(host=10.1.1.1)')
         self.assertNotIn('10.1.1.1', data['message'])
+
+
+class StockCodeValidationTests(TestCase):
+    """SEC-08：股票代码格式校验；软删除恢复分支走序列化器。"""
+
+    def setUp(self):
+        self.client = APIClient()
+        patcher = mock.patch('stocks.views._initial_fetch', return_value={'status': 'started'})
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def test_create_rejects_bad_code(self):
+        for bad in ('abc', '60000', '6000001', '60000x', '../etc'):
+            resp = self.client.post('/api/stocks/', {'code': bad}, format='json')
+            self.assertEqual(resp.status_code, 400, bad)
+        from stocks.models import Stock
+        self.assertFalse(Stock.objects.exists())
+
+    def test_create_strips_whitespace(self):
+        resp = self.client.post('/api/stocks/', {'code': ' 600000 '}, format='json')
+        self.assertEqual(resp.status_code, 201)
+        self.assertEqual(resp.json()['code'], '600000')
+
+    def test_restore_goes_through_serializer(self):
+        from stocks.models import Stock
+        stock = Stock.objects.create(code='600000', name='浦发银行', is_active=False)
+        # 非法字段在恢复分支同样被拒绝，且不会把股票恢复
+        resp = self.client.post('/api/stocks/', {'code': '600000', 'name': 'x' * 51}, format='json')
+        self.assertEqual(resp.status_code, 400)
+        stock.refresh_from_db()
+        self.assertFalse(stock.is_active)
+        resp = self.client.post('/api/stocks/', {'code': ' 600000', 'quantity': 100}, format='json')
+        self.assertEqual(resp.status_code, 201)
+        stock.refresh_from_db()
+        self.assertTrue(stock.is_active)
+        self.assertEqual(stock.name, '600000')
+        self.assertEqual(stock.quantity, 100)
+
+    def test_update_rejects_bad_code(self):
+        from stocks.models import Stock
+        stock = Stock.objects.create(code='600000', name='浦发银行')
+        resp = self.client.patch(f'/api/stocks/{stock.pk}/', {'code': 'zzz'}, format='json')
+        self.assertEqual(resp.status_code, 400)
+
+    def test_margin_and_etf_routes_validate_code(self):
+        with mock.patch('stocks.views.fetch_stock_margin') as margin, \
+                mock.patch('stocks.views.get_etf_detail') as etf:
+            self.assertEqual(self.client.get('/api/market/stock-margin/abc/').status_code, 400)
+            self.assertEqual(self.client.get('/api/market/etfs/51030/').status_code, 400)
+            margin.assert_not_called()
+            etf.assert_not_called()
+            margin.return_value = {'ok': 1}
+            self.assertEqual(self.client.get('/api/market/stock-margin/600000/').status_code, 200)
+            margin.assert_called_once_with('600000')

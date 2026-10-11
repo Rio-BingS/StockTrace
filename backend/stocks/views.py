@@ -14,6 +14,7 @@ import uuid
 
 from .models import Stock, DailyQuote, MinuteBar
 from .serializers import (
+    normalize_stock_code,
     StockSerializer, DailyQuoteSerializer,
     MinuteBarSerializer, DashboardStockSerializer,
     StockSearchSerializer,
@@ -53,16 +54,16 @@ class StockViewSet(viewsets.ModelViewSet):
 
     def create(self, request, *args, **kwargs):
         """添加关注：如果股票已存在但被软删除，则恢复；创建/恢复后后台拉行情"""
-        code = request.data.get('code', '')
-        existing = Stock.objects.filter(code=code).first()
+        code = normalize_stock_code(request.data.get('code', ''))
+        existing = Stock.objects.filter(code=code).first() if code else None
         if existing and not existing.is_active:
-            name = request.data.get('name', '') or ''
+            # 恢复分支也走序列化器校验（SEC-08）：name/group/持仓字段与新建同一套规则
+            serializer = self.get_serializer(existing, data=request.data, partial=True)
+            serializer.is_valid(raise_exception=True)
+            name = serializer.validated_data.get('name', '') or ''
             if not name.strip():
                 name = code
-            existing.is_active = True
-            existing.name = name
-            existing.save()
-            serializer = self.get_serializer(existing)
+            serializer.save(is_active=True, name=name)
             data = dict(serializer.data)
             data['fetch'] = _initial_fetch(existing.id)
             return Response(data, status=status.HTTP_201_CREATED)
@@ -534,8 +535,11 @@ def market_etf_radar(request):
 @api_view(['GET'])
 def market_etf_detail(request, code):
     """单 ETF 当前快照与按需价格历史。"""
+    norm = normalize_stock_code(code)
+    if norm is None:
+        return Response({'detail': 'ETF 代码须为 6 位数字'}, status=status.HTTP_400_BAD_REQUEST)
     return _market_bad_request(lambda: get_etf_detail(
-        code=code,
+        code=norm,
         range_name=request.query_params.get('range', '3m'),
         start_date=request.query_params.get('start_date') or None,
         end_date=request.query_params.get('end_date') or None,
@@ -545,7 +549,11 @@ def market_etf_detail(request, code):
 @api_view(['GET'])
 def market_stock_margin(request, code):
     """个股两融余额（交易所官方披露，T+1）。"""
-    return _market_bad_request(lambda: fetch_stock_margin(code.zfill(6)), '个股两融')
+    # 路由是 <str:code>，先校验格式再进入上游请求与缓存键（SEC-08）
+    norm = normalize_stock_code(code)
+    if norm is None:
+        return Response({'detail': '股票代码须为 6 位数字'}, status=status.HTTP_400_BAD_REQUEST)
+    return _market_bad_request(lambda: fetch_stock_margin(norm), '个股两融')
 
 
 @api_view(['GET'])

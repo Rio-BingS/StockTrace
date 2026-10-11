@@ -1,11 +1,29 @@
+import re
+
 from rest_framework import serializers
 from .models import Stock, StockGroup, DailyQuote, MinuteBar
+
+# A 股/ETF 代码：6 位数字（SEC-08）
+STOCK_CODE_RE = re.compile(r'^\d{6}$')
+
+
+def normalize_stock_code(value):
+    """去首尾空白后校验 6 位数字代码；合法返回规范化代码，否则返回 None。"""
+    code = str(value or '').strip()
+    return code if STOCK_CODE_RE.match(code) else None
 
 
 class StockSerializer(serializers.ModelSerializer):
     group = serializers.PrimaryKeyRelatedField(
         queryset=StockGroup.objects.all(), required=False, allow_null=True,
     )
+
+    def validate_code(self, value):
+        # 入库前统一校验格式，避免任意字符串进入行情拉取与缓存键（SEC-08）
+        code = normalize_stock_code(value)
+        if code is None:
+            raise serializers.ValidationError('股票代码须为 6 位数字')
+        return code
 
     class Meta:
         model = Stock
