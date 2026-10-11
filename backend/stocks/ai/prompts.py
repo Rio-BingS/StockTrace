@@ -42,8 +42,9 @@ def _fmt_price(value, suffix=''):
 
 def build_stock_context(stock):
     """从本地数据库取真实数据，组装成给 LLM 的文本上下文"""
+    # 只用已收盘日线（DAT-13）：盘中未收盘的当日 K 线不完整，会误导走势与量价解读
     quotes = list(
-        DailyQuote.objects.filter(stock=stock)
+        DailyQuote.objects.filter(stock=stock, is_final=True)
         .order_by('-trade_date')[:RECENT_DAYS]
     )
     lines = [f'股票：{stock.code} {stock.name or "(名称未知)"}']

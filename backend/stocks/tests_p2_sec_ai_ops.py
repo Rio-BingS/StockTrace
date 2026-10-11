@@ -321,3 +321,26 @@ class AiMultiProviderTests(TestCase):
         self.assertEqual((p['temperature'], p['max_tokens']), (0.3, 100))
         # 显式配置优先于模型名推断
         self.assertEqual(param_style(SimpleNamespace(model='o1', param_style='standard')), 'standard')
+
+
+class AiAnalysisFinalQuotesTests(TestCase):
+    """P1 遗留：个股 AI 分析只读取已收盘日线（与 DAT-13 读取侧一致）。"""
+
+    def test_context_skips_intraday_bar(self):
+        from datetime import date
+        from decimal import Decimal
+        from stocks.ai.prompts import build_stock_context
+        from stocks.models import DailyQuote
+        _, stock = _ai_fixtures()
+        DailyQuote.objects.create(
+            stock=stock, trade_date=date(2026, 9, 7), is_final=False,
+            open_price=Decimal('10.5'), close_price=Decimal('11.11'),
+            high_price=Decimal('11.2'), low_price=Decimal('10.4'),
+            open_close_diff=Decimal('0.6'), open_close_pct=Decimal('5'),
+            high_low_diff=Decimal('0.8'), high_low_pct=Decimal('7'),
+            change_pct=Decimal('5.8'), volume=1, turnover=Decimal('1'),
+        )
+        text = build_stock_context(stock)
+        self.assertIn('最新交易日：2026-09-04', text)
+        self.assertNotIn('2026-09-07', text)
+        self.assertNotIn('11.11', text)
