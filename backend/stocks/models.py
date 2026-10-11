@@ -52,6 +52,12 @@ class AiCallLog(models.Model):
         verbose_name = 'AI 调用记录'
         verbose_name_plural = 'AI 调用记录'
         ordering = ['-created_at']
+        # 节流按 created_at 计当日次数、按 (stock, purpose, created_at) 查冷却，
+        # 清理任务按 created_at 删旧行（PERF-10）
+        indexes = [
+            models.Index(fields=['created_at'], name='aicalllog_created_idx'),
+            models.Index(fields=['stock', 'purpose', 'created_at'], name='aicalllog_stock_purpose_idx'),
+        ]
 
 
 class StockGroup(models.Model):
@@ -123,8 +129,10 @@ class MarketDailySnapshot(models.Model):
     class Meta:
         verbose_name = '市场日度快照'
         verbose_name_plural = '市场日度快照'
-        unique_together = ['kind', 'trade_date']
         ordering = ['-trade_date']
+        constraints = [
+            models.UniqueConstraint(fields=['kind', 'trade_date'], name='uniq_snapshot_kind_day'),
+        ]
 
     def __str__(self):
         return f"{self.kind} {self.trade_date}"
@@ -182,6 +190,10 @@ class AlertEvent(models.Model):
         # 库级保证同规则同日只一条，防并发评估重复触发（PERF-06）
         constraints = [
             models.UniqueConstraint(fields=['alert', 'trade_date'], name='uniq_alert_day'),
+        ]
+        # 评估时按当日取已触发规则、列表按未读筛选（PERF-10）
+        indexes = [
+            models.Index(fields=['trade_date', 'is_read'], name='alertevent_day_read_idx'),
         ]
 
     def __str__(self):
@@ -253,8 +265,10 @@ class DailyQuote(models.Model):
     class Meta:
         verbose_name = '每日行情'
         verbose_name_plural = '每日行情'
-        unique_together = ['stock', 'trade_date']
         ordering = ['-trade_date']
+        constraints = [
+            models.UniqueConstraint(fields=['stock', 'trade_date'], name='uniq_quote_stock_day'),
+        ]
 
     def __str__(self):
         return f"{self.stock.code} {self.trade_date}"
@@ -301,8 +315,11 @@ class MinuteBar(models.Model):
     class Meta:
         verbose_name = '分钟K线'
         verbose_name_plural = '分钟K线'
-        unique_together = ['stock', 'datetime']
         ordering = ['datetime']
+        # bulk_create(update_conflicts) 依赖此唯一约束
+        constraints = [
+            models.UniqueConstraint(fields=['stock', 'datetime'], name='uniq_minutebar_stock_dt'),
+        ]
 
     def __str__(self):
         return f"{self.stock.code} {self.datetime}"
@@ -401,8 +418,12 @@ class DetectorSignal(models.Model):
     class Meta:
         verbose_name = '探测器信号'
         verbose_name_plural = '探测器信号'
-        unique_together = ['target_kind', 'target_code', 'trade_date']
         ordering = ['-trade_date', '-score']
+        constraints = [
+            models.UniqueConstraint(
+                fields=['target_kind', 'target_code', 'trade_date'], name='uniq_signal_target_day',
+            ),
+        ]
         indexes = [
             models.Index(fields=['trade_date', 'severity']),
             models.Index(fields=['status', 'review_hit']),

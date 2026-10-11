@@ -386,3 +386,31 @@ class MarketFfUpsertTests(TestCase):
                  if c.kwargs.get('kind') == MarketDailySnapshot.KIND_MARKET_FF]
         self.assertEqual(dates, [_D2.isoformat()])
         self.assertEqual(saved[MarketDailySnapshot.KIND_MARKET_FF], 1)
+
+
+class IndexConstraintTests(TestCase):
+    """PERF-10：低频查询索引齐全；联合唯一改用具名 UniqueConstraint 且库级生效。"""
+
+    def test_meta_declares_indexes_and_constraints(self):
+        from . import models as m
+
+        def names(model, attr):
+            return {x.name for x in getattr(model._meta, attr)}
+
+        self.assertLessEqual({'aicalllog_created_idx', 'aicalllog_stock_purpose_idx'}, names(m.AiCallLog, 'indexes'))
+        self.assertIn('alertevent_day_read_idx', names(m.AlertEvent, 'indexes'))
+        for model, cname in [
+            (m.MarketDailySnapshot, 'uniq_snapshot_kind_day'),
+            (m.DailyQuote, 'uniq_quote_stock_day'),
+            (m.MinuteBar, 'uniq_minutebar_stock_dt'),
+            (m.DetectorSignal, 'uniq_signal_target_day'),
+        ]:
+            self.assertIn(cname, names(model, 'constraints'))
+            self.assertEqual(model._meta.unique_together, ())
+
+    def test_snapshot_unique_enforced(self):
+        from django.db import IntegrityError, transaction
+
+        MarketDailySnapshot.objects.create(kind='etf_share', trade_date=_D1, payload=[])
+        with self.assertRaises(IntegrityError), transaction.atomic():
+            MarketDailySnapshot.objects.create(kind='etf_share', trade_date=_D1, payload=[])
