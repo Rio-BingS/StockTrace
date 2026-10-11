@@ -38,23 +38,38 @@ async function loadMargin() {
   }
 }
 
+function listOf(res) {
+  return res.data.results || res.data
+}
+
+// 每次整页加载递增；切换股票后旧请求晚到时丢弃
+let loadSeq = 0
+
 async function loadData() {
+  const seq = ++loadSeq
+  const id = stockId.value
   loading.value = true
   try {
-    if (!stockInfo.value) {
-      try {
-        const infoRes = await stockApi.get(stockId.value)
-        stockInfo.value = infoRes.data
-        if (stockInfo.value) code.value = stockInfo.value.code
-      } catch (e) {
-        console.error('加载股票信息失败', e)
-      }
-    }
+    // 股票信息、日线、最新行情互不依赖，并行请求；单个失败不拖垮其它区块（FEF-14）
+    const [infoRes, dailyRes, latestRes] = await Promise.allSettled([
+      stockInfo.value ? Promise.resolve(null) : stockApi.get(id),
+      stockApi.getDaily(id, { days: days.value }),
+      stockApi.getDailyLatest(id),
+    ])
+    if (seq !== loadSeq) return
 
-    const dailyRes = await stockApi.getDaily(stockId.value, { days: days.value })
-    dailyData.value = dailyRes.data.results || dailyRes.data
-    const latestRes = await stockApi.getDailyLatest(stockId.value)
-    latestQuote.value = latestRes.data
+    if (infoRes.status === 'fulfilled') {
+      if (infoRes.value) {
+        stockInfo.value = infoRes.value.data
+        if (stockInfo.value) code.value = stockInfo.value.code
+      }
+    } else {
+      console.error('加载股票信息失败', infoRes.reason)
+    }
+    if (dailyRes.status === 'fulfilled') dailyData.value = listOf(dailyRes.value)
+    else console.error('加载日线数据失败', dailyRes.reason)
+    if (latestRes.status === 'fulfilled') latestQuote.value = latestRes.value.data
+    else console.error('加载最新行情失败', latestRes.reason)
 
     // 默认加载当日走势
     if (latestQuote.value?.trade_date) {
@@ -64,10 +79,24 @@ async function loadData() {
       intradayDate.value = ''
       intradayQuote.value = null
     }
-  } catch (e) {
-    console.error('加载股票数据失败', e)
   } finally {
-    loading.value = false
+    if (seq === loadSeq) loading.value = false
+  }
+}
+
+// 切换显示天数只重拉日线，保留用户在 K 线上选中的分时日期（FEF-14）
+async function loadDaily() {
+  const id = stockId.value
+  const seq = loadSeq
+  try {
+    const res = await stockApi.getDaily(id, { days: days.value })
+    if (seq !== loadSeq || id !== stockId.value) return
+    dailyData.value = listOf(res)
+    if (intradayDate.value) {
+      intradayQuote.value = quoteForDate(dailyData.value, latestQuote.value, intradayDate.value)
+    }
+  } catch (e) {
+    console.error('加载日线数据失败', e)
   }
 }
 
@@ -80,8 +109,11 @@ async function showIntraday(date) {
 
 async function loadMinuteData(date) {
   try {
-    const res = await stockApi.getMinutes(stockId.value, { date })
-    minuteData.value = res.data.results || res.data
+    const id = stockId.value
+    const res = await stockApi.getMinutes(id, { date })
+    // 连续点击不同日期 / 切换股票时，只保留最后一次请求的结果
+    if (id !== stockId.value || date !== intradayDate.value) return
+    minuteData.value = listOf(res)
   } catch (e) {
     console.error('加载分钟数据失败', e)
     minuteData.value = []
@@ -208,7 +240,7 @@ watch(code, (c) => {
       <h2>日K线图</h2>
       <div class="days-select">
         <label>显示天数：</label>
-        <select v-model="days" @change="loadData">
+        <select v-model="days" @change="loadDaily">
           <option :value="7">7天</option>
           <option :value="30">30天</option>
           <option :value="90">90天</option>
