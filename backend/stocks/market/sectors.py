@@ -15,7 +15,7 @@ import requests
 
 from ._cache import _cache_get, _cache_meta, _cache_set, _now_str, _to_float
 from ._query import _paginate, _sort_items
-from ._sources import _safe_df_call, _source_is_cool, _source_mark_fail, _source_mark_ok
+from ._sources import _safe_df_call
 
 logger = logging.getLogger(__name__)
 
@@ -233,19 +233,8 @@ def _ths_fund_flow(board):
 
 
 def _ths_fund_flow_df(board, source_name):
-    """带源冷却的同花顺板块资金流抓取；失败计入冷却，避免高频重试。"""
-    if _source_is_cool(source_name):
-        return None
-    try:
-        df = _ths_fund_flow(board)
-    except Exception as e:
-        _source_mark_fail(source_name, e)
-        return None
-    if df is None or df.empty:
-        _source_mark_fail(source_name, 'empty')
-        return None
-    _source_mark_ok(source_name)
-    return df
+    """带源冷却的同花顺板块资金流抓取；失败计入冷却，避免高频重试（走统一 failover，ARC-03）。"""
+    return _safe_df_call(_ths_fund_flow, board, source_name=source_name)
 
 
 def fetch_concept_fund_flow(period='day', ttl=180):

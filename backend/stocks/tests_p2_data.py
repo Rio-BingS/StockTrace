@@ -435,3 +435,77 @@ class AiCallLogObservabilityTests(TestCase):
         self.assertEqual((log.model, log.duration_ms, log.total_tokens), ('deepseek-chat', 1234, 321))
         self.assertEqual(log.cost, Decimal('0.001234'))
         self.assertEqual(AiCallLog._meta.get_field('error_reason').max_length, 200)
+
+
+class SourceChainTests(SimpleTestCase):
+    """ARC-03：个股与市场共用 SourceChain；个股保留换源退避并获得冷却。"""
+
+    def _boom(self, *a, **k):
+        raise RuntimeError('down')
+
+    def test_backoff_only_between_real_attempts(self):
+        from .market._sources import SourceChain
+
+        waits = []
+        chain = SourceChain(backoff=lambda i: min(2 ** i, 2), sleep=waits.append)
+        ok = pd.DataFrame({'a': [1]})
+        result, name = chain.run([(self._boom, 'a'), (self._boom, 'b'), (lambda: ok, 'c')])
+        self.assertEqual(name, 'c')
+        self.assertEqual(waits, [1, 2])
+
+    def test_empty_not_cooled_when_configured(self):
+        from .market import _sources
+
+        chain = _sources.SourceChain(empty_is_failure=False)
+        for _ in range(3):
+            self.assertEqual(chain.run([(lambda: pd.DataFrame(), 'quiet')]), (None, None))
+        self.assertFalse(_sources._source_is_cool('quiet'))
+
+    def test_deadline_stops_chain(self):
+        from .market._sources import SourceChain
+
+        called = []
+        with patch('stocks.market._sources.time.monotonic', side_effect=[0.0, 0.0, 99.0]):
+            result = SourceChain(deadline=5).run([
+                (lambda: called.append('a') or None, 'a'), (lambda: called.append('b'), 'b'),
+            ])
+        self.assertEqual(result, (None, None))
+        self.assertEqual(called, ['a'])
+
+    def test_last_resort_tries_cooled_source(self):
+        from .market import _sources
+
+        for _ in range(2):
+            _sources._source_mark_fail('only', 'x')
+        self.assertTrue(_sources._source_is_cool('only'))
+        ok = pd.DataFrame({'a': [1]})
+        self.assertEqual(_sources.SourceChain().run([(lambda: ok, 'only')]), (None, None))
+        result, name = _sources.SourceChain(last_resort=True).run([(lambda: ok, 'only')])
+        self.assertEqual(name, 'only')
+
+    def test_stock_chain_cools_failing_source_and_keeps_order(self):
+        from . import services
+
+        class Bad(services.DataSource):
+            name = 'bad'
+            calls = 0
+
+            def fetch_daily(self, *a):
+                Bad.calls += 1
+                raise RuntimeError('502')
+
+        class Good(services.DataSource):
+            name = 'good'
+
+            def fetch_daily(self, *a):
+                return pd.DataFrame({'日期': ['2026-09-01']})
+
+        with patch('stocks.services.time.sleep') as sleep:
+            for _ in range(3):
+                source, df = services._try_sources(
+                    'fetch_daily', '600000', '20260901', '20260901', sources=[Bad(), Good()])
+                self.assertEqual(source.name, 'good')
+        # 连续失败 2 次后冷却，第三次直接跳过坏源、也不再等待
+        self.assertEqual(Bad.calls, 2)
+        self.assertEqual(sleep.call_count, 2)
+        sleep.assert_called_with(1)
