@@ -10,6 +10,7 @@ from rest_framework.decorators import action, api_view
 from rest_framework.response import Response
 
 from ..common.params import parse_bool, parse_date, positive_int
+from ..errors import BadRequest
 from ..models import DailyQuote, MinuteBar, Stock
 from ..serializers import (
     DailyQuoteSerializer,
@@ -148,13 +149,13 @@ class StockViewSet(viewsets.ModelViewSet):
         if date_str := request.query_params.get('date'):
             try:
                 date_obj = parse_date(date_str, 'date', strict=True)
-            except ValueError as e:
+            except BadRequest as e:
                 return Response({'detail': str(e)}, status=status.HTTP_400_BAD_REQUEST)
             queryset = queryset.filter(trade_date=date_obj)
         elif request.query_params.get('days'):
             try:
                 days = positive_int(request.query_params, 'days', 365, maximum=3650, strict=True)
-            except ValueError as e:
+            except BadRequest as e:
                 return Response({'detail': str(e)}, status=status.HTTP_400_BAD_REQUEST)
             start_date = timezone.localdate() - timedelta(days=days)
             queryset = queryset.filter(trade_date__gte=start_date)
@@ -187,7 +188,7 @@ class StockViewSet(viewsets.ModelViewSet):
         if date_str := request.query_params.get('date'):
             try:
                 date_obj = parse_date(date_str, 'date', strict=True)
-            except ValueError as e:
+            except BadRequest as e:
                 return Response({'detail': str(e)}, status=status.HTTP_400_BAD_REQUEST)
         else:
             latest = MinuteBar.objects.filter(stock=stock).order_by('-datetime').first()

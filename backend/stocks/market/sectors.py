@@ -14,6 +14,7 @@ import pandas as pd
 import requests
 
 from ..common.envelope import envelope
+from ..errors import BadRequest
 from ._cache import _cache_get, _cache_meta, _cache_set, _now_str, _to_float
 from ._query import _paginate, _sort_items
 from ._sources import _safe_df_call
@@ -330,18 +331,18 @@ def _sector_payload(
 
 def get_sector_rotation(board='industry', period='day', q='', sort='net', order='desc', page=1, page_size=50):
     if board not in ('industry', 'concept'):
-        raise ValueError('board 必须是 industry 或 concept')
+        raise BadRequest('board 必须是 industry 或 concept')
     if period not in _SECTOR_PERIODS:
-        raise ValueError('period 必须是 day、5d、10d 或 20d')
+        raise BadRequest('period 必须是 day、5d、10d 或 20d')
     if sort not in _SECTOR_SORT_FIELDS:
-        raise ValueError('不支持的板块排序字段')
+        raise BadRequest('不支持的板块排序字段')
     if order not in ('asc', 'desc'):
-        raise ValueError('order 必须是 asc 或 desc')
+        raise BadRequest('order 必须是 asc 或 desc')
 
     if period in _SNAPSHOT_PERIOD_DAYS:
         # 多日轮动只由日度快照供数（DAT-15）；快照只含净额，其他排序字段无值可排
         if sort != 'net':
-            raise ValueError(f'{period} 轮动由日度快照供数，仅支持按净额排序')
+            raise BadRequest(f'{period} 轮动由日度快照供数，仅支持按净额排序')
         return _snapshot_rotation(
             board, period, q=q, order=order, page=page, page_size=page_size,
         )

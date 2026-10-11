@@ -16,6 +16,7 @@ from ..common.upstream import (
     _call_with_deadline,
     _request_deadline,
 )
+from ..errors import BadRequest
 from ..market import (
     fetch_stock_margin,
     get_etf_detail,
@@ -88,7 +89,7 @@ def market_trend(request):
         if params.get('days') and not (params.get('start') or params.get('end')):
             days = _positive_int(request, 'days', 120)
             if days not in (30, 60, 120, 250):
-                raise ValueError('days 仅支持 30、60、120、250')
+                raise BadRequest('days 仅支持 30、60、120、250')
             return get_market_trend(days=days)
         window = resolve_period(
             params.get, list(_TREND_PERIOD_DAYS) + ['ytd'], default='3m',
@@ -116,7 +117,7 @@ _TREND_PERIOD_MESSAGES = {
 
 
 def _positive_int(request, key, default, maximum=None):
-    """市场接口口径：非法值抛 ValueError（→400），即 common.params.positive_int(strict=True)。"""
+    """市场接口口径：非法值抛 BadRequest（→400），即 common.params.positive_int(strict=True)。"""
     return positive_int(request.query_params, key, default, maximum, strict=True)
 
 
@@ -127,18 +128,20 @@ def _optional_float(request, key):
     try:
         value = float(raw)
     except (TypeError, ValueError):
-        raise ValueError(f'{key} 必须是数字')
+        raise BadRequest(f'{key} 必须是数字')
     if value < 0:
-        raise ValueError(f'{key} 不能小于 0')
+        raise BadRequest(f'{key} 不能小于 0')
     return value
 
 
 def _market_bad_request(loader, label='市场数据'):
+    """只有 BadRequest（参数/业务校验）映射为 400 并回显其文案；其余异常——包括上游
+    数据解析抛出的普通 ValueError——都按上游失败走 502，不回显原文（ARC-05）。"""
     try:
         return Response(_call_with_deadline(loader, label))
     except (UpstreamTimeout, UpstreamCircuitOpen) as e:
         return _deadline_error_response(e, label)
-    except ValueError as e:
+    except BadRequest as e:
         return Response({'detail': str(e)}, status=status.HTTP_400_BAD_REQUEST)
     except Exception:
         return _upstream_failed(label)
@@ -248,7 +251,7 @@ def market_institutions(request):
             lambda: get_institution_holdings(stock_code=code, quarter=quarter), '机构持仓'))
     except (UpstreamTimeout, UpstreamCircuitOpen) as e:
         return _deadline_error_response(e, '机构持仓')
-    except ValueError as e:
+    except BadRequest as e:
         return Response({'detail': str(e)}, status=status.HTTP_400_BAD_REQUEST)
     except Exception:
         return _upstream_failed('机构持仓')

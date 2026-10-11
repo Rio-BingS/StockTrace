@@ -15,6 +15,8 @@ from datetime import date, datetime, timedelta
 
 from django.utils import timezone
 
+from ..errors import BadRequest
+
 PERIOD_LABELS = {
     '1d': '当日',
     '3d': '近3日',
@@ -75,7 +77,7 @@ DEFAULT_MESSAGES = {
 def resolve_period(params_get, allowed, default='1m', allow_custom=True,
                    max_span_days=400, today=None, *, max_days=None,
                    allow_future_end=True, custom_default_days=30, messages=None):
-    """从查询参数解析区间窗口；非法输入抛 ValueError（视图层转 400）。
+    """从查询参数解析区间窗口；非法输入抛 BadRequest（视图层转 400）。
 
     params_get: callable(key)，通常为 request.query_params.get
     max_days: 自定义区间最大跨度（天），缺省沿用旧参数 max_span_days（ARC-04）
@@ -91,11 +93,11 @@ def resolve_period(params_get, allowed, default='1m', allow_custom=True,
     end_raw = (params_get('end') or '').strip()
 
     def bad_period():
-        return ValueError(msg['bad_period'].format(allowed='/'.join(allowed or [])))
+        return BadRequest(msg['bad_period'].format(allowed='/'.join(allowed or [])))
 
     if preset == 'custom' or start_raw or end_raw:
         if not allow_custom:
-            raise ValueError(msg['no_custom'])
+            raise BadRequest(msg['no_custom'])
         if preset != 'custom' and preset not in (allowed or []):
             raise bad_period()
         return _custom_window(start_raw, end_raw, today, max_days, allow_future_end,
@@ -118,16 +120,16 @@ def _custom_window(start_raw, end_raw, today, max_days, allow_future_end, defaul
         try:
             return datetime.strptime(raw, '%Y-%m-%d').date()
         except ValueError as e:
-            raise ValueError(msg['bad_date'].format(key=key)) from e
+            raise BadRequest(msg['bad_date'].format(key=key)) from e
 
     end = _parse(end_raw, 'end', today)
     start = _parse(start_raw, 'start', end - timedelta(days=default_days))
     if start > end:
-        raise ValueError(msg['start_after_end'])
+        raise BadRequest(msg['start_after_end'])
     if not allow_future_end and end > today:
-        raise ValueError(msg['future_end'])
+        raise BadRequest(msg['future_end'])
     if (end - start).days > max_days:
-        raise ValueError(msg['too_long'].format(max_days=max_days))
+        raise BadRequest(msg['too_long'].format(max_days=max_days))
     return PeriodWindow('custom', start, end)
 
 

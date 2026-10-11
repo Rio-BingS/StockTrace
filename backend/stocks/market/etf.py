@@ -8,6 +8,7 @@ import akshare as ak
 from django.utils import timezone
 
 from ..common.envelope import envelope
+from ..errors import BadRequest
 from ._cache import _cache_get, _cache_meta, _cache_set, _now_str, _stale_or, _to_float
 from .holders import fetch_holder_structure
 from ._query import _paginate, _sort_items
@@ -152,13 +153,13 @@ def get_etf_share_radar(
     min_turnover=None, page=1, page_size=50, ttl=180, force=False,
 ):
     if scope not in ('equity_broad', 'all'):
-        raise ValueError('scope 必须是 equity_broad 或 all')
+        raise BadRequest('scope 必须是 equity_broad 或 all')
     if rank not in _ETF_RANK_SORT:
-        raise ValueError('不支持的 ETF 排行维度')
+        raise BadRequest('不支持的 ETF 排行维度')
     if sort is not None and sort not in _ETF_SORT_FIELDS:
-        raise ValueError('不支持的 ETF 排序字段')
+        raise BadRequest('不支持的 ETF 排序字段')
     if order is not None and order not in ('asc', 'desc'):
-        raise ValueError('order 必须是 asc 或 desc')
+        raise BadRequest('order 必须是 asc 或 desc')
 
     if force:
         _fetch_etf_spot_df(ttl=ttl, force=True)
@@ -351,7 +352,7 @@ def _parse_range_date(value, label):
     try:
         return datetime.strptime(str(value), '%Y-%m-%d').date()
     except ValueError:
-        raise ValueError(f'{label} 必须是 YYYY-MM-DD 格式日期')
+        raise BadRequest(f'{label} 必须是 YYYY-MM-DD 格式日期')
 
 
 def _window_stats(history):
@@ -373,28 +374,28 @@ def _window_stats(history):
 
 def get_etf_detail(code, range_name='3m', start_date=None, end_date=None):
     if not (str(code).isdigit() and len(str(code)) == 6):
-        raise ValueError('ETF 代码必须是 6 位数字')
+        raise BadRequest('ETF 代码必须是 6 位数字')
     if range_name not in ('1w', '1m', '3m', '6m', '1y', 'custom'):
-        raise ValueError('range 必须是 1w、1m、3m、6m、1y 或 custom')
+        raise BadRequest('range 必须是 1w、1m、3m、6m、1y 或 custom')
     start = end = None
     if range_name == 'custom':
         if not start_date:
-            raise ValueError('自定义区间必须提供 start_date')
+            raise BadRequest('自定义区间必须提供 start_date')
         start = _parse_range_date(start_date, 'start_date')
         end = _parse_range_date(end_date, 'end_date') if end_date else None
         if end is None:
             end = timezone.localdate()
         if start > end:
-            raise ValueError('start_date 不能晚于 end_date')
+            raise BadRequest('start_date 不能晚于 end_date')
         if (end - start).days > _CUSTOM_MAX_SPAN_DAYS:
-            raise ValueError(f'自定义区间最长 {_CUSTOM_MAX_SPAN_DAYS} 天（约 3 年）')
+            raise BadRequest(f'自定义区间最长 {_CUSTOM_MAX_SPAN_DAYS} 天（约 3 年）')
     else:
         end = timezone.localdate()
         start = end - timedelta(days=_RANGE_LOOKBACK_DAYS[range_name])
 
     quote = next((item for item in _normalized_etf_items() if item['code'] == code), None)
     if quote is None:
-        raise ValueError('未在 ETF 行情中找到该代码')
+        raise BadRequest('未在 ETF 行情中找到该代码')
     chg_maps = {n: snapshots.share_change_map(n)[0] for n in (1, 5, 20)}
     has_chg = any(m is not None for m in chg_maps.values())
     if has_chg:

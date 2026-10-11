@@ -168,3 +168,48 @@ class ErrorHierarchyTests(SimpleTestCase):
              errors.UpstreamTimeout.status_code, errors.UpstreamCircuitOpen.status_code],
             [400, 502, 504, 503],
         )
+
+
+class BadRequestMappingTests(SimpleTestCase):
+    """步骤 5b：参数校验抛 BadRequest→400（文案原样）；上游解析的普通 ValueError→502 且不回显。"""
+
+    def test_plain_value_error_from_upstream_is_502_without_echo(self):
+        from unittest import mock
+
+        secret = 'invalid literal for int() with base 10: http://10.0.0.8/internal?token=abc'
+        for target, url in (
+            ('stocks.views.market.get_sector_rotation', '/api/market/sectors/'),
+            ('stocks.views.market.get_etf_share_radar', '/api/market/etf-radar/'),
+            ('stocks.views.market.get_institution_holdings', '/api/market/institutions/'),
+            ('stocks.views.market.get_market_fund_flow_window', '/api/market/market-flow/'),
+        ):
+            with self.subTest(url=url), mock.patch(target, side_effect=ValueError(secret)), \
+                    self.assertLogs('stocks', level='ERROR'):
+                r = self.client.get(url)
+                self.assertEqual(r.status_code, 502)
+                self.assertNotIn('10.0.0.8', r.content.decode())
+                self.assertIn('error_id', r.json())
+
+    def test_domain_validation_raises_bad_request_with_legacy_text(self):
+        from .errors import BadRequest
+        from .market import etf, institutions, sectors
+        from .market.periods import FULL_PRESETS, resolve_period
+
+        cases = [
+            (lambda: sectors.get_sector_rotation(board='x'), 'board 必须是 industry 或 concept'),
+            (lambda: etf.get_etf_share_radar(scope='x'), 'scope 必须是 equity_broad 或 all'),
+            (lambda: etf.get_etf_detail(code='abc'), 'ETF 代码必须是 6 位数字'),
+            (lambda: institutions._normalize_quarter('2026Q9'), 'quarter 格式应为 YYYYQn（如 2026Q1）'),
+            (lambda: resolve_period(lambda k: {'period': 'zz'}.get(k), FULL_PRESETS), 'period 仅支持'),
+        ]
+        for fn, text in cases:
+            with self.subTest(text=text), self.assertRaisesMessage(BadRequest, text):
+                fn()
+
+    def test_view_param_errors_keep_400_text(self):
+        r = self.client.get('/api/market/sectors/?page=0')
+        self.assertEqual((r.status_code, r.json()), (400, {'detail': 'page 必须是正整数'}))
+        r = self.client.get('/api/market/etf-radar/?min_turnover=-1')
+        self.assertEqual((r.status_code, r.json()), (400, {'detail': 'min_turnover 不能小于 0'}))
+        r = self.client.get('/api/market/national-etf/flow/?period=bad')
+        self.assertEqual(r.json(), {'detail': 'period 必须是 1d、3d、5d、1w、1m、3m、6m 或 ytd'})

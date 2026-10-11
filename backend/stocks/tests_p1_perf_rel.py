@@ -553,7 +553,10 @@ class MarketDeadlineBreakerTests(SimpleTestCase):
             self.assertEqual(self._get('/api/market/').status_code, 200)
 
     def test_errors_still_map_to_400_and_502(self):
-        with mock.patch.object(self.views, 'get_sector_rotation', side_effect=ValueError('bad')):
+        from stocks.errors import BadRequest
+
+        # ARC-05：只有 BadRequest 是 400；上游解析抛的普通 ValueError 改走 502（见下方用例）
+        with mock.patch.object(self.views, 'get_sector_rotation', side_effect=BadRequest('bad')):
             self.assertEqual(self._get('/api/market/sectors/').status_code, 400)
         with mock.patch.object(self.views, 'get_sector_rotation', side_effect=RuntimeError('x')), \
                 self.assertLogs('stocks.views', level='ERROR'):
