@@ -4,6 +4,7 @@ from rest_framework import status
 from rest_framework.decorators import api_view
 from rest_framework.response import Response
 
+from ..common.envelope import list_response
 from ..common.params import parse_bool
 from ..models import Stock
 from ..serializers import AlertSerializer
@@ -108,6 +109,9 @@ def alert_detail(request, pk):
     return Response(AlertSerializer(alert).data)
 
 
+ALERT_EVENT_LIMIT = 100
+
+
 @api_view(['GET'])
 def alert_event_list(request):
     """提醒触发记录（最近 100 条）；?unread=1 只看未读"""
@@ -115,9 +119,13 @@ def alert_event_list(request):
 
     events = AlertEvent.objects.select_related('alert', 'stock')
     # 旧口径只认小写 '1'/'true'，保持不变
-    if parse_bool(request.query_params.get('unread'), truthy=('1', 'true'), ignore_case=False):
+    unread_only = parse_bool(request.query_params.get('unread'), truthy=('1', 'true'), ignore_case=False)
+    if unread_only:
         events = events.filter(is_read=False)
-    return Response([{
+    # 多取一条判断是否截断，外壳模式通过 meta.truncated 告知前端（ARC-04）
+    rows = list(events[:ALERT_EVENT_LIMIT + 1])
+    truncated = len(rows) > ALERT_EVENT_LIMIT
+    return list_response(request, [{
         'id': event.id,
         'alert_id': event.alert_id,
         'stock_id': event.stock_id,
@@ -127,7 +135,11 @@ def alert_event_list(request):
         'trade_date': event.trade_date,
         'is_read': event.is_read,
         'created_at': event.created_at,
-    } for event in events[:100]])
+    } for event in rows[:ALERT_EVENT_LIMIT]], meta={
+        'limit': ALERT_EVENT_LIMIT,
+        'truncated': truncated,
+        'unread_only': unread_only,
+    })
 
 
 @api_view(['POST'])

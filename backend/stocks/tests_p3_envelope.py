@@ -9,12 +9,12 @@ LegacySnapshotTests 锁定不带 ?envelope 时各列表接口的旧输出（逐�
 import json
 import os
 import re
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 from decimal import Decimal
 from pathlib import Path
 from unittest import mock
 
-from django.test import TestCase
+from django.test import SimpleTestCase, TestCase, override_settings
 from django.utils import timezone
 
 from .models import AlertEvent, DailyQuote, MinuteBar, PriceAlert, ScreenerPreset, Stock, StockGroup
@@ -142,3 +142,116 @@ class LegacySnapshotTests(SnapshotMixin, ListFixtureMixin, TestCase):
     def test_dashboard_empty_is_bare_list(self):
         Stock.objects.update(is_active=False)
         self.assertEqual(self._get('/api/dashboard/'), '[]')
+
+
+# ------------------------------------------------------------
+# ?envelope=1：裸数组接口包成 {items, pagination, meta}（步骤 4c）
+# ------------------------------------------------------------
+
+# 裸数组接口：快照键（items 应与旧输出相同）、路径、期望 meta（None 表示只校验是对象）
+ENVELOPE_CASES = (
+    ('stocks_search', '/api/stocks/search/?q=银行', {'q': '银行'}),
+    ('daily_default', '/api/stocks/{s1}/daily/', {'code': '600000', 'date': None, 'days': 365}),
+    ('daily_days', '/api/stocks/{s1}/daily/?days=30', {'code': '600000', 'date': None, 'days': 30}),
+    ('daily_date', '/api/stocks/{s1}/daily/?date=2026-09-03', {'code': '600000', 'date': '2026-09-03', 'days': None}),
+    ('minutes_default', '/api/stocks/{s1}/minutes/', {'code': '600000', 'date': '2026-09-04'}),
+    ('minutes_date', '/api/stocks/{s1}/minutes/?date=2026-09-03', {'code': '600000', 'date': '2026-09-03'}),
+    ('minutes_empty', '/api/stocks/{s2}/minutes/', {'code': '000001', 'date': None}),
+    ('dashboard', '/api/dashboard/', {}),
+    ('groups', '/api/stock-groups/', {}),
+    ('alert_events', '/api/alerts/events/', {'limit': 100, 'truncated': False, 'unread_only': False}),
+    ('alert_events_unread', '/api/alerts/events/?unread=1', {'limit': 100, 'truncated': False, 'unread_only': True}),
+    ('presets', '/api/screener/presets/', None),
+)
+
+
+class EnvelopeModeTests(ListFixtureMixin, TestCase):
+    def _get(self, path, **params):
+        r = self.client.get(path.format(s1=self.s1.id, s2=self.s2.id), params)
+        self.assertEqual(r.status_code, 200, path)
+        return r
+
+    def test_bare_list_endpoints_wrap_items(self):
+        snapshots = _load()
+        for key, path, meta in ENVELOPE_CASES:
+            for flag in ('1', 'true', 'YES'):
+                with self.subTest(key=key, envelope=flag):
+                    sep = '&' if '?' in path else '?'
+                    body = self._get(f'{path}{sep}envelope={flag}').json()
+                    self.assertEqual(list(body), ['items', 'pagination', 'meta'])
+                    self.assertIsNone(body['pagination'])
+                    self.assertIsInstance(body['meta'], dict)
+                    if meta is not None:
+                        self.assertEqual(body['meta'], meta)
+                    # items 与旧裸数组逐项相同（键顺序也相同）
+                    legacy = json.loads(snapshots[key])
+                    self.assertEqual(json.loads(_norm(json.dumps(body['items'], separators=(',', ':'),
+                                                                   ensure_ascii=False))), legacy)
+
+    def test_presets_meta_counts_builtins(self):
+        from .screener.strategies import BUILTIN_STRATEGIES
+
+        body = self._get('/api/screener/presets/', envelope=1).json()
+        self.assertEqual(body['meta'], {'builtin_count': len(BUILTIN_STRATEGIES)})
+        self.assertEqual(len(body['items']), len(BUILTIN_STRATEGIES) + 1)
+
+    def test_dashboard_empty(self):
+        Stock.objects.update(is_active=False)
+        self.assertEqual(self._get('/api/dashboard/', envelope=1).json(),
+                         {'items': [], 'pagination': None, 'meta': {}})
+
+    def test_alert_events_truncated_flag(self):
+        alert = PriceAlert.objects.first()
+        AlertEvent.objects.bulk_create([
+            AlertEvent(alert=alert, stock=self.s1, message=f'e{i}', trade_date=date(2026, 1, 1) + timedelta(days=i))
+            for i in range(99)
+        ])
+        body = self._get('/api/alerts/events/', envelope=1).json()
+        self.assertEqual(len(body['items']), 100)
+        self.assertTrue(body['meta']['truncated'])
+        # 旧输出仍然最多 100 条
+        self.assertEqual(len(self._get('/api/alerts/events/').json()), 100)
+        AlertEvent.objects.filter(message='e0').delete()
+        self.assertFalse(self._get('/api/alerts/events/', envelope=1).json()['meta']['truncated'])
+
+    def test_bad_params_still_400_in_envelope_mode(self):
+        r = self.client.get(f'/api/stocks/{self.s1.id}/daily/', {'envelope': 1, 'date': '2026/09/03'})
+        self.assertEqual(r.status_code, 400)
+        self.assertEqual(r.json(), {'detail': 'date 格式应为 YYYY-MM-DD'})
+
+    def test_unknown_values_fall_back_to_legacy(self):
+        for flag in ('2', 'on', 'True1'):
+            with self.subTest(envelope=flag):
+                self.assertIsInstance(self._get('/api/stock-groups/', envelope=flag).json(), list)
+
+
+@override_settings(STOCKTRACE_ENVELOPE_DEFAULT=True)
+class EnvelopeDefaultFlipTests(ListFixtureMixin, TestCase):
+    """下一版翻转默认值的演练：不带参数即外壳，?envelope=0 仍拿到旧输出。"""
+
+    def test_flip_default(self):
+        body = self.client.get('/api/stock-groups/').json()
+        self.assertEqual(list(body), ['items', 'pagination', 'meta'])
+        self.assertIsInstance(self.client.get('/api/stock-groups/?envelope=0').json(), list)
+        self.assertIsInstance(self.client.get('/api/dashboard/?envelope=false').json(), list)
+
+
+class WantsEnvelopeTests(SimpleTestCase):
+    def _req(self, query=''):
+        from rest_framework.request import Request
+        from rest_framework.test import APIRequestFactory
+
+        return Request(APIRequestFactory().get(f'/x/{query}'))
+
+    def test_values(self):
+        from .common.envelope import wants_envelope
+
+        cases = {'': False, '?envelope=': False, '?envelope=1': True, '?envelope=true': True,
+                 '?envelope=Yes': True, '?envelope=0': False, '?envelope=no': False, '?envelope=x': False}
+        for query, expected in cases.items():
+            with self.subTest(query=query):
+                self.assertIs(wants_envelope(self._req(query)), expected)
+        with override_settings(STOCKTRACE_ENVELOPE_DEFAULT=True):
+            self.assertTrue(wants_envelope(self._req()))
+            self.assertTrue(wants_envelope(self._req('?envelope=')))
+            self.assertFalse(wants_envelope(self._req('?envelope=0')))

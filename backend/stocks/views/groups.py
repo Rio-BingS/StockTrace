@@ -5,6 +5,7 @@ from rest_framework import status
 from rest_framework.decorators import api_view
 from rest_framework.response import Response
 
+from ..common.envelope import list_response
 from ..serializers import StockGroupSerializer
 
 
@@ -25,7 +26,7 @@ def stock_group_list(request):
             active_stock_count=Count('stocks', filter=Q(stocks__is_active=True)),
         )
         # 列表查询用 annotate 算好活跃股票数（PERF-08：旧实现每组一次 count()）
-        return Response(StockGroupSerializer(groups, many=True).data)
+        return list_response(request, StockGroupSerializer(groups, many=True).data)
 
     name = (request.data.get('name') or '').strip()
     if not name or len(name) > 50:

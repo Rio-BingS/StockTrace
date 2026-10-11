@@ -5,6 +5,8 @@ from rest_framework import status
 from rest_framework.decorators import api_view
 from rest_framework.response import Response
 
+from ..common.envelope import list_response
+
 
 @api_view(['GET', 'POST'])
 def screener_preset_list(request):
@@ -24,13 +26,13 @@ def screener_preset_list(request):
             'spec': s['spec'],
             'created_at': None,
         } for s in BUILTIN_STRATEGIES]
-        return Response(builtins + [{
+        return list_response(request, builtins + [{
             'id': preset.id,
             'builtin': False,
             'name': preset.name,
             'spec': preset.spec,
             'created_at': preset.created_at,
-        } for preset in presets])
+        } for preset in presets], meta={'builtin_count': len(builtins)})
 
     name = (request.data.get('name') or '').strip()
     spec = request.data.get('spec')

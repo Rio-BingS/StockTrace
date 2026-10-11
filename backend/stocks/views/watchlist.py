@@ -9,6 +9,7 @@ from rest_framework import status, viewsets
 from rest_framework.decorators import action, api_view
 from rest_framework.response import Response
 
+from ..common.envelope import list_response
 from ..common.params import parse_bool, parse_date, positive_int
 from ..models import DailyQuote, MinuteBar, Stock
 from ..serializers import (
@@ -109,7 +110,7 @@ class StockViewSet(viewsets.ModelViewSet):
         keyword = request.query_params.get('q', '')
         results = search_stocks(keyword)
         serializer = StockSearchSerializer(results, many=True)
-        return Response(serializer.data)
+        return list_response(request, serializer.data, meta={'q': keyword})
 
     @action(detail=False, methods=['post'], url_path='fetch-all')
     def fetch_all(self, request):
@@ -144,22 +145,27 @@ class StockViewSet(viewsets.ModelViewSet):
         # select_related：序列化器 source='stock.code' 否则每行懒加载一次（PERF-05）
         queryset = DailyQuote.objects.filter(stock=stock).select_related('stock')
 
+        # 外壳模式（?envelope=1）的 meta：实际生效的筛选条件（ARC-04）
+        meta = {'code': stock.code, 'date': None, 'days': None}
         # 按日期筛选
         if date_str := request.query_params.get('date'):
             # 非法日期抛 BadRequest，由全局 EXCEPTION_HANDLER 转 400（ARC-05）
             date_obj = parse_date(date_str, 'date', strict=True)
             queryset = queryset.filter(trade_date=date_obj)
+            meta['date'] = date_obj.isoformat()
         elif request.query_params.get('days'):
             days = positive_int(request.query_params, 'days', 365, maximum=3650, strict=True)
             start_date = timezone.localdate() - timedelta(days=days)
             queryset = queryset.filter(trade_date__gte=start_date)
+            meta['days'] = days
         else:
             # 无参数默认近 365 天，不再整表倒出（PERF-05）
             queryset = queryset.filter(trade_date__gte=timezone.localdate() - timedelta(days=365))
+            meta['days'] = 365
 
         queryset = queryset.order_by('-trade_date')
         serializer = DailyQuoteSerializer(queryset, many=True)
-        return Response(serializer.data)
+        return list_response(request, serializer.data, meta=meta)
 
     @action(detail=True, methods=['get'], url_path='daily/latest')
     def daily_latest(self, request, pk=None):
@@ -185,7 +191,7 @@ class StockViewSet(viewsets.ModelViewSet):
         else:
             latest = MinuteBar.objects.filter(stock=stock).order_by('-datetime').first()
             if latest is None:
-                return Response([])
+                return list_response(request, [], meta={'code': stock.code, 'date': None})
             date_obj = timezone.localtime(latest.datetime).date()
 
         start = timezone.make_aware(datetime.combine(date_obj, datetime.min.time()))
@@ -194,7 +200,8 @@ class StockViewSet(viewsets.ModelViewSet):
 
         queryset = queryset.order_by('datetime')
         serializer = MinuteBarSerializer(queryset, many=True)
-        return Response(serializer.data)
+        # meta.date：实际返回的交易日（缺省 date 时是最近一个有分钟数据的日子）
+        return list_response(request, serializer.data, meta={'code': stock.code, 'date': date_obj.isoformat()})
 
 
 def _quote_row(stock, quote):
@@ -264,10 +271,10 @@ def dashboard(request):
         .annotate(latest_quote_id=Subquery(latest)).order_by('code')
     )
     if not stocks:
-        return Response([])
+        return list_response(request, [])
 
     quotes = DailyQuote.objects.in_bulk([s.latest_quote_id for s in stocks if s.latest_quote_id])
     for s in stocks:
         s.latest_quote = quotes.get(s.latest_quote_id)
 
-    return Response(QuoteRowSerializer(stocks, many=True).data)
+    return list_response(request, QuoteRowSerializer(stocks, many=True).data)
