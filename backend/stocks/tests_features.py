@@ -80,7 +80,7 @@ class SnapshotSaveTests(TestCase):
             'stocks.market.sectors.fetch_concept_fund_flow', return_value=[],
         ), patch(
             'stocks.market.etf._normalized_etf_items', return_value=[],
-        ), patch('akshare.fund_etf_scale_sse', return_value=pd.DataFrame()):
+        ), patch('stocks.market.snapshots._etf_spot_fresh_for', return_value=True), patch('akshare.fund_etf_scale_sse', return_value=pd.DataFrame()):
             snapshots.save_daily_snapshots(trade_date=_BASE)
             items[0]['net'] = 2e8
             snapshots.save_daily_snapshots(trade_date=_BASE)
@@ -897,7 +897,7 @@ class MarketFundFlowSnapshotTests(TestCase):
             'stocks.market.sectors.fetch_concept_fund_flow', return_value=[],
         ), patch(
             'stocks.market.etf._normalized_etf_items', return_value=[],
-        ):
+        ), patch('stocks.market.snapshots._etf_spot_fresh_for', return_value=True):
             saved = snapshots.save_daily_snapshots(trade_date=_BASE)
 
         self.assertEqual(saved[MarketDailySnapshot.KIND_MARKET_FF], 1)
@@ -920,7 +920,7 @@ class MarketFundFlowSnapshotTests(TestCase):
             'stocks.market.sectors.fetch_concept_fund_flow', return_value=[],
         ), patch(
             'stocks.market.etf._normalized_etf_items', return_value=[],
-        ):
+        ), patch('stocks.market.snapshots._etf_spot_fresh_for', return_value=True):
             saved = snapshots.save_daily_snapshots(trade_date=_BASE)
         self.assertNotIn(MarketDailySnapshot.KIND_MARKET_FF, saved)
         self.assertFalse(
@@ -1345,7 +1345,8 @@ class SnapshotCloseGuardTests(TestCase):
                  'stocks.market.etf._normalized_etf_items', return_value=[],
              ), patch(
                  'stocks.market.etf_flow.fetch_flow_klines', side_effect=RuntimeError('down'),
-             ), patch('akshare.fund_etf_scale_sse', return_value=pd.DataFrame()):
+             ), patch('stocks.market.snapshots._etf_spot_fresh_for', return_value=True), \
+                patch('akshare.fund_etf_scale_sse', return_value=pd.DataFrame()):
             tz.localtime.return_value = aware
             return snapshots.save_daily_snapshots(trade_date=trade_date or aware.date())
 
