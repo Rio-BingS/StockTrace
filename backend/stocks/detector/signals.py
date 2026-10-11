@@ -39,7 +39,7 @@ def _previous_trading_days(before_date, n):
     is_trading_day 是三态：None（未知）或抛异常都视为「日历不可用」——旧实现在
     这种情况下把自然日当交易日推进（ALG-15），节假日会被当成「当天没信号」而断链。
     """
-    from ..services import is_trading_day
+    from ..trading_calendar import is_trading_day
 
     days = []
     day = before_date

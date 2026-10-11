@@ -175,7 +175,7 @@ def evaluate_alerts(now=None):
     now：评估时刻（本地时区，测试注入用）；缺省取当前时间。
     非交易日 / 盘前 / 午休直接返回 []；单条规则异常只记日志，不中断本轮其余规则。
     """
-    from .services import is_trading_day
+    from .trading_calendar import is_trading_day
 
     now = timezone.localtime(now) if now is not None else timezone.localtime()
     today = now.date()

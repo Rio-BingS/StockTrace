@@ -260,7 +260,8 @@ def _minute_bar_cleanup_job():
 
 def _preopen_incremental_job():
     """开盘前只补日线缺口，压力小。"""
-    from .services import fetch_incremental_daily_all, is_trading_day
+    from .services import fetch_incremental_daily_all
+    from .trading_calendar import is_trading_day
     if not is_trading_day():
         logger.debug("非交易日，跳过开盘前增量日线")
         return
@@ -273,7 +274,7 @@ def _post_close_lagging_job():
     交易日 + [15:30, 21:00]；21:00 为当天最后一次。
     """
     from .market import warm_post_close_lagging
-    from .services import is_trading_day
+    from .trading_calendar import is_trading_day
 
     if not is_trading_day():
         logger.debug("非交易日，跳过收盘后晚到数据预热")
@@ -324,7 +325,7 @@ def _detector_scan_job():
     """
     if os.environ.get('STOCKTRACE_DETECTOR', '1').lower() in ('0', 'false', 'no', 'off'):
         return
-    from .services import is_trading_day
+    from .trading_calendar import is_trading_day
 
     if not is_trading_day():
         logger.debug('非交易日，跳过探测器扫描')
