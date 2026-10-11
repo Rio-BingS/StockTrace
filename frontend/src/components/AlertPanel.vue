@@ -1,8 +1,9 @@
 <script setup>
-import { onMounted, onUnmounted, ref } from 'vue'
+import { ref } from 'vue'
 import { alertApi } from '../api/stocks.js'
 import { formatDateTime } from '../utils/format.js'
 import { errorMessage } from '../utils/errorMessage.js'
+import { usePolling } from '../composables/usePolling.js'
 
 // stocks：看板数据（用于添加规则的股票下拉）
 defineProps({
@@ -24,8 +25,6 @@ const RULE_OPTIONS = [
   { value: 'daily_pct_above', label: '日涨幅达到 %' },
   { value: 'daily_pct_below', label: '日跌幅达到 %（填正数）' },
 ]
-
-let refreshTimer = null
 
 async function load() {
   try {
@@ -98,15 +97,8 @@ function toggleEvents() {
   load()
 }
 
-onMounted(() => {
-  load()
-  // 与看板轮询节奏一致：60s 刷新未读数与规则状态
-  refreshTimer = setInterval(load, 60000)
-})
-
-onUnmounted(() => {
-  if (refreshTimer) clearInterval(refreshTimer)
-})
+// 与看板轮询节奏一致：交易时段 60s 刷新未读数与规则状态，非交易时段 10 分钟（FEF-04）
+usePolling(load, { interval: 60000 })
 </script>
 
 <template>

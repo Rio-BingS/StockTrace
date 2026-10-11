@@ -6,6 +6,7 @@ import StockTable from '../components/StockTable.vue'
 import StockWatchlist from '../components/StockWatchlist.vue'
 import AlertPanel from '../components/AlertPanel.vue'
 import { errorMessage } from '../utils/errorMessage.js'
+import { usePolling } from '../composables/usePolling.js'
 
 const router = useRouter()
 const dashboardData = ref([])
@@ -13,7 +14,6 @@ const loading = ref(false)
 const loadError = ref('')
 const fetchLoading = ref(false)
 const fetchMessage = ref('')
-let refreshTimer = null
 let pollTimer = null
 
 // 分组：标签页筛选 + 管理（新增/重命名/删除）
@@ -174,15 +174,15 @@ function onWatchlistRefresh() {
   setTimeout(loadDashboard, 15000)
 }
 
-// 低配 VPS：看板 60s 轮询即可（拉取任务另有独立轮询）
+// 低配 VPS：看板交易时段 60s 轮询、非交易时段 10 分钟、页面隐藏暂停（FEF-04）；
+// 拉取任务另有独立轮询
+usePolling(loadDashboard, { interval: 60000 })
+
 onMounted(() => {
-  loadDashboard()
   loadGroups()
-  refreshTimer = setInterval(loadDashboard, 60000)
 })
 
 onUnmounted(() => {
-  if (refreshTimer) clearInterval(refreshTimer)
   stopPoll()
 })
 </script>

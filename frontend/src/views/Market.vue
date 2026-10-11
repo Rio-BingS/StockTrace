@@ -1,5 +1,5 @@
 <script setup>
-import { ref, computed, onMounted, onUnmounted } from 'vue'
+import { ref, computed, onMounted } from 'vue'
 import { RouterLink } from 'vue-router'
 import VChart from 'vue-echarts'
 import { use } from 'echarts/core'
@@ -15,6 +15,7 @@ import PeriodPicker from '../components/PeriodPicker.vue'
 import { formatPct, formatNum, pctClass } from '../utils/format.js'
 import { formatYi, formatYiAxis, formatTurnover, formatAmount } from '../utils/marketFormat.js'
 import { errorMessage } from '../utils/errorMessage.js'
+import { usePolling } from '../composables/usePolling.js'
 
 use([
   BarChart,
@@ -28,7 +29,6 @@ use([
 const loading = ref(false)
 const error = ref('')
 const overview = ref(null)
-let timer = null
 
 const defaultModules = [
   { key: 'trend', title: '全市场走势', desc: '主要指数归一化对比', path: '/market/trend' },
@@ -156,14 +156,11 @@ async function loadMarket() {
   }
 }
 
-onMounted(() => {
-  loadMarket()
-  loadFlow()
-  timer = setInterval(loadMarket, 90000)
-})
+// 交易时段 90s 轮询；非交易时段 10 分钟；KeepAlive 切走即停，返回超过 5 分钟静默刷新（FEF-04）
+const { refresh: refreshMarket } = usePolling(loadMarket, { interval: 90000 })
 
-onUnmounted(() => {
-  if (timer) clearInterval(timer)
+onMounted(() => {
+  loadFlow()
 })
 </script>
 
@@ -174,7 +171,7 @@ onUnmounted(() => {
         <h1>市场数据</h1>
         <p class="sub" v-if="overview?.updated_at">更新时间 {{ overview.updated_at }}</p>
       </div>
-      <button class="btn" @click="loadMarket" :disabled="loading">
+      <button class="btn" @click="refreshMarket" :disabled="loading">
         {{ loading ? '刷新中...' : '刷新' }}
       </button>
     </div>
