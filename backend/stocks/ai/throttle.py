@@ -27,9 +27,6 @@ PROVIDER_TEST_DAILY_LIMIT = 30
 # 进程内互斥：同一进程的线程之间串行"检查 + 占位"。跨进程依赖 settings 里
 # SQLite 的 BEGIN IMMEDIATE（事务开始即拿写锁）
 _reserve_lock = threading.Lock()
-# 进行中的占位流水 pk。模型还没有 status 字段时，用它区分"进行中"与"已失败"
-_inflight = set()
-_inflight_lock = threading.Lock()
 
 
 def stock_cooldown_seconds():
@@ -57,13 +54,11 @@ def _has_field(name):
 
 
 def _cooldown_qs(qs):
-    """冷却只算成功与进行中的调用；失败调用不触发冷却（AIX-06）。"""
-    from django.db.models import Q
-    if _has_field('status'):
-        return qs.filter(status__in=('pending', 'success'))
-    with _inflight_lock:
-        inflight = list(_inflight)
-    return qs.filter(Q(success=True) | Q(pk__in=inflight))
+    """冷却只算成功与进行中的调用；失败调用不触发冷却（AIX-06）。
+
+    "进行中"按数据库 status 判断，多个 worker 之间同样可见。
+    """
+    return qs.filter(status__in=(AiCallLog.STATUS_PENDING, AiCallLog.STATUS_SUCCESS))
 
 
 def check_throttle(purpose, stock=None):
@@ -109,12 +104,10 @@ def reserve_call(purpose, provider=None, stock=None):
             allowed, reason = check_throttle(purpose, stock=stock)
         if not allowed:
             return None, reason
-        fields = {'purpose': purpose, 'provider': provider, 'stock': stock, 'success': False}
-        if _has_field('status'):
-            fields['status'] = 'pending'
-        log = AiCallLog.objects.create(**fields)
-    with _inflight_lock:
-        _inflight.add(log.pk)
+        log = AiCallLog.objects.create(
+            purpose=purpose, provider=provider, stock=stock,
+            success=False, status=AiCallLog.STATUS_PENDING,
+        )
     return log, None
 
 
@@ -135,8 +128,6 @@ def finish_call(log, success, usage=None, provider=None, error=None):
     可观测性（AIX-08）：耗时按占位写入时刻计算，模型取实际服务商。model/latency_ms/
     error/status 字段待模型迁移补上后自动落库；在此之前同样内容写一行 INFO 日志。
     """
-    with _inflight_lock:
-        _inflight.discard(log.pk)
     if provider is not None:
         log.provider = provider
     provider = log.provider
@@ -148,9 +139,9 @@ def finish_call(log, success, usage=None, provider=None, error=None):
     log.success = bool(success)
     log.prompt_tokens = (usage or {}).get('prompt_tokens')
     log.completion_tokens = (usage or {}).get('completion_tokens')
-    update = ['success', 'prompt_tokens', 'completion_tokens', 'provider']
+    log.status = AiCallLog.STATUS_SUCCESS if success else AiCallLog.STATUS_FAILED
+    update = ['success', 'status', 'prompt_tokens', 'completion_tokens', 'provider']
     optional = {
-        'status': 'success' if success else 'failed',
         'model': model,
         'latency_ms': latency_ms,
         'error': err,
@@ -170,8 +161,6 @@ def finish_call(log, success, usage=None, provider=None, error=None):
 
 def cancel_call(log):
     """撤销占位（并发已满等未真正调用上游的情况）：不占额度。"""
-    with _inflight_lock:
-        _inflight.discard(log.pk)
     log.delete()
 
 
@@ -184,7 +173,6 @@ def log_call(purpose, provider=None, stock=None, success=True, usage=None):
         success=success,
         prompt_tokens=(usage or {}).get('prompt_tokens'),
         completion_tokens=(usage or {}).get('completion_tokens'),
+        status=AiCallLog.STATUS_SUCCESS if success else AiCallLog.STATUS_FAILED,
     )
-    if _has_field('status'):
-        fields['status'] = 'success' if success else 'failed'
     return AiCallLog.objects.create(**fields)

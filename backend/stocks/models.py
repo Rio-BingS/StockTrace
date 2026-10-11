@@ -43,7 +43,20 @@ class AiCallLog(models.Model):
         'Stock', on_delete=models.SET_NULL, null=True, blank=True, verbose_name='股票'
     )
     purpose = models.CharField('用途', max_length=30, choices=PURPOSE_CHOICES)
+    STATUS_PENDING = 'pending'
+    STATUS_SUCCESS = 'success'
+    STATUS_FAILED = 'failed'
+    STATUS_CHOICES = [
+        (STATUS_PENDING, '进行中'),
+        (STATUS_SUCCESS, '成功'),
+        (STATUS_FAILED, '失败'),
+    ]
+
     success = models.BooleanField('成功', default=True)
+    # 调用状态（AIX-06）：占位流水先记 pending，回填为 success/failed；
+    # 节流的同股冷却只算 pending + success，跨进程也能看到"进行中"
+    status = models.CharField('状态', max_length=10, choices=STATUS_CHOICES,
+                              default=STATUS_SUCCESS, db_index=True)
     prompt_tokens = models.IntegerField('输入 tokens', null=True, blank=True)
     completion_tokens = models.IntegerField('输出 tokens', null=True, blank=True)
     # 可观测性字段（AIX-08）：均可空，旧行与未知值保持 NULL，不拿 0 冒充

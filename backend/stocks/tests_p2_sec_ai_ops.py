@@ -193,14 +193,24 @@ class AiThrottleAtomicTests(TestCase):
             self.assertTrue(check_throttle('analysis', stock=self.stock)[0])
 
     def test_unexpected_exception_releases_reservation(self):
-        from stocks.ai.throttle import _inflight
         from stocks.models import AiCallLog
         self.post.side_effect = RuntimeError('boom')
         c = APIClient(raise_request_exception=False)
         r = c.post(f'/api/stocks/{self.stock.id}/ai-analysis/')
         self.assertEqual(r.status_code, 500)
-        self.assertFalse(_inflight)
-        self.assertFalse(AiCallLog.objects.get().success)
+        log = AiCallLog.objects.get()
+        self.assertFalse(log.success)
+        self.assertEqual(log.status, AiCallLog.STATUS_FAILED)
+
+    def test_pending_status_visible_across_processes(self):
+        # 占位只落在数据库（无进程内状态）：另一个 worker 写下的 pending 同样挡冷却
+        from stocks.ai.throttle import check_throttle
+        from stocks.models import AiCallLog
+        AiCallLog.objects.create(purpose='analysis', provider=self.provider, stock=self.stock,
+                                 success=False, status=AiCallLog.STATUS_PENDING)
+        self.assertFalse(check_throttle('analysis', stock=self.stock)[0])
+        AiCallLog.objects.update(status=AiCallLog.STATUS_FAILED)
+        self.assertTrue(check_throttle('analysis', stock=self.stock)[0])
 
 
 class AiCallLogObservabilityTests(TestCase):
