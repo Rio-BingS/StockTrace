@@ -198,7 +198,7 @@ onMounted(load)
   font-size: 22px;
 }
 .hint {
-  color: #888;
+  color: #909090;
   font-size: 13px;
 }
 .msg {

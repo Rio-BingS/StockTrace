@@ -62,7 +62,7 @@ function openDisclaimer() {
   margin: 0 auto;
   padding: 14px 20px 18px;
   border-top: 1px solid #1e2a44;
-  color: #66738c;
+  color: #8690a4;
   font-size: 12px;
   display: flex;
   align-items: center;

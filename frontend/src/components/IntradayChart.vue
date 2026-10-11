@@ -454,13 +454,13 @@ const extremaList = computed(() => {
 }
 
 .base-note {
-  color: #888;
+  color: #909090;
   font-size: 12px;
 }
 
 .no-data {
   text-align: center;
-  color: #666;
+  color: #919191;
   padding: 60px;
 }
 
@@ -480,7 +480,7 @@ const extremaList = computed(() => {
 }
 
 .tlabel {
-  color: #888;
+  color: #909090;
   font-size: 13px;
 }
 

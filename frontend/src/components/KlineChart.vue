@@ -234,7 +234,7 @@ function handleChartClick(params) {
 
 .no-data {
   text-align: center;
-  color: #666;
+  color: #919191;
   padding: 60px;
 }
 </style>

@@ -95,5 +95,5 @@ const option = computed(() => {
 </template>
 
 <style scoped>
-.empty { text-align: center; padding: 36px 20px; color: #64718a; }
+.empty { text-align: center; padding: 36px 20px; color: #8690a4; }
 </style>

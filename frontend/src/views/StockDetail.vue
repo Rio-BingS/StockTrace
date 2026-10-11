@@ -345,7 +345,7 @@ watch(latestQuote, (q) => {
 }
 
 .summary-item .label {
-  color: #888;
+  color: #909090;
   font-size: 12px;
 }
 
@@ -365,7 +365,7 @@ watch(latestQuote, (q) => {
 
 .no-data {
   text-align: center;
-  color: #666;
+  color: #919191;
   padding: 60px;
   background: #16213e;
   border-radius: 8px;
@@ -405,7 +405,7 @@ watch(latestQuote, (q) => {
 .loading {
   text-align: center;
   padding: 60px;
-  color: #888;
+  color: #909090;
 }
 
 @media (max-width: 768px) {
@@ -428,7 +428,7 @@ watch(latestQuote, (q) => {
   border-radius: 8px;
   padding: 10px 12px;
 }
-.margin-item .label { display: block; color: #888; font-size: 12px; margin-bottom: 4px; }
+.margin-item .label { display: block; color: #909090; font-size: 12px; margin-bottom: 4px; }
 .margin-item .value { font-size: 16px; font-weight: bold; color: #eee; }
-.margin-note { margin-top: 8px; font-size: 12px; color: #888; }
+.margin-note { margin-top: 8px; font-size: 12px; color: #909090; }
 </style>

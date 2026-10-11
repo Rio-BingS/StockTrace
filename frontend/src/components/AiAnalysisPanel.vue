@@ -182,6 +182,6 @@ async function run() {
 .hint {
   margin-top: 8px;
   font-size: 12px;
-  color: #888;
+  color: #909090;
 }
 </style>

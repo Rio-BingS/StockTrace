@@ -410,7 +410,7 @@ onUnmounted(() => { northGuard.abort(); detailGuard.abort() })
 
 .sub {
   margin: 6px 0 0;
-  color: #888;
+  color: #909090;
   font-size: 13px;
 }
 
@@ -477,7 +477,7 @@ onUnmounted(() => { northGuard.abort(); detailGuard.abort() })
 }
 
 .hint {
-  color: #888;
+  color: #909090;
   font-size: 12px;
   margin: 0 0 10px;
 }
@@ -551,7 +551,7 @@ onUnmounted(() => { northGuard.abort(); detailGuard.abort() })
 }
 
 .data-table th {
-  color: #888;
+  color: #909090;
   font-weight: 500;
 }
 
@@ -620,6 +620,6 @@ onUnmounted(() => { northGuard.abort(); detailGuard.abort() })
 }
 
 .north-summary b { color: #eee; font-size: 13px; }
-.north-summary .muted { color: #667; }
+.north-summary .muted { color: #8f8f9c; }
 
 </style>

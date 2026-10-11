@@ -118,7 +118,7 @@ const insights = computed(() => buildInsights(props.summary, props.divergenceCou
 .insight-grid p,
 .strength-item p {
   margin: 3px 0 0;
-  color: #71808c;
+  color: #85929c;
   font-size: 10px;
   line-height: 1.45;
 }

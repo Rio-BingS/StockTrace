@@ -264,7 +264,7 @@ usePolling(load, { interval: 60000 })
 }
 
 .btn.off {
-  color: #888;
+  color: #909090;
 }
 
 .btn.danger {
@@ -280,7 +280,7 @@ usePolling(load, { interval: 60000 })
 
 .rule-table th {
   text-align: left;
-  color: #888;
+  color: #909090;
   font-weight: normal;
   padding: 6px 8px;
   border-bottom: 1px solid #2a2a44;
@@ -293,7 +293,7 @@ usePolling(load, { interval: 60000 })
 }
 
 .note-cell {
-  color: #888;
+  color: #909090;
   max-width: 200px;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -301,7 +301,7 @@ usePolling(load, { interval: 60000 })
 }
 
 .empty-hint {
-  color: #888;
+  color: #909090;
   font-size: 13px;
 }
 
@@ -337,7 +337,7 @@ usePolling(load, { interval: 60000 })
 }
 
 .events .time {
-  color: #777;
+  color: #919191;
   white-space: nowrap;
 }
 </style>

@@ -235,7 +235,7 @@ async function handleDelete(e, item) {
 .loading {
   text-align: center;
   padding: 40px;
-  color: #888;
+  color: #909090;
 }
 
 .stock-table {
@@ -289,13 +289,13 @@ async function handleDelete(e, item) {
 .arrow-right::before {
   content: '▶';
   font-size: 10px;
-  color: #888;
+  color: #909090;
 }
 
 .arrow-down::before {
   content: '▼';
   font-size: 10px;
-  color: #888;
+  color: #909090;
 }
 
 .code {
@@ -323,7 +323,7 @@ async function handleDelete(e, item) {
 
 .empty {
   text-align: center;
-  color: #666;
+  color: #919191;
   padding: 40px !important;
 }
 
@@ -361,7 +361,7 @@ async function handleDelete(e, item) {
 }
 
 .elabel {
-  color: #888;
+  color: #909090;
   font-size: 12px;
 }
 
@@ -417,7 +417,7 @@ async function handleDelete(e, item) {
 .btn-kline {
   background: transparent;
   border: 1px solid #3a7bd5;
-  color: #3a7bd5;
+  color: var(--accent);
   border-radius: 4px;
   padding: 2px 8px;
   font-size: 13px;
@@ -435,7 +435,7 @@ async function handleDelete(e, item) {
 .btn-kline-lg {
   background: #0f3460;
   border: 1px solid #3a7bd5;
-  color: #3a7bd5;
+  color: var(--accent);
   border-radius: 4px;
   padding: 6px 16px;
   font-size: 13px;

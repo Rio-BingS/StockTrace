@@ -224,7 +224,7 @@ onUnmounted(() => guard.abort())
   margin-bottom: 16px;
 }
 .page-header h1 { margin: 0; font-size: 22px; color: #eee; }
-.sub { color: #888; font-size: 13px; margin-top: 4px; }
+.sub { color: #909090; font-size: 13px; margin-top: 4px; }
 .btn {
   padding: 8px 16px;
   border: none;
@@ -275,11 +275,11 @@ onUnmounted(() => guard.abort())
   border: 1px solid #1a2744;
 }
 .name { font-weight: 600; color: #eee; font-size: 14px; }
-.code { color: #666; font-size: 12px; margin: 2px 0 8px; }
+.code { color: #919191; font-size: 12px; margin: 2px 0 8px; }
 .pct { font-size: 20px; font-weight: 700; }
 .empty {
   text-align: center;
-  color: #666;
+  color: #919191;
   padding: 40px;
 }
 @media (max-width: 640px) {

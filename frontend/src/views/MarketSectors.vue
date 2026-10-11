@@ -279,7 +279,7 @@ onUnmounted(() => guard.abort())
 
 .header-meta {
   gap: 12px;
-  color: #71808f;
+  color: #85929f;
   font-size: 12px;
 }
 
@@ -382,7 +382,7 @@ button:disabled {
 .period-note {
   display: block;
   margin-top: 5px;
-  color: #6b7987;
+  color: #86919d;
   font-size: 10px;
 }
 
@@ -415,7 +415,7 @@ button:disabled {
 }
 
 .snapshot-strip span {
-  color: #758391;
+  color: #86929e;
   font-size: 11px;
 }
 
@@ -452,7 +452,7 @@ button:disabled {
 .section-title > span,
 .table-title span,
 .table-title small {
-  color: #71808c;
+  color: #85929c;
   font-size: 11px;
 }
 
@@ -505,7 +505,7 @@ th {
   z-index: 2;
   top: 0;
   background: #101922;
-  color: #75838f;
+  color: #86929c;
   font-weight: 500;
   text-align: right;
   white-space: nowrap;
@@ -545,13 +545,13 @@ td.name {
 }
 
 .empty {
-  color: #687681;
+  color: #86919a;
   padding: 36px;
   text-align: center;
 }
 
 .pager {
-  color: #6d7a85;
+  color: #86919a;
   padding: 9px 12px;
   font-size: 11px;
 }

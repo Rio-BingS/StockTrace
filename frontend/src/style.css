@@ -11,7 +11,8 @@
   --bg-input: #1a1a2e;
   --text-primary: #eeeeee;
   --text-secondary: #aaaaaa;
-  --text-muted: #666666;
+  /* 次要文字：在 #16213e / #0f3460 上对比度 ≥4.5（WCAG AA，FEX-02） */
+  --text-muted: #9aa3b2;
   /* 品牌强调色与涨跌色分离：链接、按钮、选中态用蓝色，红绿只表示涨跌（FEX-01） */
   --accent: #5b9bff;
   --accent-hover: #82b4ff;

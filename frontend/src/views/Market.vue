@@ -445,12 +445,12 @@ onUnmounted(() => flowGuard.abort())
 .market-page { color: #ddd; }
 
 /* 指数估值分位 */
-.val-note { color: #68758d; font-size: 11px; }
+.val-note { color: #8691a4; font-size: 11px; }
 .val-grid { display: grid; grid-template-columns: repeat(4, 1fr); gap: 10px; }
 .val-card { background: #111d34; border: 1px solid #213251; border-radius: 10px; padding: 12px; }
 .val-head { display: flex; justify-content: space-between; align-items: baseline; }
 .val-name { font-size: 14px; color: #e0e7f1; }
-.val-date { color: #68758d; font-size: 10px; }
+.val-date { color: #8691a4; font-size: 10px; }
 .val-pe { margin-top: 8px; color: #8490a8; font-size: 12px; }
 .val-pe b { font-size: 20px; color: #e0e7f1; margin-left: 6px; }
 .val-bar { position: relative; height: 8px; background: #0c172a; border-radius: 4px; margin: 10px 0 8px; overflow: visible; }
@@ -460,7 +460,7 @@ onUnmounted(() => flowGuard.abort())
 .val-pct b { margin-left: 4px; }
 .val-pct b.v-low { color: #d6a13c; }
 .val-pct b.v-high { color: var(--danger); }
-.val-span { margin-top: 6px; color: #68758d; font-size: 10px; }
+.val-span { margin-top: 6px; color: #8691a4; font-size: 10px; }
 @media (max-width: 1000px) { .val-grid { grid-template-columns: repeat(2, 1fr); } }
 
 
@@ -479,7 +479,7 @@ onUnmounted(() => flowGuard.abort())
 }
 
 .sub {
-  color: #888;
+  color: #909090;
   font-size: 13px;
   margin-top: 4px;
 }
@@ -599,7 +599,7 @@ onUnmounted(() => flowGuard.abort())
 }
 
 .idx-name { color: #eee; font-weight: 600; font-size: 14px; }
-.idx-code { color: #666; font-size: 12px; margin-bottom: 6px; }
+.idx-code { color: #919191; font-size: 12px; margin-bottom: 6px; }
 .idx-price { font-size: 22px; font-weight: bold; margin: 4px 0; }
 .idx-change {
   display: flex;
@@ -615,7 +615,7 @@ onUnmounted(() => flowGuard.abort())
   font-size: 12px;
   color: #aaa;
 }
-.idx-meta.muted { margin-top: 4px; color: #777; }
+.idx-meta.muted { margin-top: 4px; color: #919191; }
 
 .summary-row {
   display: grid;
@@ -631,7 +631,7 @@ onUnmounted(() => flowGuard.abort())
 }
 
 .summary-card.chart-sm { min-height: 140px; }
-.slabel { color: #888; font-size: 12px; margin-bottom: 6px; }
+.slabel { color: #909090; font-size: 12px; margin-bottom: 6px; }
 .svalue { font-size: 22px; font-weight: bold; color: #eee; }
 .svalue.trio {
   font-size: 18px;
@@ -639,10 +639,10 @@ onUnmounted(() => flowGuard.abort())
   align-items: baseline;
   gap: 6px;
 }
-.sep { color: #555; }
-.shint { margin-top: 6px; font-size: 12px; color: #888; }
+.sep { color: #919191; }
+.shint { margin-top: 6px; font-size: 12px; color: #909090; }
 
-.zt-date { color: #777; font-size: 12px; font-weight: normal; }
+.zt-date { color: #919191; font-size: 12px; font-weight: normal; }
 .zt-metrics {
   display: flex;
   flex-wrap: wrap;
@@ -679,7 +679,7 @@ onUnmounted(() => flowGuard.abort())
 .chart-block { margin-top: 8px; }
 .chart-block .section-head { margin: 0 0 10px; }
 .chart-block .section-head h3 { margin: 0; }
-.flow-label { color: #888; font-weight: normal; font-size: 12px; }
+.flow-label { color: #909090; font-weight: normal; font-size: 12px; }
 .flow-summary {
   display: flex;
   flex-wrap: wrap;
@@ -700,7 +700,7 @@ onUnmounted(() => flowGuard.abort())
 .concept-title { font-size: 13px; font-weight: 600; margin-bottom: 8px; }
 
 .empty, .empty-inline {
-  color: #666;
+  color: #919191;
   padding: 24px;
   text-align: center;
   font-size: 13px;

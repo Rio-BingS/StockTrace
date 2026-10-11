@@ -124,7 +124,7 @@ function barWidth(row, side) {
 .eyebrow {
   display: block;
   margin-bottom: 2px;
-  color: #70808e;
+  color: #84929e;
   font-size: 10px;
 }
 
@@ -196,7 +196,7 @@ function barWidth(row, side) {
 
 .column-heading small {
   margin-top: 2px;
-  color: #677581;
+  color: #87929b;
   font-size: 10px;
 }
 
@@ -225,7 +225,7 @@ function barWidth(row, side) {
   place-items: center;
   border: 1px solid #31424d;
   border-radius: 4px;
-  color: #7f8d99;
+  color: #84929d;
   font-family: ui-monospace, SFMono-Regular, Consolas, monospace;
   font-size: 10px;
 }
@@ -259,7 +259,7 @@ function barWidth(row, side) {
 
 .flow-name small {
   margin-top: 2px;
-  color: #687682;
+  color: #86919b;
   font-size: 9px;
 }
 
@@ -317,7 +317,7 @@ function barWidth(row, side) {
 
 .flow-core small,
 .flow-core > span:last-child {
-  color: #738390;
+  color: #84929d;
   font-size: 10px;
 }
 
@@ -331,7 +331,7 @@ function barWidth(row, side) {
   display: grid;
   min-height: 330px;
   place-items: center;
-  color: #6d7a86;
+  color: #86919b;
   font-size: 12px;
 }
 
@@ -346,7 +346,7 @@ function barWidth(row, side) {
   gap: 7px;
   align-items: flex-start;
   border-top: 1px solid #25323c;
-  color: #687681;
+  color: #86919a;
   padding: 9px 13px;
   font-size: 10px;
 }
