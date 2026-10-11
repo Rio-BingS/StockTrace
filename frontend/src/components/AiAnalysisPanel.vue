@@ -1,7 +1,8 @@
 <script setup>
-import { onBeforeUnmount, ref, watch } from 'vue'
+import { computed, onBeforeUnmount, ref, watch } from 'vue'
 import { aiApi } from '../api/stocks.js'
 import { aiDisclaimer, aiErrorText, createAiTask, isCanceled } from '../utils/aiRequest.js'
+import { isQueuedJob, pollAiJob } from '../utils/aiJob.js'
 
 const props = defineProps({
   stockId: { type: [Number, String], required: true },
@@ -13,6 +14,9 @@ const loading = ref(false)
 const errorMsg = ref('')
 // 已等待秒数（AIX-05）：LLM 同步调用可能要几十秒，给用户进度感
 const elapsed = ref(0)
+// 后台任务阶段：queued（排队中，queuedAhead 为前面的任务数）/ running（分析中）
+const phase = ref('')
+const queuedAhead = ref(0)
 let timer = null
 const task = createAiTask()
 
@@ -36,6 +40,11 @@ function reset() {
   errorMsg.value = ''
 }
 
+const phaseText = computed(() => {
+  if (phase.value !== 'queued') return '分析中'
+  return queuedAhead.value > 0 ? `已排队（前面 ${queuedAhead.value} 个）` : '已排队'
+})
+
 watch(() => props.stockId, reset)
 onBeforeUnmount(cancel)
 
@@ -45,13 +54,29 @@ async function run() {
   errorMsg.value = ''
   analysis.value = ''
   elapsed.value = 0
+  phase.value = 'running'
+  queuedAhead.value = 0
   stopTimer()
   timer = setInterval(() => { elapsed.value += 1 }, 1000)
   try {
-    const res = await aiApi.analyzeStock(props.stockId, { signal })
+    // 走后台排队：请求立即返回 job_id，不再占着服务端请求线程等 LLM
+    const res = await aiApi.analyzeStockAsync(props.stockId, { signal })
     if (!isCurrent()) return
-    analysis.value = res.data.analysis
-    disclaimer.value = aiDisclaimer(res.data)
+    let data = res.data
+    if (isQueuedJob(res)) {
+      phase.value = 'queued'
+      data = await pollAiJob(() => aiApi.aiJob(res.data.job_id, { signal }), {
+        signal,
+        onStatus(job) {
+          if (!isCurrent()) return
+          phase.value = job.status
+          queuedAhead.value = job.queued_ahead || 0
+        },
+      })
+      if (!isCurrent()) return
+    }
+    analysis.value = data.analysis
+    disclaimer.value = aiDisclaimer(data)
   } catch (e) {
     if (!isCurrent() || isCanceled(e)) return
     errorMsg.value = aiErrorText(e)
@@ -71,7 +96,7 @@ async function run() {
       <div class="ai-actions">
         <button v-if="loading" class="btn ghost" @click="cancel">取消</button>
         <button class="btn" :disabled="loading" @click="run">
-          {{ loading ? `分析中，已等待 ${elapsed} 秒…` : (analysis ? '重新分析' : '开始分析') }}
+          {{ loading ? `${phaseText}，已等待 ${elapsed} 秒…` : (analysis ? '重新分析' : '开始分析') }}
         </button>
       </div>
     </div>

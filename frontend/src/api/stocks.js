@@ -235,6 +235,16 @@ export const aiApi = {
     return api.post(`/stocks/${id}/ai-analysis/`, {}, { ...aiTimeout, signal })
   },
 
+  // 个股 AI 分析（后台排队）：返回 202 + job_id，再用 aiJob 轮询结果；请求本身很快
+  analyzeStockAsync(id, { signal } = {}) {
+    return api.post(`/stocks/${id}/ai-analysis/?async=1`, {}, { timeout: 30000, signal })
+  },
+
+  // 查询 AI 后台任务状态与结果
+  aiJob(jobId, { signal } = {}) {
+    return api.get(`/ai/jobs/${encodeURIComponent(jobId)}/`, { timeout: 30000, signal })
+  },
+
   // 结构化条件选股（不调 LLM，快速）
   screener(spec) {
     return api.post('/screener/', spec, { timeout: 30000 })
