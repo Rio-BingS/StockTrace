@@ -329,7 +329,9 @@ class NegativeCacheTests(SimpleTestCase):
     def test_sentiment_empty_dt_pool_counts_zero(self):
         from .market import sentiment
         zt = pd.DataFrame({'代码': ['600000'], '连板数': [1]})
-        with patch('stocks.market.sentiment.ak.stock_zt_pool_em', return_value=zt), \
+        # 交易日历桩：候选日推算不得触网（新浪日历 / BaoStock）
+        with patch('stocks.market.sentiment.is_trading_day', return_value=True), \
+                patch('stocks.market.sentiment.ak.stock_zt_pool_em', return_value=zt), \
                 patch('stocks.market.sentiment.ak.stock_zt_pool_dtgc_em',
                       return_value=pd.DataFrame()), \
                 patch('stocks.market.sentiment.ak.stock_zt_pool_zbgc_em',
