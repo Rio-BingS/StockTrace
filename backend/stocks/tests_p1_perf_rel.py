@@ -376,3 +376,65 @@ class MinuteBarCleanupTests(TestCase):
         self.assertEqual(fields['hour'], '2')
         self.assertEqual(fields['minute'], '30')
         self.assertEqual(job.func.lock_name, 'minute_bar_cleanup')
+
+
+class SqliteConcurrencyTests(SimpleTestCase):
+    """PERF-03：timeout 可配；IMMEDIATE 事务下两连接并发"先读后写"不报 database is locked。"""
+
+    def test_options(self):
+        from django.conf import settings
+
+        opts = settings.DATABASES['default']['OPTIONS']
+        self.assertEqual(opts['transaction_mode'], 'IMMEDIATE')
+        self.assertEqual(opts['timeout'], int(os.environ.get('STOCKTRACE_DB_TIMEOUT', '20')))
+        self.assertIn('WAL', opts['init_command'].upper())
+
+    def test_concurrent_read_then_write(self):
+        import sqlite3
+        from copy import deepcopy
+
+        from django.conf import settings
+        from django.db.backends.sqlite3.base import DatabaseWrapper
+
+        tmp = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, tmp, True)
+        path = tmp / 'perf03.sqlite3'
+        init = sqlite3.connect(path)
+        init.execute('PRAGMA journal_mode=WAL')
+        init.execute('CREATE TABLE t (id INTEGER PRIMARY KEY, n INTEGER)')
+        init.commit()
+        init.close()
+
+        cfg = deepcopy(settings.DATABASES['default'])
+        cfg.update(NAME=str(path), TEST={}, ATOMIC_REQUESTS=False, AUTOCOMMIT=True, CONN_MAX_AGE=0,
+                   CONN_HEALTH_CHECKS=False, TIME_ZONE=None, USER='', PASSWORD='', HOST='', PORT='')
+        errors, barrier = [], threading.Barrier(2)
+
+        def worker(i):
+            w = DatabaseWrapper(deepcopy(cfg), alias=f'perf03_{i}')
+            try:
+                barrier.wait(5)
+                # 与 transaction.atomic 相同的开启方式：BEGIN <transaction_mode>
+                w.set_autocommit(False, force_begin_transaction_with_broken_autocommit=True)
+                with w.cursor() as c:
+                    c.execute('SELECT COUNT(*) FROM t')
+                    n = c.fetchone()[0]
+                    time.sleep(0.3)  # 让两个事务的"读"重叠
+                    c.execute('INSERT INTO t (n) VALUES (%s)', [n])
+                w.commit()
+                w.set_autocommit(True)
+            except Exception as e:  # noqa: BLE001
+                errors.append(e)
+            finally:
+                w.close()
+
+        threads = [threading.Thread(target=worker, args=(i,)) for i in range(2)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join(30)
+        self.assertEqual(errors, [])
+        check = sqlite3.connect(path)
+        self.addCleanup(check.close)
+        # IMMEDIATE 串行化：第二个事务读到第一个提交后的计数
+        self.assertEqual(sorted(r[0] for r in check.execute('SELECT n FROM t')), [0, 1])

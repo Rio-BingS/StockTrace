@@ -129,7 +129,8 @@ DATABASES = {
         # 调度线程写库与 REST 读线程并发：WAL 读写不互斥，timeout 放宽锁等待，
         # 避免 "database is locked" 500
         'OPTIONS': {
-            'timeout': 20,
+            # 锁等待秒数（PERF-03）：可用 STOCKTRACE_DB_TIMEOUT 调整，默认 20
+            'timeout': int(os.environ.get('STOCKTRACE_DB_TIMEOUT', '20')),
             'init_command': 'PRAGMA journal_mode=WAL;',
         },
     }
