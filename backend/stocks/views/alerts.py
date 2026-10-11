@@ -5,22 +5,12 @@ from rest_framework.decorators import api_view
 from rest_framework.response import Response
 
 from ..models import Stock
+from ..serializers import AlertSerializer
 
 
 def _alert_row(alert):
-    return {
-        'id': alert.id,
-        'stock_id': alert.stock_id,
-        'code': alert.stock.code,
-        'name': alert.stock.name,
-        'rule_type': alert.rule_type,
-        'rule_display': alert.get_rule_type_display(),
-        'threshold': alert.threshold,
-        'note': alert.note,
-        'is_active': alert.is_active,
-        'last_triggered_at': alert.last_triggered_at,
-        'created_at': alert.created_at,
-    }
+    """兼容旧导入路径保留一版；新代码直接用 serializers.AlertSerializer（ARC-01）。"""
+    return AlertSerializer(alert).data
 
 
 def _alert_rule_error(stock_id, rule_type, threshold_raw):
@@ -75,7 +65,7 @@ def alert_list(request):
     if request.method == 'GET':
         alerts = PriceAlert.objects.select_related('stock').all()
         unread = AlertEvent.objects.filter(is_read=False).count()
-        return Response({'unread_count': unread, 'items': [_alert_row(a) for a in alerts]})
+        return Response({'unread_count': unread, 'items': AlertSerializer(alerts, many=True).data})
 
     stock_id = request.data.get('stock_id')
     rule_type = request.data.get('rule_type')
@@ -88,7 +78,7 @@ def alert_list(request):
         threshold=_normalize_threshold(rule_type, request.data.get('threshold')),
         note=(request.data.get('note') or '').strip()[:100],
     )
-    return Response(_alert_row(alert), status=status.HTTP_201_CREATED)
+    return Response(AlertSerializer(alert).data, status=status.HTTP_201_CREATED)
 
 
 @api_view(['PATCH', 'DELETE'])
@@ -114,7 +104,7 @@ def alert_detail(request, pk):
     if 'note' in request.data:
         alert.note = (request.data.get('note') or '').strip()[:100]
         alert.save(update_fields=['note'])
-    return Response(_alert_row(alert))
+    return Response(AlertSerializer(alert).data)
 
 
 @api_view(['GET'])

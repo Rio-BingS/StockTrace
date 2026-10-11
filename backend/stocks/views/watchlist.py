@@ -12,8 +12,8 @@ from rest_framework.response import Response
 from ..models import DailyQuote, MinuteBar, Stock
 from ..serializers import (
     DailyQuoteSerializer,
-    DashboardStockSerializer,
     MinuteBarSerializer,
+    QuoteRowSerializer,
     StockSearchSerializer,
     StockSerializer,
     normalize_stock_code,
@@ -218,6 +218,11 @@ class StockViewSet(viewsets.ModelViewSet):
 
 
 def _quote_row(stock, quote):
+    """旧的 Dashboard 行字典（未经序列化的原始值）。
+
+    dashboard 已改用 serializers.QuoteRowSerializer（ARC-01）；此函数仅为旧导入
+    路径保留一版，下一版删除。
+    """
     base = {
         'id': stock.id,
         'code': stock.code,
@@ -282,8 +287,7 @@ def dashboard(request):
         return Response([])
 
     quotes = DailyQuote.objects.in_bulk([s.latest_quote_id for s in stocks if s.latest_quote_id])
-    latest_map = {s.id: quotes.get(s.latest_quote_id) for s in stocks}
+    for s in stocks:
+        s.latest_quote = quotes.get(s.latest_quote_id)
 
-    data = [_quote_row(s, latest_map.get(s.id)) for s in stocks]
-    serializer = DashboardStockSerializer(data, many=True)
-    return Response(serializer.data)
+    return Response(QuoteRowSerializer(stocks, many=True).data)

@@ -5,20 +5,12 @@ from rest_framework import status
 from rest_framework.decorators import api_view
 from rest_framework.response import Response
 
+from ..serializers import StockGroupSerializer
+
 
 def _group_row(group):
-    # 列表查询已用 annotate 算好活跃股票数（PERF-08：旧实现每组一次 count()）；
-    # 单个分组的新建/修改路径没有注解，退回单次计数
-    count = getattr(group, 'active_stock_count', None)
-    if count is None:
-        count = group.stocks.filter(is_active=True).count()
-    return {
-        'id': group.id,
-        'name': group.name,
-        'order': group.order,
-        'stock_count': count,
-        'created_at': group.created_at,
-    }
+    """兼容旧导入路径保留一版；新代码直接用 serializers.StockGroupSerializer（ARC-01）。"""
+    return StockGroupSerializer(group).data
 
 
 @api_view(['GET', 'POST'])
@@ -32,7 +24,8 @@ def stock_group_list(request):
         groups = StockGroup.objects.annotate(
             active_stock_count=Count('stocks', filter=Q(stocks__is_active=True)),
         )
-        return Response([_group_row(g) for g in groups])
+        # 列表查询用 annotate 算好活跃股票数（PERF-08：旧实现每组一次 count()）
+        return Response(StockGroupSerializer(groups, many=True).data)
 
     name = (request.data.get('name') or '').strip()
     if not name or len(name) > 50:
@@ -44,7 +37,7 @@ def stock_group_list(request):
             group = StockGroup.objects.create(name=name)
     except IntegrityError:  # 并发同名创建（PERF-06）
         return Response({'detail': f'分组「{name}」已存在'}, status=status.HTTP_409_CONFLICT)
-    return Response(_group_row(group), status=status.HTTP_201_CREATED)
+    return Response(StockGroupSerializer(group).data, status=status.HTTP_201_CREATED)
 
 
 @api_view(['PATCH', 'DELETE'])
@@ -76,4 +69,4 @@ def stock_group_detail(request, pk):
             group.save()
     except IntegrityError:  # 并发重命名撞名（PERF-06）
         return Response({'detail': f'分组「{name}」已存在'}, status=status.HTTP_409_CONFLICT)
-    return Response(_group_row(group))
+    return Response(StockGroupSerializer(group).data)
