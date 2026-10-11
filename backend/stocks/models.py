@@ -1,4 +1,6 @@
 from django.db import models
+from django.db.models.functions import Length
+from django.db.models.lookups import Exact
 from rest_framework.utils.encoders import JSONEncoder as DrfJSONEncoder
 
 
@@ -512,6 +514,45 @@ class DetectorSignal(models.Model):
         constraints = [
             models.UniqueConstraint(
                 fields=['target_kind', 'target_code', 'trade_date'], name='uniq_signal_target_day',
+            ),
+            # 库级约束（PERF-10）：写入路径只有 detector.signals.upsert_signal 和
+            # review 推进状态，取值都来自上面的 CHOICES；score 是 [-100, 100] 分值
+            # 的绝对值加权平均，落在 [0, 100]；周期从 1 起算。Meta 里拿不到外层类
+            # 属性，取值只能写字面量，改 CHOICES 时要同步改这里并加迁移。
+            models.CheckConstraint(
+                condition=models.Q(target_kind__in=['index', 'stock', 'industry', 'concept']),
+                name='detsig_target_kind_valid',
+            ),
+            models.CheckConstraint(
+                condition=models.Q(direction__in=['up', 'down']), name='detsig_direction_valid',
+            ),
+            models.CheckConstraint(
+                condition=models.Q(severity__in=['high', 'medium', 'low']), name='detsig_severity_valid',
+            ),
+            models.CheckConstraint(
+                condition=models.Q(status__in=['watching', 'active', 'confirmed', 'missed']),
+                name='detsig_status_valid',
+            ),
+            models.CheckConstraint(
+                condition=models.Q(score__gte=0, score__lte=100), name='detsig_score_range',
+            ),
+            models.CheckConstraint(condition=models.Q(cycles__gte=1), name='detsig_cycles_positive'),
+            # target_code 是多态弱引用，按类型约束格式：指数 sh/sz/bj + 6 位（共 8 位），
+            # 自选股 6 位（数字由 Stock 序列化器校验，这里不用 REGEXP：SQLite 的
+            # REGEXP 是 Django 注入的函数，命令行 sqlite3 回灌 .dump 时会报错），
+            # 板块为名称，只要求非空
+            models.CheckConstraint(
+                condition=(
+                    models.Q(target_kind='index')
+                    & (models.Q(target_code__startswith='sh') | models.Q(target_code__startswith='sz')
+                       | models.Q(target_code__startswith='bj'))
+                    & Exact(Length('target_code'), 8)
+                ) | (
+                    models.Q(target_kind='stock') & Exact(Length('target_code'), 6)
+                ) | (
+                    models.Q(target_kind__in=['industry', 'concept']) & ~models.Q(target_code='')
+                ),
+                name='detsig_target_code_format',
             ),
         ]
         indexes = [
