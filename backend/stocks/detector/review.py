@@ -1,8 +1,8 @@
-"""迭代优化：回看 h（=5）个交易日前信号的兑现情况，微调维度权重与灵敏度阈值。
+"""迭代优化：回看 h（=5）个交易日前信号的兑现情况，统计超额并（可选）微调维度参数。
 
 兑现（hit）定义（ALG-05 修订，#12 口径 v2）：
 - 窗口：信号日 T 之后的连续交易日（按交易日历校验），后续数据不满或有缺口时
-  保持待回看，不判定——旧实现有 1 根就判定并永久写入；
+  保持待回看，不判定；
 - 基期：指数/个股用 T+1 开盘价（信号 17:15 收盘后才产出，T 日收盘不可成交）；
   板块快照只有日涨跌幅、没有开盘价，改用 T+1 收盘价为基期，再看其后 h 个收盘
   （T+2..T+h+1）——旧口径以 T 收盘为基期，吃进了 T→T+1 的隔夜跳空，板块日
@@ -13,25 +13,29 @@
 - 判定：窗口内按收盘价逐日推进，有利方向先达到 +阈值 记兑现；不利方向先
   触及 −阈值（MAE 先到）或到期都没到，记未兑现；
 - 另记 h 日收益与同区间沪深300 收益之差（相对基准超额），保留幅度信息；
-  基准取不到时超额留空，不影响兑现判定。判定明细与口径版本号落在信号行，
-  DetectorRun 的基线/超额命中率/独立样本数按判定日从库里汇总（#7）。
+  基准取不到时超额留空，不影响兑现判定。
 
-调参口径：
+统计口径：
 - 命中率与同标的「无条件基线」比较：用 T 日之前的历史，以同样的方向、阈值、
-  基期、窗口规则，统计任意起点的兑现率；
+  基期、窗口规则统计任意起点的兑现率，看超额命中率而不是绝对值；
 - 独立样本：同一交易日、同一方向、同一对象簇（板块一簇、指数一簇、自选股一簇）
-  的信号共享同一段市场走势，按簇计为一个样本；看超额命中率而不是绝对值——旧口径下随机
-  游走的高波动股「命中率」超过 60%，会被当成维度太苛刻而自动放宽门槛；
-- 同一标的连续多日的 active 信号回看窗口高度重叠，只取信号段首个 active 日
-  （cycles == 2）计入调参样本，其余照常判定但不参与调参；
-- 样本不足 MIN_ADJ_SAMPLES 不动参数。
+  的信号共享同一段市场走势，按簇计为一个样本（簇内取平均）。
 
-为什么所有调整都有界且留痕：
-- 自动调参失控会静默改变探测语义（权重全漂到 2.0 / 阈值归零），有界
-  （权重 [0.5, 2.0]、阈值 [0.5×, 2×] 默认值）保证最坏情况下系统仍
-  接近初始设计；
-- 每次调整写入 DetectorRun.adjustments（who/when/from/to/samples），
-  出问题时可回溯，也让人可以否决不合理的自动调整。
+自动调参（#5）：
+- 总开关 settings.DETECTOR_AUTO_TUNE，默认关闭：关闭时照常统计（summary 的
+  tune_stats），显著的结论只演练、不改 DetectorDimConfig；
+- 样本跨日累计：取 TUNE_WINDOW_DAYS 内已用 v2 口径判定、有基线的段首信号
+  （cycles == 2，同一段的后续日窗口重叠，不计入），按上面的规则聚类；
+- 显著才调：Beta(1,1) 先验下 P(命中率 > 平均基线) ≥ TUNE_CONFIDENCE 才上调、
+  ≤ 1−TUNE_CONFIDENCE 才下调；独立样本 < MIN_ADJ_SAMPLES 不调；
+- 调什么（假设写在这里）：旧实现调 min，但 min 被噪声闸门完全覆盖、改了不影响
+  投票，是空操作；改为调真正决定「是否投票」的参数（TUNE_PARAMS，当前为
+  noise_pct），以及权重（目前只进入强度 score/分级；若投票汇总改为加权票数，
+  权重会直接起作用，参数名不变）。没有可调闸门参数的维度只调权重；
+- 怎么调：目标值是「默认值 + 有效超额的函数」，有效超额 = 超额 × n/(n+n0)
+  向 0（即默认值）收缩，再夹到上下限。目标值只由窗口内样本决定、不在当前值上
+  累乘，同样的证据重复评估不会把参数一路推到边界；
+- 留痕：生效的调整写进 DetectorRun.adjustments（who/when/from/to/samples）。
 """
 
 from __future__ import annotations
@@ -49,21 +53,23 @@ from ..trading_calendar import MAX_LOOKBACK_DAYS, recent_trading_days
 from .constants import (
     BASELINE_DAYS,
     BENCHMARK_CODE,
-    EXCESS_HIGH,
-    EXCESS_LOW,
     HIT_PCT,
     HIT_SIGMA_K,
     MIN_ADJ_SAMPLES,
     MIN_BASELINE_WINDOWS,
-    MIN_SCALE_BOUNDS,
+    NOISE_DEFAULTS,
     REVIEW_LOOKBACK,
     REVIEW_MAX_AGE_DAYS,
     REVIEW_VERSION,
     SEGMENT_HEAD_CYCLES as _SEGMENT_HEAD_CYCLES,
     SIGMA_WINDOW,
-    STEP,
-    WEIGHT_BAND,
+    TUNE_CONFIDENCE,
+    TUNE_MIN_CHANGE,
+    TUNE_PARAMS,
+    TUNE_PRIOR_N,
+    TUNE_WINDOW_DAYS,
     WEIGHT_BOUNDS,
+    WEIGHT_GAIN,
 )
 from .dimensions import _std, load_sector_snapshots
 
@@ -336,7 +342,7 @@ def _recent_days(n, end_date, calendar=None):
 
 
 def review_pending(scan_date, configs, calendar=None):
-    """回看并调参。返回 summary（写进 DetectorRun）。
+    """回看、统计并（开关开启时）调参。返回 summary（写进 DetectorRun）。
 
     只回看 status=active 的信号：watching（周期 1）从未满足「维持」，
     不算一次真正的信号假设，不参与命中率统计，也不调参。
@@ -358,8 +364,6 @@ def review_pending(scan_date, configs, calendar=None):
 
     reviewed, hits = 0, 0
     baselines = []
-    dim_stats = {}  # key -> {'hit': n, 'miss': n, 'base': 基线命中率之和}
-    adjustments = []
     cache = {}
 
     for sig in pending:
@@ -393,24 +397,13 @@ def review_pending(scan_date, configs, calendar=None):
         ])
         reviewed += 1
         hits += 1 if hit else 0
-        baseline = outcome['baseline']
-        if baseline is not None:
-            baselines.append(baseline)
+        if outcome['baseline'] is not None:
+            baselines.append(outcome['baseline'])
 
-        # 只有信号段首日、且有基线可比的样本参与调参（见模块 docstring）
-        if sig.cycles != _SEGMENT_HEAD_CYCLES or baseline is None:
-            continue
-        # 统计每个投票维度在命中/未兑现信号里的表现（只有同向投票的维度算）
-        for key, dim in (sig.dimensions or {}).items():
-            if dim.get('direction') == sig.direction and dim.get('available'):
-                stat = dim_stats.setdefault(key, {'hit': 0, 'miss': 0, 'base': 0.0})
-                stat['hit' if hit else 'miss'] += 1
-                stat['base'] += baseline
-
-    for key, stat in dim_stats.items():
-        entry = _adjust_dim(key, stat, configs)
-        if entry:
-            adjustments.append(entry)
+    adjustments, tune_stats = [], []
+    if reviewed:
+        # 有新判定才重新评估（目标值只由窗口样本决定，没有新样本结论不变）
+        adjustments, tune_stats = tune_dims(scan_date, configs)
 
     return {
         'reviewed': reviewed,
@@ -418,6 +411,7 @@ def review_pending(scan_date, configs, calendar=None):
         'hit_rate': round(hits / reviewed, 3) if reviewed else None,
         'baseline_rate': round(sum(baselines) / len(baselines), 3) if baselines else None,
         'adjustments': adjustments,
+        'tune_stats': tune_stats,
     }
 
 
@@ -465,65 +459,201 @@ def review_stats(review_date):
     return out
 
 
-def _adjust_dim(key, stat, configs):
-    """按单维度超额命中率（命中率 − 同标的基线）微调权重与灵敏度阈值（有界）。"""
-    n = stat['hit'] + stat['miss']
+def _auto_tune_enabled():
+    return bool(getattr(settings, 'DETECTOR_AUTO_TUNE', False))
+
+
+def _tune_window_days():
+    try:
+        days = int(getattr(settings, 'DETECTOR_TUNE_WINDOW_DAYS', TUNE_WINDOW_DAYS))
+    except (TypeError, ValueError):
+        days = TUNE_WINDOW_DAYS
+    return days if days > 0 else TUNE_WINDOW_DAYS
+
+
+def _betacf(a, b, x):
+    """不完全 Beta 函数的连分式（Lentz 法，Numerical Recipes betacf）。"""
+    tiny = 1e-300
+    qab, qap, qam = a + b, a + 1.0, a - 1.0
+    c, d = 1.0, 1.0 - qab * x / qap
+    d = 1.0 / (d if abs(d) > tiny else tiny)
+    h = d
+    for m in range(1, 300):
+        m2 = 2 * m
+        aa = m * (b - m) * x / ((qam + m2) * (a + m2))
+        d = 1.0 + aa * d
+        d = 1.0 / (d if abs(d) > tiny else tiny)
+        c = 1.0 + aa / c
+        c = c if abs(c) > tiny else tiny
+        h *= d * c
+        aa = -(a + m) * (qab + m) * x / ((a + m2) * (qap + m2))
+        d = 1.0 + aa * d
+        d = 1.0 / (d if abs(d) > tiny else tiny)
+        c = 1.0 + aa / c
+        c = c if abs(c) > tiny else tiny
+        delta = d * c
+        h *= delta
+        if abs(delta - 1.0) < 1e-12:
+            break
+    return h
+
+
+def _betainc(a, b, x):
+    """正则化不完全 Beta 函数 I_x(a, b)，即 Beta(a, b) 分布在 x 处的 CDF。"""
+    if x <= 0:
+        return 0.0
+    if x >= 1:
+        return 1.0
+    ln_front = (math.lgamma(a + b) - math.lgamma(a) - math.lgamma(b)
+                + a * math.log(x) + b * math.log(1 - x))
+    front = math.exp(ln_front)
+    if x < (a + 1) / (a + b + 2):
+        return front * _betacf(a, b, x) / a
+    return 1.0 - front * _betacf(b, a, 1 - x) / b
+
+
+def _prob_above(hits, n, p0):
+    """Beta(1,1) 先验、n 个（可为小数加权的）伯努利样本下，P(命中率 > p0) 的后验概率。"""
+    return 1.0 - _betainc(1.0 + hits, 1.0 + n - hits, min(max(p0, 0.0), 1.0))
+
+
+def _dim_samples(scan_date):
+    """跨日累计的调参样本：{dim_key: [(簇命中率, 簇平均基线), ...]}，每簇一个样本。"""
+    since = scan_date - timedelta(days=_tune_window_days())
+    rows = DetectorSignal.objects.filter(
+        review_version__gte=2,
+        review_hit__isnull=False,
+        review_baseline__isnull=False,
+        cycles=_SEGMENT_HEAD_CYCLES,
+        trade_date__gte=since,
+        trade_date__lte=scan_date,
+    ).only('trade_date', 'direction', 'target_kind', 'review_hit', 'review_baseline', 'dimensions')
+    clusters = {}  # (dim, cluster_key) -> [hits, base_sum, count]
+    for sig in rows:
+        ck = _cluster_key(sig)
+        for key, dim in (sig.dimensions or {}).items():
+            # 只有同向投票的维度算（每个投票维度都拿整条信号的结果，归因仍有混淆，
+            # 这是信号级复盘的固有局限，写在说明里）
+            if not isinstance(dim, dict):
+                continue
+            if dim.get('direction') != sig.direction or not dim.get('available'):
+                continue
+            acc = clusters.setdefault((key, ck), [0, 0.0, 0])
+            acc[0] += 1 if sig.review_hit else 0
+            acc[1] += sig.review_baseline
+            acc[2] += 1
+    samples = {}
+    for (key, _ck), (h, b, c) in clusters.items():
+        samples.setdefault(key, []).append((h / c, b / c))
+    return samples
+
+
+def _dim_stat(key, pairs):
+    n = len(pairs)
+    hits = sum(h for h, _b in pairs)
+    base = sum(b for _h, b in pairs) / n
+    rate = hits / n
+    prob = _prob_above(hits, n, base)
+    return {
+        'dim': key, 'samples': n, 'hit_rate': round(rate, 3), 'baseline': round(base, 3),
+        'excess': round(rate - base, 3), 'prob_above': round(prob, 4),
+    }
+
+
+def tune_dims(scan_date, configs):
+    """跨日累计、按日聚类、显著性检验后计算各维度目标参数。
+
+    返回 (adjustments, stats)：adjustments 为已生效（开关开启）的调整；stats 为
+    每个有样本维度的统计（无论开关、无论是否显著，供 summary/日志）。
+    """
+    apply = _auto_tune_enabled()
+    adjustments, stats = [], []
+    for key, pairs in sorted(_dim_samples(scan_date).items()):
+        stat = _dim_stat(key, pairs)
+        stats.append(stat)
+        entry = _adjust_dim(key, stat, configs, apply=apply)
+        if entry and apply:
+            adjustments.append(entry)
+    return adjustments, stats
+
+
+def _clamp(value, bounds):
+    return min(max(value, bounds[0]), bounds[1])
+
+
+def _tune_param_for(params):
+    """维度生效参数里第一个可调的闸门参数（值为 0 表示闸门关闭，不去打开它）。"""
+    for name in TUNE_PARAMS:
+        value = params.get(name)
+        if isinstance(value, (int, float)) and value > 0:
+            return name
+    return None
+
+
+def _adjust_dim(key, stat, configs, apply=True):
+    """按维度超额命中率计算目标权重与闸门参数（有界、向默认值收缩、显著才调）。
+
+    返回 None（不显著/样本不足/无变化）或 dict(dim, changes, reason, ...)。
+    apply=False 时只计算，不写 DetectorDimConfig（演练）。
+    """
+    n = stat['samples']
     if n < MIN_ADJ_SAMPLES:
+        return None
+    prob = stat['prob_above']
+    if (1 - TUNE_CONFIDENCE) < prob < TUNE_CONFIDENCE:
         return None
     cfg_row = DetectorDimConfig.objects.filter(key=key).first()
     spec = configs.get(key)
     if cfg_row is None or spec is None:
         return None
 
-    rate = stat['hit'] / n
-    baseline = stat['base'] / n
-    excess = rate - baseline
-    default_min = spec['defaults'].get('min')
+    defaults = spec.get('defaults') or {}
+    current = {**defaults, **(cfg_row.params or {})}
+    excess = stat['excess']
+    eff = excess * n / (n + TUNE_PRIOR_N)
+    changes = {}
+
+    # 权重：默认 1.0（注册表没有权重默认值，种子行一律 1.0）
     old_weight = cfg_row.weight
-    old_min = (cfg_row.params or {}).get('min', default_min)
-    new_weight, new_min = old_weight, old_min
-    reasons = []
+    new_weight = round(_clamp(math.exp(WEIGHT_GAIN * eff), WEIGHT_BOUNDS), 3)
+    if abs(new_weight - old_weight) >= TUNE_MIN_CHANGE.get('weight', 0):
+        changes['weight'] = [old_weight, new_weight]
 
-    # 权重：投票的信号明显跑赢基线 → 加权；明显跑输 → 减权
-    if excess > WEIGHT_BAND:
-        new_weight = min(WEIGHT_BOUNDS[1], round(old_weight * STEP, 3))
-        reasons.append(f"命中率 {rate:.0%} 高于基线 {baseline:.0%}，权重上调")
-    elif excess < -WEIGHT_BAND:
-        new_weight = max(WEIGHT_BOUNDS[0], round(old_weight / STEP, 3))
-        reasons.append(f"命中率 {rate:.0%} 低于基线 {baseline:.0%}，权重下调")
+    pname = _tune_param_for(current)
+    if pname:
+        rule = TUNE_PARAMS[pname]
+        default = defaults.get(pname, NOISE_DEFAULTS.get(pname, current[pname]))
+        old = current[pname]
+        new = round(_clamp(default + rule['slope'] * eff, rule['bounds']), rule.get('digits', 3))
+        if abs(new - old) >= TUNE_MIN_CHANGE.get(pname, 0):
+            changes[pname] = [old, new]
 
-    # 阈值（min）：大幅跑输基线 = 投票太宽松 → 提高门槛；大幅跑赢 = 太苛刻 → 放宽
-    if default_min:
-        if excess < EXCESS_LOW:
-            new_min = min(old_min * STEP, default_min * MIN_SCALE_BOUNDS[1])
-            reasons.append('超额命中率过低，提高投票门槛')
-        elif excess > EXCESS_HIGH:
-            new_min = max(old_min / STEP, default_min * MIN_SCALE_BOUNDS[0])
-            reasons.append('超额命中率过高，放宽投票门槛')
-        else:
-            new_min = old_min
-
-    params = dict(cfg_row.params or {})
-    changed = False
-    if abs(new_weight - old_weight) > 1e-9:
-        cfg_row.weight = new_weight
-        changed = True
-    if default_min and abs(new_min - old_min) > 1e-9:
-        params['min'] = round(new_min, 6)
-        cfg_row.params = params
-        changed = True
-    if not changed:
+    if not changes:
         return None
-    cfg_row.save(update_fields=['weight', 'params', 'updated_at'])
+    verdict = '显著跑赢' if prob >= TUNE_CONFIDENCE else '显著跑输'
+    reason = (
+        f"{n} 个独立样本命中率 {stat['hit_rate']:.0%}，{verdict}基线 {stat['baseline']:.0%}"
+        f"（P(高于基线)={prob:.3f}），按收缩后超额 {eff:+.3f} 设定"
+        + '、'.join(f"{k} {v[0]}→{v[1]}" for k, v in changes.items())
+    )
+    if apply:
+        params = dict(cfg_row.params or {})
+        if 'weight' in changes:
+            cfg_row.weight = changes['weight'][1]
+        if pname and pname in changes:
+            params[pname] = changes[pname][1]
+        cfg_row.params = params
+        cfg_row.save(update_fields=['weight', 'params', 'updated_at'])
     return {
         'dim': key,
         'samples': n,
-        'hit_rate': round(rate, 3),
-        'baseline': round(baseline, 3),
-        'excess': round(excess, 3),
+        'hit_rate': stat['hit_rate'],
+        'baseline': stat['baseline'],
+        'excess': stat['excess'],
+        'prob_above': prob,
+        'changes': changes,
+        # 兼容旧流水读法（from/to_weight）
         'from_weight': old_weight,
-        'to_weight': cfg_row.weight,
-        'from_min': old_min,
-        'to_min': params.get('min', old_min),
-        'reason': '；'.join(reasons),
+        'to_weight': changes.get('weight', [old_weight, old_weight])[1],
+        'reason': reason,
     }

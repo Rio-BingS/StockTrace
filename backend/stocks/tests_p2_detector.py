@@ -6,7 +6,7 @@
 from datetime import timedelta
 from unittest.mock import patch
 
-from django.test import TestCase
+from django.test import TestCase, override_settings
 from django.utils import timezone
 
 from .detector import calm
@@ -595,13 +595,15 @@ class ReviewProtocolTests(TestCase):
         self.assertLess(out['thr'], review.HIT_PCT)  # 历史 σ≈0.2，低于固定 1.5%
         self.assertIsNotNone(out['baseline'])
 
+    @override_settings(DETECTOR_AUTO_TUNE=True)
     def test_only_segment_head_counts_for_tuning(self):
         from .detector import review, scan
         from .models import DetectorDimConfig
 
         for i in range(review.MIN_ADJ_SAMPLES):
             code = f'6006{i}0'
-            _s, base_date = self.seed._make_stock_with_moves(code, [0.5, 1.2, 2.2, 2.5, 2.8])
+            _s, base_date = self.seed._make_stock_with_moves(
+                code, [0.5, 1.2, 2.2, 2.5, 2.8], base_date=_TODAY - timedelta(days=10 + 2 * i))
             self.seed._make_signal(code, base_date, cycles=3)  # 信号段中段，窗口与段首重叠
         configs = {c['key']: c for c in scan.load_configs()}
         summary = review.review_pending(_TODAY, configs)
@@ -609,6 +611,7 @@ class ReviewProtocolTests(TestCase):
         self.assertEqual(summary['adjustments'], [])
         self.assertEqual(DetectorDimConfig.objects.get(key='vol_ratio_slope').weight, 1.0)
 
+    @override_settings(DETECTOR_AUTO_TUNE=True)
     def test_hits_matching_baseline_do_not_tune(self):
         from .detector import review, scan
         from .models import DetectorDimConfig
@@ -617,7 +620,8 @@ class ReviewProtocolTests(TestCase):
         for i in range(review.MIN_ADJ_SAMPLES):
             code = f'6007{i}0'
             _s, base_date = self.seed._make_stock_with_moves(
-                code, [0.5, 1.2, 2.2, 2.5, 2.8], history='up')
+                code, [0.5, 1.2, 2.2, 2.5, 2.8], history='up',
+                base_date=_TODAY - timedelta(days=10 + 2 * i))
             self.seed._make_signal(code, base_date)
         configs = {c['key']: c for c in scan.load_configs()}
         summary = review.review_pending(_TODAY, configs)

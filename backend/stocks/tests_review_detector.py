@@ -1,7 +1,9 @@
-"""探测器复盘口径 v2 的回归测试（#7 #12）。
+"""探测器复盘口径 v2 与自动调参重写的回归测试（#5 #7 #12）。
 
 - #12：阈值 k·σ20·√h、板块 T+1 收盘基期、h 日相对沪深300 超额落库；
-- #7：DetectorRun 落库基线/超额命中率/独立样本数，API 返回，旧行为空不报错。
+- #7：DetectorRun 落库基线/超额命中率/独立样本数，API 返回，旧行为空不报错；
+- #5：自动调参默认关闭只演练；开启后跨日累计、按日聚类、Beta 后验显著才调，
+  目标值向默认值收缩且有界，调的是 noise_pct 与权重。
 """
 
 from __future__ import annotations
@@ -15,7 +17,12 @@ from django.urls import reverse
 from django.utils import timezone
 
 from .detector import review, scan
-from .models import DetectorRun, DetectorSignal, MarketDailySnapshot
+from .models import (
+    DetectorDimConfig,
+    DetectorRun,
+    DetectorSignal,
+    MarketDailySnapshot,
+)
 
 _TODAY = timezone.localdate()
 
@@ -200,6 +207,124 @@ class ReviewStatsTests(TestCase):
         })
 
 
+@patch('stocks.detector.review._benchmark_bars', lambda cache: {})
+@patch('stocks.trading_calendar.is_trading_day', _always_trading)
+class AutoTuneTests(TestCase):
+    """#5：默认关闭只演练；开启后跨日累计 + 按日聚类 + 显著性 + 收缩 + 有界。"""
+
+    HIT_MOVES = [0.5, 1.2, 2.2, 2.5, 2.8]
+
+    def setUp(self):
+        self.seed = _seeder()
+
+    def test_disabled_by_default_only_dry_runs(self):
+        self.seed._seed_days('6101', self.HIT_MOVES)
+        configs = _configs()  # 种子化配置行
+        before = {c.key: (c.weight, dict(c.params or {})) for c in DetectorDimConfig.objects.all()}
+        summary = review.review_pending(_TODAY, configs)
+        self.assertEqual(summary['adjustments'], [])
+        self.assertTrue(summary['tune_stats'])
+        after = {c.key: (c.weight, dict(c.params or {})) for c in DetectorDimConfig.objects.all()}
+        self.assertEqual(after, before)
+        stat = next(x for x in summary['tune_stats'] if x['dim'] == 'vol_ratio_slope')
+        self.assertGreaterEqual(stat['prob_above'], review.TUNE_CONFIDENCE)  # 显著但只演练
+
+    @override_settings(DETECTOR_AUTO_TUNE=True)
+    def test_same_day_signals_are_one_independent_sample(self):
+        self.seed._seed_days('6102', self.HIT_MOVES, same_day=True)
+        summary = review.review_pending(_TODAY, _configs())
+        self.assertEqual(summary['reviewed'], review.MIN_ADJ_SAMPLES)
+        self.assertEqual(summary['adjustments'], [])
+        stat = next(s for s in summary['tune_stats'] if s['dim'] == 'vol_ratio_slope')
+        self.assertEqual(stat['samples'], 1)
+
+    @override_settings(DETECTOR_AUTO_TUNE=True)
+    def test_samples_accumulate_across_days(self):
+        self.seed._seed_days('6103', self.HIT_MOVES)  # 信号日 T−10, T−12, …, T−28
+        # 较早的扫描日只能回看到最早的 3 个：样本不足，不调
+        early = review.review_pending(_TODAY - timedelta(days=19), _configs())
+        self.assertEqual(early['reviewed'], 3)
+        self.assertEqual(early['adjustments'], [])
+        # 今天回看其余 7 个，调参样本 = 跨日累计的 10 个
+        today = review.review_pending(_TODAY, _configs())
+        self.assertEqual(today['reviewed'], review.MIN_ADJ_SAMPLES - 3)
+        entry = next(a for a in today['adjustments'] if a['dim'] == 'vol_ratio_slope')
+        self.assertEqual(entry['samples'], review.MIN_ADJ_SAMPLES)
+
+    @override_settings(DETECTOR_AUTO_TUNE=True, DETECTOR_TUNE_WINDOW_DAYS=15)
+    def test_samples_outside_window_are_dropped(self):
+        self.seed._seed_days('6104', self.HIT_MOVES)
+        summary = review.review_pending(_TODAY, _configs())
+        self.assertEqual(summary['adjustments'], [])
+        stat = next(s for s in summary['tune_stats'] if s['dim'] == 'vol_ratio_slope')
+        self.assertLess(stat['samples'], review.MIN_ADJ_SAMPLES)
+
+    @override_settings(DETECTOR_AUTO_TUNE=True)
+    def test_target_is_stateless_and_shrunk_toward_default(self):
+        self.seed._seed_days('6105', self.HIT_MOVES)
+        first = review.review_pending(_TODAY, _configs())
+        entry = next(a for a in first['adjustments'] if a['dim'] == 'ma_relation')
+        n = entry['samples']
+        eff = entry['excess'] * n / (n + review.TUNE_PRIOR_N)
+        cfg = DetectorDimConfig.objects.get(key='ma_relation')
+        expected_w = round(min(max(math.exp(review.WEIGHT_GAIN * eff), 0.5), 2.0), 3)
+        self.assertEqual(cfg.weight, expected_w)
+        expected_np = round(min(max(0.8 - 0.5 * eff, 0.6), 0.95), 3)
+        self.assertEqual(cfg.params['noise_pct'], expected_np)
+        # 同样的证据再评估一次：目标值不变，不会被一路推到边界
+        again, _stats = review.tune_dims(_TODAY, _configs())
+        self.assertEqual(again, [])
+        cfg.refresh_from_db()
+        self.assertEqual(cfg.weight, expected_w)
+
+    @override_settings(DETECTOR_AUTO_TUNE=True)
+    def test_disabled_gate_is_not_reopened(self):
+        DetectorDimConfig.objects.create(key='vol_ratio_slope', name='量比斜率', weight=1.0,
+                                         params={'noise_pct': 0})
+        self.seed._seed_days('6106', self.HIT_MOVES)
+        summary = review.review_pending(_TODAY, _configs())
+        entry = next(a for a in summary['adjustments'] if a['dim'] == 'vol_ratio_slope')
+        self.assertEqual(set(entry['changes']), {'weight'})
+        self.assertEqual(DetectorDimConfig.objects.get(key='vol_ratio_slope').params['noise_pct'], 0)
+
+    @override_settings(DETECTOR_AUTO_TUNE=True)
+    def test_dimension_without_gate_only_tunes_weight(self):
+        dims = {'vol_compress': {'name': '波动率压缩', 'value': 30, 'direction': 'up',
+                                 'weight': 1.0, 'available': True, 'note': ''}}
+        for i in range(review.MIN_ADJ_SAMPLES):
+            code = f'6107{i:02d}'
+            base_date = _TODAY - timedelta(days=10 + 2 * i)
+            self.seed._make_stock_with_moves(code, self.HIT_MOVES, base_date=base_date)
+            self.seed._make_signal(code, base_date, dims=dims)
+        summary = review.review_pending(_TODAY, _configs())
+        entry = next(a for a in summary['adjustments'] if a['dim'] == 'vol_compress')
+        self.assertEqual(set(entry['changes']), {'weight'})
+
+
+class BetaPosteriorTests(TestCase):
+    """Beta 后验显著性：不引入 scipy，自实现的正则化不完全 Beta 函数。"""
+
+    def test_known_values(self):
+        self.assertAlmostEqual(review._betainc(1, 1, 0.3), 0.3, places=10)
+        self.assertAlmostEqual(review._betainc(2, 2, 0.5), 0.5, places=10)
+        self.assertEqual(review._betainc(3, 4, 0.0), 0.0)
+        self.assertEqual(review._betainc(3, 4, 1.0), 1.0)
+
+    def test_matches_binomial_identity_for_integers(self):
+        # I_x(a, b) = P(Binom(a+b−1, x) ≥ a)
+        for a, b, x in ((3, 5, 0.3), (7, 2, 0.8), (11, 1, 0.4), (4, 9, 0.55)):
+            n = a + b - 1
+            tail = sum(math.comb(n, j) * x ** j * (1 - x) ** (n - j) for j in range(a, n + 1))
+            self.assertAlmostEqual(review._betainc(a, b, x), tail, places=9)
+
+    def test_prob_above(self):
+        self.assertGreater(review._prob_above(10, 10, 0.2), 0.99)
+        self.assertLess(review._prob_above(0, 10, 0.8), 0.01)
+        self.assertAlmostEqual(review._prob_above(5, 10, 0.5), 0.5, places=6)
+        # 10 个样本全中、基线 0.95：后验不显著（命中率≈基线）
+        self.assertLess(review._prob_above(10, 10, 0.95), review.TUNE_CONFIDENCE)
+
+
 @patch('stocks.trading_calendar.is_trading_day', _always_trading)
 class ReviewApiTests(TestCase):
     """#7：API 返回 命中/基线/超额/样本数；旧行字段为空时照常返回 None。"""
@@ -231,3 +356,17 @@ class ReviewApiTests(TestCase):
         self.assertEqual(item['excess_return'], 1.5)
         self.assertEqual(item['benchmark_code'], 'sh000300')
         self.assertEqual(item['review_version'], 2)
+
+    def test_config_exposes_tune_switch_and_rules(self):
+        data = self.client.get(reverse('detector-config')).json()
+        rules = data['review_rules']
+        self.assertFalse(rules['auto_tune'])
+        self.assertEqual(rules['version'], review.REVIEW_VERSION)
+        self.assertEqual(rules['benchmark'], 'sh000300')
+        self.assertEqual(rules['base']['industry'], 'close_t1')
+        self.assertEqual(rules['base']['stock'], 'open_t1')
+        self.assertIn('已关闭', data['meta']['disclaimer'])
+        with override_settings(DETECTOR_AUTO_TUNE=True):
+            data = self.client.get(reverse('detector-config')).json()
+        self.assertTrue(data['review_rules']['auto_tune'])
+        self.assertNotIn('已关闭', data['meta']['disclaimer'])

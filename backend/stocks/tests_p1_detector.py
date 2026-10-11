@@ -7,7 +7,7 @@
 from datetime import timedelta
 from unittest.mock import patch
 
-from django.test import TestCase
+from django.test import TestCase, override_settings
 
 from .detector import dimensions, review, scan, signals
 from .models import DetectorDimConfig, DetectorSignal
@@ -178,12 +178,14 @@ class SameDayRerunTests(TestCase):
         return {'kind': t['kind'], 'code': t['code'], 'name': t['name'],
                 'as_of': _TODAY.isoformat()}, ''
 
+    @override_settings(DETECTOR_AUTO_TUNE=True)
     def test_rerun_keeps_adjustments_and_review_counts(self):
         from .models import DetectorRun
         from .tests_detector import ReviewTests
 
         seeder = ReviewTests()
-        seeder._seed_hit_signals('6001')  # MIN_ADJ_SAMPLES 条可回看且全部命中的 active 信号
+        # MIN_ADJ_SAMPLES 条分布在不同交易日、可回看且全部命中的 active 信号
+        seeder._seed_days('6001', [0.5, 1.2, 2.2, 2.5, 2.8])
         n = review.MIN_ADJ_SAMPLES
         with _scan_patches(targets=[]):
             first = scan.run_scan()
@@ -192,6 +194,11 @@ class SameDayRerunTests(TestCase):
         run = DetectorRun.objects.get(trade_date=_TODAY)
         audit = list(run.adjustments)
         self.assertTrue(audit)
+        # 基线/超额/独立样本数落库（#7）
+        self.assertEqual(run.independent_samples, n)
+        self.assertLess(run.baseline_rate, 0.2)
+        self.assertAlmostEqual(run.excess_rate, 1.0 - run.baseline_rate, places=3)
+        self.assertIsNone(run.avg_excess_return)  # 基准断网：超额收益留空而不是编造
 
         with _scan_patches(targets=[]):
             second = scan.run_scan()
@@ -201,6 +208,7 @@ class SameDayRerunTests(TestCase):
         self.assertEqual(run.reviewed_count, n)
         self.assertEqual(run.hit_count, n)
         self.assertEqual(run.hit_rate, 1.0)
+        self.assertEqual(run.independent_samples, n)  # 按判定日重算，不重复累加
 
     def test_rerun_without_signal_deletes_today_row(self):
         old = DetectorSignal.objects.create(**{

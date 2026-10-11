@@ -33,10 +33,16 @@ from .dimensions import (
 logger = logging.getLogger(__name__)
 
 _META_SOURCE = '本站探测器日度扫描（上游：东财/同花顺/新浪/沪深交易所公开数据，经日度快照积累）'
-_META_DISCLAIMER = (
-    '信号为盘面形态识别，非买卖建议；维度权重与阈值由 5 日回看命中率自动微调（有界），'
-    '历史命中不代表未来表现。委比挂单、板块内分化两维度因无数据源暂未启用。'
-)
+_META_DISCLAIMER_TAIL = '历史命中不代表未来表现。委比挂单、板块内分化两维度因无数据源暂未启用。'
+
+
+def _meta_disclaimer():
+    """免责声明随自动调参开关变化（#5）：默认关闭时不能再说「自动微调」。"""
+    if getattr(settings, 'DETECTOR_AUTO_TUNE', False):
+        tune = '维度权重与噪声闸门按跨日累计、显著跑赢/跑输基线才有界调整，'
+    else:
+        tune = '维度参数固定（在线自动调参已关闭，复盘只统计不调参），'
+    return f'信号为盘面形态识别，非买卖建议；{tune}{_META_DISCLAIMER_TAIL}'
 
 
 # 信号列表已上线的 JSON 键顺序，接入 common.envelope 时保持不变（ARC-04）
@@ -73,7 +79,7 @@ def _meta(latest_run, message=''):
         'data_as_of': data_date,
         'fetched_at': fetched_at,
         'cache_status': cache_status,
-        'disclaimer': _META_DISCLAIMER,
+        'disclaimer': _meta_disclaimer(),
         **({'message': message} if message else {}),
     }
 
@@ -361,11 +367,13 @@ def detector_config(request):
             'benchmark': constants.BENCHMARK_CODE,
             # 基期：指数/个股 T+1 开盘；板块无开盘价，T+1 收盘
             'base': {'index': 'open_t1', 'stock': 'open_t1', 'industry': 'close_t1', 'concept': 'close_t1'},
+            'auto_tune': bool(getattr(settings, 'DETECTOR_AUTO_TUNE', False)),
+            'tune_window_days': getattr(settings, 'DETECTOR_TUNE_WINDOW_DAYS', constants.TUNE_WINDOW_DAYS),
+            'confidence': constants.TUNE_CONFIDENCE,
+            'prior_n': constants.TUNE_PRIOR_N,
             'weight_bounds': list(constants.WEIGHT_BOUNDS),
-            'min_scale_bounds': list(constants.MIN_SCALE_BOUNDS),
+            'tune_params': {k: list(v['bounds']) for k, v in constants.TUNE_PARAMS.items()},
             'min_samples': constants.MIN_ADJ_SAMPLES,
-            'excess_bounds': [constants.EXCESS_LOW, constants.EXCESS_HIGH],
-            'weight_band': constants.WEIGHT_BAND,
         },
         # 平静闸门与分级参数只读展示（不参与自动调参，理由见 calm.py 文件尾）
         'calm_rules': {

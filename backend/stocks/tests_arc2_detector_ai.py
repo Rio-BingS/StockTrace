@@ -34,10 +34,16 @@ class DetectorConstantsTests(SimpleTestCase):
         self.assertEqual(
             (constants.REVIEW_LOOKBACK, constants.HIT_SIGMA_K, constants.SIGMA_WINDOW, constants.HIT_PCT,
              constants.BASELINE_DAYS, constants.MIN_BASELINE_WINDOWS, constants.REVIEW_MAX_AGE_DAYS,
-             constants.MIN_ADJ_SAMPLES, constants.STEP, constants.WEIGHT_BOUNDS, constants.MIN_SCALE_BOUNDS,
-             constants.WEIGHT_BAND, constants.EXCESS_LOW, constants.EXCESS_HIGH, constants.SEGMENT_HEAD_CYCLES),
-            (5, 1.0, 20, 1.5, 60, 20, 60, 10, 1.05, (0.5, 2.0), (0.5, 2.0), 0.05, -0.15, 0.15, 2),
+             constants.MIN_ADJ_SAMPLES, constants.WEIGHT_BOUNDS, constants.SEGMENT_HEAD_CYCLES),
+            (5, 1.0, 20, 1.5, 60, 20, 60, 10, (0.5, 2.0), 2),
         )
+        # 复盘口径 v2 与自动调参（#5/#12）
+        self.assertEqual(
+            (constants.REVIEW_VERSION, constants.BENCHMARK_CODE, constants.TUNE_WINDOW_DAYS,
+             constants.TUNE_CONFIDENCE, constants.TUNE_PRIOR_N, constants.WEIGHT_GAIN),
+            (2, 'sh000300', 180, 0.95, 20, 3.0),
+        )
+        self.assertEqual(constants.TUNE_PARAMS['noise_pct']['bounds'], (0.6, 0.95))
         self.assertEqual(
             (constants.MIN_PRICE_BARS, constants.MIN_SECTOR_POINTS, constants.MARGIN_VOTE_CODES,
              constants.SECTOR_LOOKBACK_DAYS),
@@ -55,7 +61,7 @@ class DetectorConstantsTests(SimpleTestCase):
         self.assertIs(signals.SEVERITY_RULES, constants.SEVERITY_RULES)
         self.assertEqual(signals.VOTE_MIN_DIMS, constants.VOTE_MIN_DIMS)
         for name in ('REVIEW_LOOKBACK', 'HIT_SIGMA_K', 'SIGMA_WINDOW', 'HIT_PCT', 'MIN_ADJ_SAMPLES',
-                     'WEIGHT_BOUNDS', 'MIN_SCALE_BOUNDS', 'WEIGHT_BAND', 'EXCESS_LOW', 'EXCESS_HIGH'):
+                     'WEIGHT_BOUNDS', 'REVIEW_VERSION', 'BENCHMARK_CODE', 'TUNE_PARAMS'):
             self.assertEqual(getattr(review, name), getattr(constants, name), name)
         for name in ('MIN_PRICE_BARS', 'MIN_SECTOR_POINTS', 'MARGIN_VOTE_CODES', 'SECTOR_LOOKBACK_DAYS'):
             self.assertEqual(getattr(dimensions, name), getattr(constants, name), name)

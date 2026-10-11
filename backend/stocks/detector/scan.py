@@ -443,6 +443,7 @@ def run_scan(trade_date=None, calendar=None):
             trade_date, {c['key']: c for c in configs}, **cal_kwargs,
         )
         adjustments = review_summary.pop('adjustments', [])
+        review_summary.pop('tune_stats', None)
         note = review_summary.pop('note', '')
         if note:
             message_parts.append(note)

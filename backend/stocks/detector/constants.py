@@ -5,7 +5,7 @@ signals、review、dimensions 四个模块，配置页（detector/views.detector
 再各自去取，改一处容易漏另一处。现在实现与展示都引用这里的同一份常量。
 
 约定：
-- 只放「固定口径」的常量；会被 review 自动微调的维度参数（min / 权重）仍以
+- 只放「固定口径」的常量；会被 review 自动微调的维度参数（噪声分位 / 权重）仍以
   registry.DIMENSIONS 的 defaults 为默认值、DetectorDimConfig 为当前生效值；
 - 各模块保留同名引用（如 review.MIN_ADJ_SAMPLES），旧的 import 路径照常可用；
 - 数值调整须同步看 tests_p2_detector 的随机游走回归测试（噪声信号率 < 5%）。
@@ -108,16 +108,30 @@ MIN_BASELINE_WINDOWS = 20
 BENCHMARK_CODE = 'sh000300'
 # 待回看信号只追溯这么多自然日：数据缺口长期补不齐的信号不再每天重试
 REVIEW_MAX_AGE_DAYS = 60
-# 样本不足不动参数；同标的连续信号只计段首，样本量门槛相应提高
+
+# ---- 自动调参（#5，口径见 review 模块 docstring）----
+# 总开关在 settings.DETECTOR_AUTO_TUNE（默认关闭）：关闭时照常统计并写演练
+# 流水，但不改 DetectorDimConfig。
+# 跨日累计窗口（自然日），可用 settings.DETECTOR_TUNE_WINDOW_DAYS 覆盖
+TUNE_WINDOW_DAYS = 180
+# 独立样本（按 交易日×方向×对象簇 聚类后的簇数）不足不动参数
 MIN_ADJ_SAMPLES = 10
-# 有界调整：步长 5%，权重/阈值的绝对边界
-STEP = 1.05
+# Beta(1,1) 先验下 P(命中率 > 基线) 的后验概率 ≥ 它（或 ≤ 1−它）才算显著
+TUNE_CONFIDENCE = 0.95
+# 向默认值收缩：有效超额 = 超额 × n / (n + TUNE_PRIOR_N)，n 为独立样本数
+TUNE_PRIOR_N = 20
+# 权重：目标值 = 默认值 × exp(增益 × 有效超额)，再夹到边界
+WEIGHT_GAIN = 3.0
 WEIGHT_BOUNDS = (0.5, 2.0)
-MIN_SCALE_BOUNDS = (0.5, 2.0)
-# 超额命中率（命中率 − 基线）：±WEIGHT_BAND 之外才调权重；低于 EXCESS_LOW →
-# 投票太宽松（提高阈值），高于 EXCESS_HIGH → 太苛刻（放宽）
-WEIGHT_BAND = 0.05
-EXCESS_LOW, EXCESS_HIGH = -0.15, 0.15
+# 真正影响「是否投票」的参数：目标值 = 默认值 + slope × 有效超额，再夹到边界。
+# slope<0：跑赢基线 → 放宽噪声闸门（分位降低，多投票）。按顺序取维度生效参数
+# 里第一个存在且非 0 的键（noise_pct=0 表示闸门关闭，不去打开它）；阈值方向
+# 若把噪声闸门换成别的参数名，在这里追加一项即可，调参逻辑不用改。
+TUNE_PARAMS = {
+    'noise_pct': {'slope': -0.5, 'bounds': (0.6, 0.95), 'digits': 3},
+}
+# 变动小于这个幅度不落库（窗口每天滚动，目标值会小幅抖动）
+TUNE_MIN_CHANGE = {'weight': 0.02, 'noise_pct': 0.005}
 # 段首 active 信号的周期数（周期 1 是 watching，2 是首个 active 日）
 SEGMENT_HEAD_CYCLES = 2
 
