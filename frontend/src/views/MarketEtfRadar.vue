@@ -9,6 +9,7 @@ import { formatNum, formatPct, formatRate, pctClass } from '../utils/format.js'
 import { formatAmount, formatShare } from '../utils/marketFormat.js'
 import { errorMessage, isCanceled } from '../utils/errorMessage.js'
 import { createRequestGuard } from '../utils/requestGuard.js'
+import { ariaSort, onActivateKey } from '../utils/a11y.js'
 import { parseEtfRadarQuery } from '../utils/routeQuery.js'
 import { useRouteQuery } from '../composables/useRouteQuery.js'
 
@@ -116,8 +117,8 @@ onUnmounted(() => guard.abort())
     <div v-if="error" class="error-box">{{ error }}</div>
 
     <div class="scope-row">
-      <button :class="{ active: scope === 'equity_broad' }" @click="changeScope('equity_broad')">股票/宽基（规则）</button>
-      <button :class="{ active: scope === 'all' }" @click="changeScope('all')">全市场 ETF</button>
+      <button :class="{ active: scope === 'equity_broad' }" :aria-pressed="scope === 'equity_broad' ? 'true' : 'false'" @click="changeScope('equity_broad')">股票/宽基（规则）</button>
+      <button :class="{ active: scope === 'all' }" :aria-pressed="scope === 'all' ? 'true' : 'false'" @click="changeScope('all')">全市场 ETF</button>
       <span v-if="data?.scope">规则 {{ data.scope.rule_version }} · 默认范围 {{ data.scope.equity_broad_count }} / 全市场 {{ data.scope.all_count }}</span>
     </div>
     <div class="scope-note">股票/宽基为研究用名称规则筛选，并非基金管理人的官方分类；切换“全市场 ETF”可查看未纳入默认范围的标的。</div>
@@ -130,7 +131,7 @@ onUnmounted(() => guard.abort())
     </div>
 
     <div class="rank-tabs">
-      <button v-for="r in ranks" :key="r[0]" :class="{ active: rank === r[0] }" @click="changeRank(r[0])">{{ r[1] }}</button>
+      <button v-for="r in ranks" :key="r[0]" :class="{ active: rank === r[0] }" :aria-pressed="rank === r[0] ? 'true' : 'false'" @click="changeRank(r[0])">{{ r[1] }}</button>
     </div>
     <div class="filters">
       <input v-model.trim="q" placeholder="搜索 ETF 名称或代码" @keyup.enter="load(true)" />
@@ -148,16 +149,16 @@ onUnmounted(() => guard.abort())
         <div class="table-wrap">
           <table>
             <thead><tr>
-              <th>#</th><th>代码</th><th>名称</th><th>最新价</th><th @click="sortBy('change_pct')">涨跌幅 {{ sortMark('change_pct') }}</th>
-              <th @click="sortBy('turnover')">成交额 {{ sortMark('turnover') }}</th><th @click="sortBy('main_net')">主力净流入 {{ sortMark('main_net') }}</th>
-              <th @click="sortBy('share')">最新份额 {{ sortMark('share') }}</th>
+              <th>#</th><th>代码</th><th>名称</th><th>最新价</th><th :aria-sort="ariaSort(sort, order, 'change_pct')"><button type="button" class="th-sort" @click="sortBy('change_pct')">涨跌幅 {{ sortMark('change_pct') }}</button></th>
+              <th :aria-sort="ariaSort(sort, order, 'turnover')"><button type="button" class="th-sort" @click="sortBy('turnover')">成交额 {{ sortMark('turnover') }}</button></th><th :aria-sort="ariaSort(sort, order, 'main_net')"><button type="button" class="th-sort" @click="sortBy('main_net')">主力净流入 {{ sortMark('main_net') }}</button></th>
+              <th :aria-sort="ariaSort(sort, order, 'share')"><button type="button" class="th-sort" @click="sortBy('share')">最新份额 {{ sortMark('share') }}</button></th>
               <th v-if="supported.share_change_1d">份额1日</th>
               <th v-if="supported.share_change_5d">份额5日</th>
               <th v-if="supported.share_change_20d">份额20日</th>
-              <th @click="sortBy('market_cap')">总市值 {{ sortMark('market_cap') }}</th><th @click="sortBy('turnover_rate')">换手 {{ sortMark('turnover_rate') }}</th><th @click="sortBy('discount_rate')">折溢价 {{ sortMark('discount_rate') }}</th>
+              <th :aria-sort="ariaSort(sort, order, 'market_cap')"><button type="button" class="th-sort" @click="sortBy('market_cap')">总市值 {{ sortMark('market_cap') }}</button></th><th :aria-sort="ariaSort(sort, order, 'turnover_rate')"><button type="button" class="th-sort" @click="sortBy('turnover_rate')">换手 {{ sortMark('turnover_rate') }}</button></th><th :aria-sort="ariaSort(sort, order, 'discount_rate')"><button type="button" class="th-sort" @click="sortBy('discount_rate')">折溢价 {{ sortMark('discount_rate') }}</button></th>
             </tr></thead>
             <tbody>
-              <tr v-for="(row, i) in items" :key="row.code" :class="{ selected: selectedCode === row.code }" tabindex="0" @click="select(row)" @keyup.enter="select(row)">
+              <tr v-for="(row, i) in items" :key="row.code" :class="{ selected: selectedCode === row.code }" tabindex="0" :aria-selected="selectedCode === row.code ? 'true' : 'false'" @click="select(row)" @keydown="onActivateKey($event, () => select(row))">
                 <td>{{ (pagination.page - 1) * pagination.page_size + i + 1 }}</td><td class="code">{{ row.code }}</td><td class="name">{{ row.name }}</td><td>{{ formatNum(row.price) }}</td>
                 <td :class="pctClass(row.change_pct)">{{ formatPct(row.change_pct) }}</td><td>{{ formatAmount(row.turnover) }}</td>
                 <td :class="pctClass(row.main_net)">{{ formatAmount(row.main_net, { signed: true }) }}</td><td>{{ formatShare(row.share) }}</td>
@@ -182,6 +183,9 @@ onUnmounted(() => guard.abort())
 </template>
 
 <style scoped>
+/* 排序表头里的按钮：保持表头外观，可用键盘聚焦（FEX-03） */
+.th-sort { border: 0; background: none; padding: 0; color: inherit; font: inherit; cursor: pointer; }
+.th-sort:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
 .page { color: #dce4f2; }.page-header { display:flex; justify-content:space-between; gap:12px; margin-bottom:12px; }.page-header h1 { margin:0; font-size:22px; }.page-header p { margin:4px 0 0; color:#8391a7; font-size:13px; }.title-line { display:flex; align-items:center; gap:9px; flex-wrap:wrap; }.date-chip { color:#8fc6d6; background:#122736; border:1px solid #2e4a5e; border-radius:5px; padding:3px 7px; font-size:11px; }
 button { cursor:pointer; border:1px solid #293b5b; background:#111d34; color:#9eabc1; border-radius:6px; padding:7px 12px; }.primary,.rank-tabs button.active,.scope-row button.active { background:#174673; color:#fff; border-color:#286391; }button:disabled { opacity:.45; cursor:not-allowed; }.error-box { background:var(--danger-bg); color:var(--danger); padding:10px; border-radius:7px; margin-bottom:10px; }
 .scope-row,.rank-tabs,.filters { display:flex; flex-wrap:wrap; gap:7px; align-items:center; margin-bottom:10px; }.scope-row span { color:#8590a5; font-size:12px; margin-left:auto; }

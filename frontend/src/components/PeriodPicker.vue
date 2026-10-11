@@ -14,7 +14,7 @@ defineEmits(['update:modelValue'])
 <template>
   <div class="period-picker">
     <button v-for="[key, label] in options" :key="key" type="button"
-            :class="{ active: modelValue === key }" :disabled="loading"
+            :class="{ active: modelValue === key }" :aria-pressed="modelValue === key ? 'true' : 'false'" :disabled="loading"
             @click="$emit('update:modelValue', key)">{{ label }}</button>
     <button v-for="[key, label, reason] in disabledOptions" :key="key" type="button"
             disabled :title="reason">{{ label }}</button>

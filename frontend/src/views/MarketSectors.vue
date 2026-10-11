@@ -12,6 +12,7 @@ import { formatAmount } from '../utils/marketFormat.js'
 import { signedAmount } from '../utils/sectorFlow.js'
 import { errorMessage, isCanceled } from '../utils/errorMessage.js'
 import { createRequestGuard } from '../utils/requestGuard.js'
+import { ariaSort } from '../utils/a11y.js'
 import { parseSectorsQuery } from '../utils/routeQuery.js'
 import { useRouteQuery } from '../composables/useRouteQuery.js'
 
@@ -200,12 +201,12 @@ onUnmounted(() => guard.abort())
         <table>
           <thead><tr>
             <th>名称</th>
-            <th><button type='button' @click='sortBy(`net`)'>净额 {{ sortMark('net') }}</button></th>
-            <th><button type='button' @click='sortBy(`inflow`)'>流入 {{ sortMark('inflow') }}</button></th>
-            <th><button type='button' @click='sortBy(`outflow`)'>流出 {{ sortMark('outflow') }}</button></th>
-            <th><button type='button' @click='sortBy(`change_pct`)'>涨跌幅 {{ sortMark('change_pct') }}</button></th>
+            <th :aria-sort='ariaSort(sort, order, `net`)'><button type='button' @click='sortBy(`net`)'>净额 {{ sortMark('net') }}</button></th>
+            <th :aria-sort='ariaSort(sort, order, `inflow`)'><button type='button' @click='sortBy(`inflow`)'>流入 {{ sortMark('inflow') }}</button></th>
+            <th :aria-sort='ariaSort(sort, order, `outflow`)'><button type='button' @click='sortBy(`outflow`)'>流出 {{ sortMark('outflow') }}</button></th>
+            <th :aria-sort='ariaSort(sort, order, `change_pct`)'><button type='button' @click='sortBy(`change_pct`)'>涨跌幅 {{ sortMark('change_pct') }}</button></th>
             <th>公司数</th><th>领涨股</th>
-            <th><button type='button' @click='sortBy(`leader_pct`)'>领涨% {{ sortMark('leader_pct') }}</button></th>
+            <th :aria-sort='ariaSort(sort, order, `leader_pct`)'><button type='button' @click='sortBy(`leader_pct`)'>领涨% {{ sortMark('leader_pct') }}</button></th>
           </tr></thead>
           <tbody><tr v-for='row in items' :key='row.name'>
             <td class='name'>{{ row.name }}</td>

@@ -8,6 +8,7 @@ import DetectorHeatmap from '../components/DetectorHeatmap.vue'
 import { detectorApi } from '../api/stocks.js'
 import { errorMessage, isCanceled } from '../utils/errorMessage.js'
 import { createRequestGuard } from '../utils/requestGuard.js'
+import { onActivateKey } from '../utils/a11y.js'
 
 const loading = ref(false), error = ref('')
 const data = ref(null)
@@ -176,19 +177,19 @@ onUnmounted(() => { signalsGuard.abort(); heatmapGuard.abort() })
         <div class="filter-groups">
           <div class="chips">
             <button v-for="[value, label] in SEVERITY_OPTIONS" :key="'s' + value"
-                    :class="{ on: filters.severity === value }" @click="setFilter('severity', value)">
+                    :class="{ on: filters.severity === value }" :aria-pressed="filters.severity === value ? 'true' : 'false'" @click="setFilter('severity', value)">
               {{ label }}
             </button>
           </div>
           <div class="chips">
             <button v-for="[value, label] in DIRECTION_OPTIONS" :key="'d' + value"
-                    :class="{ on: filters.direction === value }" @click="setFilter('direction', value)">
+                    :class="{ on: filters.direction === value }" :aria-pressed="filters.direction === value ? 'true' : 'false'" @click="setFilter('direction', value)">
               {{ label }}
             </button>
           </div>
           <div class="chips">
             <button v-for="[value, label] in KIND_OPTIONS" :key="'k' + value"
-                    :class="{ on: filters.target_kind === value }" @click="setFilter('target_kind', value)">
+                    :class="{ on: filters.target_kind === value }" :aria-pressed="filters.target_kind === value ? 'true' : 'false'" @click="setFilter('target_kind', value)">
               {{ label }}
             </button>
           </div>
@@ -206,7 +207,9 @@ onUnmounted(() => { signalsGuard.abort(); heatmapGuard.abort() })
           </thead>
           <tbody>
             <tr v-for="row in data?.items || []" :key="row.id"
-                :class="{ selected: selectedSignalId === row.id }" @click="toggleDetail(row.id)">
+                :class="{ selected: selectedSignalId === row.id }" tabindex="0"
+                :aria-expanded="selectedSignalId === row.id ? 'true' : 'false'"
+                @click="toggleDetail(row.id)" @keydown="onActivateKey($event, () => toggleDetail(row.id))">
               <td :class="dirClass(row.direction)">{{ dirText(row.direction) }}</td>
               <td>{{ row.target_kind_display }}</td>
               <td class="name">{{ row.target_name }} <small>{{ row.target_code }}</small></td>

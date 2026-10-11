@@ -11,16 +11,16 @@ const isSettings = computed(() => route.path.startsWith('/settings'))
 </script>
 
 <template>
-  <nav class="navbar">
+  <nav class="navbar" aria-label="主导航">
     <div class="nav-brand">
       <RouterLink to="/">StockTrace</RouterLink>
     </div>
     <div class="nav-links">
-      <RouterLink to="/" :class="{ active: isWatchlist }">自选</RouterLink>
-      <RouterLink to="/market" :class="{ active: isMarket }">数据</RouterLink>
-      <RouterLink to="/detector" :class="{ active: isDetector }">探测器</RouterLink>
-      <RouterLink to="/screener" :class="{ active: isScreener }">选股</RouterLink>
-      <RouterLink to="/settings" :class="{ active: isSettings }">设置</RouterLink>
+      <RouterLink to="/" :class="{ active: isWatchlist }" :aria-current="isWatchlist ? 'page' : null">自选</RouterLink>
+      <RouterLink to="/market" :class="{ active: isMarket }" :aria-current="isMarket ? 'page' : null">数据</RouterLink>
+      <RouterLink to="/detector" :class="{ active: isDetector }" :aria-current="isDetector ? 'page' : null">探测器</RouterLink>
+      <RouterLink to="/screener" :class="{ active: isScreener }" :aria-current="isScreener ? 'page' : null">选股</RouterLink>
+      <RouterLink to="/settings" :class="{ active: isSettings }" :aria-current="isSettings ? 'page' : null">设置</RouterLink>
     </div>
   </nav>
 </template>

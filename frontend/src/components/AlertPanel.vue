@@ -142,7 +142,7 @@ usePolling(load, { interval: 60000 })
           <td>{{ r.threshold }}</td>
           <td class="note-cell">{{ r.note || '-' }}</td>
           <td>
-            <button class="btn small" :class="r.is_active ? 'on' : 'off'" @click="toggleRule(r)">
+            <button class="btn small" :class="r.is_active ? 'on' : 'off'" :aria-pressed="r.is_active ? 'true' : 'false'" @click="toggleRule(r)">
               {{ r.is_active ? '监控中' : '已停用' }}
             </button>
           </td>

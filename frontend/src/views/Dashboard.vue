@@ -236,20 +236,22 @@ onUnmounted(() => {
     <AlertPanel :stocks="dashboardData" />
 
     <div class="group-bar">
-      <button :class="{ active: activeGroup === 'all' }" @click="activeGroup = 'all'">
+      <button :class="{ active: activeGroup === 'all' }" :aria-pressed="activeGroup === 'all' ? 'true' : 'false'" @click="activeGroup = 'all'">
         全部 {{ dashboardData.length }}
       </button>
-      <button
-        v-for="g in groups"
-        :key="g.id"
-        :class="{ active: activeGroup === g.id }"
-        @click="activeGroup = g.id"
-      >
-        {{ g.name }} {{ g.stock_count }}
-        <span class="g-op" title="重命名" @click.stop="renameGroup(g)">✎</span>
-        <span class="g-op danger" title="删除分组" @click.stop="removeGroup(g)">✕</span>
-      </button>
-      <button v-if="ungroupedCount" :class="{ active: activeGroup === 'none' }" @click="activeGroup = 'none'">
+      <!-- 分组切换与重命名/删除拆成独立按钮：原来操作图标是嵌在按钮里的 span，键盘无法触达（FEX-03） -->
+      <span v-for="g in groups" :key="g.id" class="group-chip" :class="{ active: activeGroup === g.id }">
+        <button
+          class="g-main"
+          :aria-pressed="activeGroup === g.id ? 'true' : 'false'"
+          @click="activeGroup = g.id"
+        >
+          {{ g.name }} {{ g.stock_count }}
+        </button>
+        <button class="g-op" title="重命名" :aria-label="`重命名分组 ${g.name}`" @click="renameGroup(g)">✎</button>
+        <button class="g-op danger" title="删除分组" :aria-label="`删除分组 ${g.name}`" @click="removeGroup(g)">✕</button>
+      </span>
+      <button v-if="ungroupedCount" :class="{ active: activeGroup === 'none' }" :aria-pressed="activeGroup === 'none' ? 'true' : 'false'" @click="activeGroup = 'none'">
         未分组 {{ ungroupedCount }}
       </button>
       <button class="g-add" @click="addGroup">＋ 新分组</button>
@@ -349,13 +351,42 @@ onUnmounted(() => {
   border-style: dashed;
 }
 
-.g-op {
-  margin-left: 6px;
-  color: #7ea6d9;
-  cursor: pointer;
+.group-chip {
+  display: inline-flex;
+  align-items: center;
+  border: 1px solid #2a3a5e;
+  border-radius: 16px;
+  background: #16213e;
 }
 
-.g-op.danger {
+.group-chip.active {
+  background: #0f3460;
+  border-color: var(--accent);
+}
+
+.group-bar .group-chip button {
+  border: none;
+  background: transparent;
+}
+
+.group-bar .group-chip.active .g-main {
+  color: #fff;
+}
+
+.group-bar .group-chip .g-op {
+  padding: 6px 6px;
+  color: #7ea6d9;
+}
+
+.group-bar .group-chip .g-op:last-child {
+  padding-right: 12px;
+}
+
+.group-bar .group-chip .g-main {
+  padding-right: 4px;
+}
+
+.group-bar .group-chip .g-op.danger {
   color: var(--danger);
 }
 

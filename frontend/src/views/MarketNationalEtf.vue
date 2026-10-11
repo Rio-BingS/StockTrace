@@ -16,6 +16,7 @@ import { formatAmount, formatShare } from '../utils/marketFormat.js'
 import { errorMessage, isCanceled } from '../utils/errorMessage.js'
 import { createRequestGuard } from '../utils/requestGuard.js'
 import { escapeHtml } from '../utils/escapeHtml.js'
+import { onActivateKey } from '../utils/a11y.js'
 import { trendColor } from '../constants/colors.js'
 import { parseNationalEtfQuery } from '../utils/routeQuery.js'
 import { useRouteQuery } from '../composables/useRouteQuery.js'
@@ -197,7 +198,7 @@ onUnmounted(() => flowGuard.abort())
     <div class="workbench">
       <section class="table-card"><div class="table-wrap"><table>
         <thead><tr><th>#</th><th>代码</th><th>ETF 名称</th><th>最新价</th><th>涨跌幅</th><th>主力净流入</th><th>最新份额</th><th>总市值</th><th>换手</th><th>折溢价</th></tr></thead>
-        <tbody><tr v-for="(row,i) in items" :key="row.code" :class="{ selected:selectedCode===row.code, muted:!row.listed }" :tabindex="row.listed ? 0 : -1" @click="row.listed && select(row)" @keyup.enter="row.listed && select(row)">
+        <tbody><tr v-for="(row,i) in items" :key="row.code" :class="{ selected:selectedCode===row.code, muted:!row.listed }" :tabindex="row.listed ? 0 : -1" @click="row.listed && select(row)" @keydown="row.listed && onActivateKey($event, () => select(row))">
           <td>{{ i+1 }}</td><td class="code">{{ row.code }}</td><td class="name">{{ row.name }} <small v-if="!row.listed">暂无行情</small></td><td>{{ formatNum(row.price) }}</td>
           <td :class="pctClass(row.change_pct)">{{ formatPct(row.change_pct) }}</td><td :class="pctClass(row.main_net)">{{ formatAmount(row.main_net, { signed: true }) }}</td>
           <td>{{ formatShare(row.share) }}</td><td>{{ formatAmount(row.market_cap) }}</td><td>{{ formatRate(row.turnover_rate) }}</td><td :class="pctClass(row.discount_rate)">{{ formatPct(row.discount_rate) }}</td>

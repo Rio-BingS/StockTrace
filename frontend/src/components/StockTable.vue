@@ -127,8 +127,16 @@ async function handleDelete(e, item) {
             :class="{ expanded: isExpanded(item.code) }"
             @click="toggleRow(item.code)"
           >
-            <td class="expand-icon" @click.stop="toggleRow(item.code)">
-              <span :class="isExpanded(item.code) ? 'arrow-down' : 'arrow-right'"></span>
+            <td class="expand-icon">
+              <!-- 键盘可达的展开按钮；整行点击仍可展开（FEX-03） -->
+              <button
+                type="button" class="expand-btn"
+                :aria-expanded="isExpanded(item.code) ? 'true' : 'false'"
+                :aria-label="`${isExpanded(item.code) ? '收起' : '展开'} ${item.name || item.code} 详情`"
+                @click.stop="toggleRow(item.code)"
+              >
+                <span :class="isExpanded(item.code) ? 'arrow-down' : 'arrow-right'" aria-hidden="true"></span>
+              </button>
             </td>
             <td class="code">{{ item.code }}</td>
             <td class="name">{{ item.name }}</td>
@@ -146,7 +154,7 @@ async function handleDelete(e, item) {
             </td>
             <td class="actions">
               <button class="btn-kline" @click="handleGoDetail($event, item)" title="查看K线图">K线</button>
-              <button class="btn-delete" @click="handleDelete($event, item)" title="取消关注">✕</button>
+              <button class="btn-delete" @click="handleDelete($event, item)" title="取消关注" :aria-label="`取消关注 ${item.name || item.code}`">✕</button>
             </td>
           </tr>
           <!-- 展开行 -->
@@ -283,7 +291,19 @@ async function handleDelete(e, item) {
 
 .expand-icon {
   text-align: center;
+}
+
+.expand-btn {
+  background: transparent;
+  border: none;
+  padding: 4px 6px;
   cursor: pointer;
+  line-height: 1;
+}
+
+.expand-btn:focus-visible {
+  outline: 2px solid var(--accent);
+  border-radius: 4px;
 }
 
 .arrow-right::before {

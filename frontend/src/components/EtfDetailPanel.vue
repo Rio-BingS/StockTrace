@@ -124,7 +124,7 @@ onUnmounted(() => guard.abort())
         <div><label>折溢价</label><b :class="pctClass(quote.discount_rate)">{{ formatPct(quote.discount_rate) }}</b></div>
       </div>
       <div class="range-tabs">
-        <button v-for="r in RANGE_OPTIONS" :key="r[0]" :class="{ active: range === r[0] }" @click="range = r[0]">{{ r[1] }}</button>
+        <button v-for="r in RANGE_OPTIONS" :key="r[0]" :class="{ active: range === r[0] }" :aria-pressed="range === r[0] ? 'true' : 'false'" @click="range = r[0]">{{ r[1] }}</button>
       </div>
       <div v-if="range === 'custom'" class="custom-range">
         <input v-model="customStart" type="date" :max="customEnd" />

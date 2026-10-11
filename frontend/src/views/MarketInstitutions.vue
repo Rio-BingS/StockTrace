@@ -295,11 +295,11 @@ onUnmounted(() => { northGuard.abort(); detailGuard.abort() })
     </section>
 
     <div class="seg">
-      <button :class="{ active: tab === 'stock' }" @click="tab = 'stock'">
+      <button :class="{ active: tab === 'stock' }" :aria-pressed="tab === 'stock' ? 'true' : 'false'" @click="tab = 'stock'">
         按股票
         <span v-if="byStock.quarter_label" class="tag">{{ byStock.quarter_label }}</span>
       </button>
-      <button :class="{ active: tab === 'org' }" @click="tab = 'org'">
+      <button :class="{ active: tab === 'org' }" :aria-pressed="tab === 'org' ? 'true' : 'false'" @click="tab = 'org'">
         按机构
         <span v-if="byOrg.report_date" class="tag">{{ byOrg.report_date }}</span>
       </button>
