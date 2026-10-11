@@ -1,10 +1,11 @@
-"""calm-vote 方向回归测试：分组加权投票（#4）、权重参与投票。
+"""calm-vote 方向回归测试：分组加权投票（#4）、权重参与投票、周期按维度状态（#2）。
 
 约定与 tests_detector 一致：交易日历 patch 为确定值，上游接口一律 patch，测试不触网。
 """
 
 import math
 import random
+from datetime import timedelta
 from unittest.mock import patch
 
 from django.test import SimpleTestCase, TestCase
@@ -141,6 +142,72 @@ class EvaluateTargetGroupingTests(TestCase):
         configs = [_cfg('vol_ratio_slope', 'down'), _cfg('turnover_pct', 'down')]
         data, _dims = signals.evaluate_target(self._ctx(), configs)
         self.assertIsNone(data)
+
+
+def _series_ctx(n=60, kind='stock'):
+    dates = [(_TODAY - timedelta(days=n - 1 - i)).isoformat() for i in range(n)]
+    closes = [10.0 + 0.01 * i for i in range(n)]
+    return {'kind': kind, 'code': '600000', 'name': 'x', 'dates': dates, 'close': closes,
+            'open': list(closes), 'high': [c * 1.01 for c in closes], 'low': [c * 0.99 for c in closes],
+            'volume': [100.0] * n, 'as_of': dates[-1],
+            'margin': [{'date': d, 'total': 1.0} for d in dates]}
+
+
+class SliceCtxTests(SimpleTestCase):
+    def test_slice_truncates_aligned_series_and_margin(self):
+        ctx = _series_ctx()
+        sub = signals.slice_ctx(ctx, 49)
+        self.assertEqual(len(sub['close']), 50)
+        self.assertEqual(sub['as_of'], ctx['dates'][49])
+        # 融资余额 T+1 披露：只保留数据日 < 截断日的行，不前视
+        self.assertTrue(all(m['date'] < sub['as_of'] for m in sub['margin']))
+        self.assertEqual(len(sub['margin']), 49)
+        self.assertEqual(len(ctx['close']), 60)  # 原 ctx 不被改写
+
+
+@patch('stocks.trading_calendar.is_trading_day', _always_trading)
+class StateCycleTests(TestCase):
+    """#2：周期按「方向组同向状态」回看，不要求此前几天也平静、也落过信号行。"""
+
+    def _configs(self, start_idx):
+        """价格组从第 start_idx 根起投 up；量能一直「活跃度抬升」。"""
+        def price(ctx, params):
+            up = len(ctx['dates']) - 1 >= start_idx
+            return {'available': True, 'value': 50.0, 'direction': 'up' if up else None,
+                    'note': '', 'series': []}
+
+        cfgs = [_cfg('vol_ratio_slope', 'up')]
+        cfgs.append({'key': 'vol_compress', 'name': 'vc', 'weight': 1.0, 'params': {},
+                     'targets': ('stock',), 'evaluate': price, 'enabled': True, 'defaults': {}})
+        return cfgs
+
+    def test_cycles_from_dimension_state_without_signal_rows(self):
+        ctx = _series_ctx()
+        data, _dims = signals.evaluate_target(ctx, self._configs(56))  # 56..59 共 4 天同向
+        self.assertEqual(data['cycles'], 4)
+        self.assertEqual(data['status'], DetectorSignal.STATUS_ACTIVE)
+        self.assertFalse(DetectorSignal.objects.exists())
+
+    def test_first_day_of_state_is_watching(self):
+        data, _dims = signals.evaluate_target(_series_ctx(), self._configs(59))
+        self.assertEqual(data['cycles'], 1)
+        self.assertEqual(data['status'], DetectorSignal.STATUS_WATCHING)
+
+    def test_signal_rows_still_count_when_ctx_has_no_series(self):
+        # 无序列可截断（如测试桩 ctx）时退回信号行计数，行为与旧实现一致
+        DetectorSignal.objects.create(target_kind='stock', target_code='600000', target_name='x',
+                                      trade_date=_TODAY - timedelta(days=1), direction='up')
+        ctx = {'kind': 'stock', 'code': '600000', 'name': 'x', 'as_of': _TODAY.isoformat()}
+        data, _ = signals.evaluate_target(ctx, [_cfg('a', 'up'), _cfg('b', 'up')])
+        self.assertEqual(data['cycles'], 2)
+
+    def test_gap_in_series_breaks_state_streak(self):
+        ctx = _series_ctx()
+        # 去掉 T−2 那根（停牌/缺快照）：回看到 T−2 即断链
+        for key in ('dates', 'close', 'open', 'high', 'low', 'volume'):
+            del ctx[key][-3]
+        data, _ = signals.evaluate_target(ctx, self._configs(0))
+        self.assertEqual(data['cycles'], 2)
 
 
 def _random_walk_ctx(rng, n=70, sigma=0.015):

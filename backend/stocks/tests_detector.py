@@ -294,7 +294,10 @@ class SectorSignalScanTests(TestCase):
         sig = DetectorSignal.objects.filter(target_kind='industry', target_code='测试行业').first()
         self.assertIsNotNone(sig, summary)
         self.assertEqual(sig.direction, 'up')
-        self.assertEqual(sig.cycles, 1)
+        # 周期按「方向组同向状态」回看（#2）：尾段此前几天价格组+资金组已同向上行，
+        # 不要求那些天也平静、也落过信号行，所以首个信号日即为维持中
+        self.assertGreater(sig.cycles, 1)
+        self.assertEqual(sig.status, DetectorSignal.STATUS_ACTIVE)
         counted = {k for k, v in sig.dimensions.items() if v['counted']}
         self.assertEqual(counted, {'vol_compress', 'big_order_net'}, sig.dimensions)
         self.assertEqual({sig.dimensions[k]['group'] for k in counted}, {'price', 'funds'})

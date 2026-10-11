@@ -13,8 +13,9 @@
 - 出信号：同侧组票数（方向组 + 强度确认）≥ VOTE_MIN_DIMS、同侧加权票
   ≥ VOTE_MIN_WEIGHT、且至少一个方向组；对侧方向组加权票 < 同侧 × OPPOSE_RATIO
   （旧口径「对侧 0 票」让任何一个噪声维度都能否决）；
-- 连续维持：周期数按「连续交易日存在同方向信号行」累计，周期 1 落库为
-  watching（观察中），≥2 才是 active（维持中）；
+- 连续维持：周期数 = 1 + max(此前连续交易日的同向信号行数, 此前连续交易日
+  方向组同向的天数)。后者用 ctx 截断到当日重算维度（只用 ≤ 当日的数据），
+  不再要求那些天也平静、也出信号（#2：旧口径下维持中样本几乎被平静闸门耗尽）；
 - 幅度温和：由各维度在评估时的温和带保证，这里不再重复判断。
 
 与自动调参的接口（review-ui 方向）：
@@ -232,6 +233,19 @@ def vote(dim_results):
     return out
 
 
+def direction_state(dim_results):
+    """方向组的同向状态（不要求强度确认、不要求平静）：周期维持用。
+
+    同侧方向组有票、且对侧方向组加权票 < 同侧 × OPPOSE_RATIO 即为该方向。
+    """
+    v = vote(dim_results)
+    up, down = v['dir_support']['up'], v['dir_support']['down']
+    if up == down:
+        return None
+    side, same, opp = ('up', up, down) if up > down else ('down', down, up)
+    return side if opp < OPPOSE_RATIO * same else None
+
+
 def _evaluate_dims(ctx, configs):
     """跑全部适用维度，返回 dim_results（单维度异常只降级自己）。"""
     dim_results = {}
@@ -258,13 +272,60 @@ def _evaluate_dims(ctx, configs):
     return dim_results
 
 
+def slice_ctx(ctx, end):
+    """把 ctx 截断到第 end 根（含）：与 dates 等长的序列一并截断，as_of 前移。
+
+    融资余额行按数据日 < 截断日保留（T+1 披露：T 日扫描时最新只有 T−1）。
+    只用 ≤ 截断日的数据，周期回看不引入前视。
+    """
+    dates = ctx.get('dates') or []
+    n = len(dates)
+    out = dict(ctx)
+    for key, val in ctx.items():
+        if key in ('dates', 'margin'):
+            continue
+        if isinstance(val, list) and len(val) == n:
+            out[key] = val[:end + 1]
+    out['dates'] = dates[:end + 1]
+    out['as_of'] = dates[end]
+    if isinstance(ctx.get('margin'), list):
+        out['margin'] = [m for m in ctx['margin'] if str(m.get('date')) < str(dates[end])]
+    return out
+
+
+def _state_streak(ctx, configs, direction, days):
+    """此前连续多少个交易日方向组与 direction 同向（ctx 截断重算）。
+
+    days：信号日之前的交易日（降序，来自交易日历）。ctx 里缺某个交易日
+    （停牌/缺快照）即断链，与按信号行计数的保守语义一致。
+    """
+    dates = ctx.get('dates') or []
+    if not dates or not days:
+        return 0
+    index = {str(d): i for i, d in enumerate(dates)}
+    streak = 0
+    for day in days:
+        i = index.get(day.isoformat() if hasattr(day, 'isoformat') else str(day))
+        if i is None or i < 1:
+            break
+        try:
+            dims = _evaluate_dims(slice_ctx(ctx, i), configs)
+        except Exception:  # noqa: BLE001 边界：回看失败只让周期少算，不影响当日信号
+            logger.warning("周期回看重算维度失败 %s", ctx.get('code'), exc_info=True)
+            break
+        if direction_state(dims) != direction:
+            break
+        streak += 1
+    return streak
+
+
 def evaluate_target(ctx, configs, cycle_counter=None, calendar=None):
     """对一个已通过平静判定的对象跑全部适用维度并分组投票。
 
     注入点（离线回测用，缺省行为不变）：
     - cycle_counter(target_kind, target_code, direction, before_date)：替代查库的
       _count_cycles（回测用内存信号表），返回值语义相同（None=日历不可用）；
-    - calendar：只在走默认 _count_cycles 时透传给它的交易日历。
+    - calendar：透传给默认 _count_cycles 与状态回看的 _previous_trading_days。
 
     返回 (signal_data | None, dim_results)：
     - signal_data 为 None 表示当日不构成信号（组票不足 / 对侧分歧），
@@ -288,16 +349,21 @@ def evaluate_target(ctx, configs, cycle_counter=None, calendar=None):
         sum(abs(res['value'] or 0.0) * res['weight'] for _k, res in counted) / total_w, 1
     ) if total_w else 0.0
 
+    as_of = _as_date(ctx['as_of'])
+    # 日历注入只在给了 calendar 时透传：缺省调用与旧签名逐字一致（测试 patch 照常生效）
+    cal_kwargs = {'calendar': calendar} if calendar is not None else {}
     if cycle_counter is None:
         # 运行时按模块属性查找：测试 patch signals._count_cycles 照常生效
-        cycle_kwargs = {'calendar': calendar} if calendar is not None else {}
-        prev_cycles = _count_cycles(
-            ctx['kind'], ctx['code'], direction, _as_date(ctx['as_of']), **cycle_kwargs,
-        )
+        prev_cycles = _count_cycles(ctx['kind'], ctx['code'], direction, as_of, **cal_kwargs)
     else:
-        prev_cycles = cycle_counter(ctx['kind'], ctx['code'], direction, _as_date(ctx['as_of']))
+        prev_cycles = cycle_counter(ctx['kind'], ctx['code'], direction, as_of)
+    streak = 0
+    if prev_cycles is not None:
+        # 状态回看的交易日序列同样走注入的日历（离线回测不触网）
+        days = _previous_trading_days(as_of, _CYCLE_LOOKBACK, **cal_kwargs)
+        streak = _state_streak(ctx, configs, direction, days) if days else 0
     # 日历不可用：周期无法确认，按 1 记（只会少算），并让 scan 记一条降级
-    cycles = (prev_cycles or 0) + 1
+    cycles = max(prev_cycles or 0, streak) + 1
     signal_data = {
         'target_kind': ctx['kind'],
         'target_code': ctx['code'],
