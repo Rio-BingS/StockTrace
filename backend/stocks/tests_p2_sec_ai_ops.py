@@ -99,3 +99,105 @@ class StockCodeValidationTests(TestCase):
             margin.return_value = {'ok': 1}
             self.assertEqual(self.client.get('/api/market/stock-margin/600000/').status_code, 200)
             margin.assert_called_once_with('600000')
+
+
+def _ai_fixtures():
+    from datetime import date
+    from decimal import Decimal
+    from stocks.ai.crypto import encrypt_api_key
+    from stocks.models import AiProvider, DailyQuote, Stock
+    provider = AiProvider.objects.create(
+        name='P', base_url='https://mock.local', model='m',
+        api_key_encrypted=encrypt_api_key('sk-p2-0000'),
+    )
+    stock = Stock.objects.create(code='000001', name='测试')
+    DailyQuote.objects.create(
+        stock=stock, trade_date=date(2026, 9, 4),
+        open_price=Decimal('10'), close_price=Decimal('10.5'),
+        high_price=Decimal('10.8'), low_price=Decimal('9.9'),
+        open_close_diff=Decimal('0.5'), open_close_pct=Decimal('5'),
+        high_low_diff=Decimal('0.9'), high_low_pct=Decimal('9'),
+        change_pct=Decimal('5'), volume=1, turnover=Decimal('1'),
+    )
+    return provider, stock
+
+
+def _ai_patches(test):
+    """断网桩：DNS 解析为公网地址，requests.post 由用例设置返回值。"""
+    from stocks.tests_ai import _PUBLIC_DNS, _fake_getaddrinfo
+    dns = mock.patch('stocks.ai.llm.socket.getaddrinfo',
+                     side_effect=_fake_getaddrinfo(_PUBLIC_DNS))
+    dns.start()
+    test.addCleanup(dns.stop)
+    sleep = mock.patch('stocks.ai.llm.time.sleep')
+    sleep.start()
+    test.addCleanup(sleep.stop)
+    post = mock.patch('stocks.ai.llm.requests.post')
+    test.addCleanup(post.stop)
+    return post.start()
+
+
+class AiThrottleAtomicTests(TestCase):
+    """AIX-06：检查与占位同一事务；失败不计冷却；参数调用时读取。"""
+
+    def setUp(self):
+        from django.core.cache import cache
+        cache.clear()
+        self.provider, self.stock = _ai_fixtures()
+        self.post = _ai_patches(self)
+        self.client = APIClient()
+
+    def test_pending_reservation_blocks_concurrent_same_stock(self):
+        from stocks.ai.throttle import cancel_call, check_throttle, reserve_call
+        log, reason = reserve_call('analysis', provider=self.provider, stock=self.stock)
+        self.assertIsNotNone(log)
+        # 占位尚未完成：同股第二个请求被冷却挡住
+        self.assertFalse(check_throttle('analysis', stock=self.stock)[0])
+        second, reason = reserve_call('analysis', provider=self.provider, stock=self.stock)
+        self.assertIsNone(second)
+        self.assertIn('秒内', reason)
+        cancel_call(log)
+        self.assertTrue(check_throttle('analysis', stock=self.stock)[0])
+
+    def test_failed_call_does_not_trigger_cooldown(self):
+        from stocks.models import AiCallLog
+        from stocks.tests_ai import _fake_response
+        self.post.return_value = _fake_response(401, text='no')
+        r1 = self.client.post(f'/api/stocks/{self.stock.id}/ai-analysis/')
+        self.assertEqual(r1.status_code, 502)
+        log = AiCallLog.objects.get()
+        self.assertFalse(log.success)
+        # 失败后立刻重试不应被"60 秒冷却"挡住
+        r2 = self.client.post(f'/api/stocks/{self.stock.id}/ai-analysis/')
+        self.assertEqual(r2.status_code, 502)
+        self.assertEqual(AiCallLog.objects.count(), 2)
+
+    def test_success_triggers_cooldown(self):
+        from stocks.tests_p1_ai import _ok
+        self.post.return_value = _ok('分析')
+        self.assertEqual(self.client.post(f'/api/stocks/{self.stock.id}/ai-analysis/').status_code, 200)
+        r2 = self.client.post(f'/api/stocks/{self.stock.id}/ai-analysis/')
+        self.assertEqual(r2.status_code, 429)
+
+    def test_limits_read_at_call_time(self):
+        from django.test import override_settings
+        from stocks.ai.throttle import check_throttle, log_call
+        log_call('screener_comment')
+        with override_settings(STOCKTRACE_AI_DAILY_LIMIT=1):
+            allowed, reason = check_throttle('screener_comment')
+        self.assertFalse(allowed)
+        self.assertIn('1 次', reason)
+        self.assertTrue(check_throttle('screener_comment')[0])
+        log_call('analysis', stock=self.stock)
+        with override_settings(STOCKTRACE_AI_STOCK_COOLDOWN=0):
+            self.assertTrue(check_throttle('analysis', stock=self.stock)[0])
+
+    def test_unexpected_exception_releases_reservation(self):
+        from stocks.ai.throttle import _inflight
+        from stocks.models import AiCallLog
+        self.post.side_effect = RuntimeError('boom')
+        c = APIClient(raise_request_exception=False)
+        r = c.post(f'/api/stocks/{self.stock.id}/ai-analysis/')
+        self.assertEqual(r.status_code, 500)
+        self.assertFalse(_inflight)
+        self.assertFalse(AiCallLog.objects.get().success)

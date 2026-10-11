@@ -77,6 +77,8 @@ socket.setdefaulttimeout(int(os.environ.get('STOCKTRACE_UPSTREAM_TIMEOUT', '30')
 # stocks/ai/ 可调参数（llm.py 与 throttle.py 经 settings 读取，必须在此接线环境变量）
 STOCKTRACE_LLM_TIMEOUT = int(os.environ.get('STOCKTRACE_LLM_TIMEOUT', '60'))
 STOCKTRACE_AI_DAILY_LIMIT = int(os.environ.get('STOCKTRACE_AI_DAILY_LIMIT', '100'))
+# 同一只股票两次成功分析的最小间隔（秒）；失败调用不计冷却（AIX-06）
+STOCKTRACE_AI_STOCK_COOLDOWN = int(os.environ.get('STOCKTRACE_AI_STOCK_COOLDOWN', '60'))
 # AIX-02：同时进行的 LLM 调用上限（满了立即 429，不排队）、跨重试的总时长上限（秒）、
 # 429/5xx/连接失败的重试次数
 STOCKTRACE_AI_MAX_CONCURRENCY = int(os.environ.get('STOCKTRACE_AI_MAX_CONCURRENCY', '1'))

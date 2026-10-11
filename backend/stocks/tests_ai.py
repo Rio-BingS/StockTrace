@@ -15,7 +15,7 @@ from .ai.crypto import decrypt_api_key, encrypt_api_key, mask_api_key
 from .ai.llm import LlmClient, LlmError, validate_base_url
 from .ai.prompts import DISCLAIMER
 from .ai.screener import ConditionError, run_screener
-from .ai.throttle import DAILY_LIMIT, check_throttle, log_call
+from .ai.throttle import check_throttle, daily_limit, log_call
 
 
 def _no_valuation(codes):
@@ -130,7 +130,7 @@ class ThrottleTests(TestCase):
         self.assertTrue(allowed)
 
     def test_daily_limit_blocks(self):
-        for _ in range(DAILY_LIMIT):
+        for _ in range(daily_limit()):
             log_call('screener_comment')
         allowed, reason = check_throttle('screener_comment')
         self.assertFalse(allowed)

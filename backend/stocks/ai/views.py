@@ -5,7 +5,7 @@ from rest_framework import viewsets, status
 from rest_framework.decorators import action, api_view
 from rest_framework.response import Response
 
-from ..models import AiCallLog, AiProvider, Stock
+from ..models import AiProvider, Stock
 from ..ai_serializers import (
     AiProviderSerializer,
     ScreenerAiInputSerializer,
@@ -22,9 +22,9 @@ from .prompts import (
 from .screener import ConditionError, run_screener
 from .throttle import (
     PROVIDER_TEST_PURPOSE,
-    check_provider_test_throttle,
-    check_throttle,
-    log_call,
+    cancel_call,
+    finish_call,
+    reserve_call,
 )
 
 logger = logging.getLogger(__name__)
@@ -42,13 +42,10 @@ class AiProviderViewSet(viewsets.ModelViewSet):
         只返回状态码与通用错误分类，不回显上游响应内容（防 SSRF 读取，SEC-01）。
         """
         provider = self.get_object()
-        allowed, reason = check_provider_test_throttle()
-        if not allowed:
+        # 频控检查与占位流水在同一事务内（AIX-06）：并发请求也会被计入
+        call_log, reason = reserve_call(PROVIDER_TEST_PURPOSE, provider=provider)
+        if call_log is None:
             return Response({'detail': reason}, status=status.HTTP_429_TOO_MANY_REQUESTS)
-        # 先记流水再调用：频控按"预占"计，并发请求也会被计入
-        call_log = AiCallLog.objects.create(
-            purpose=PROVIDER_TEST_PURPOSE, provider=provider, success=False,
-        )
         try:
             client = LlmClient(provider)
             _, usage = client.chat(
@@ -59,23 +56,22 @@ class AiProviderViewSet(viewsets.ModelViewSet):
                 max_retries=0,
             )
         except ValueError:
+            finish_call(call_log, False)
             return _test_failed('config', None)
         except LlmError as exc:
             if exc.kind == 'busy':
                 # 并发已满：没有真正调用上游，撤销预占的流水
-                call_log.delete()
+                cancel_call(call_log)
                 return _busy_response()
             if exc.kind not in _TEST_OK_KINDS:
+                finish_call(call_log, False, usage=exc.usage)
                 # 详情只进服务端日志（不含上游响应体），对外仅给分类
                 logger.warning('AI 服务商 %s 连通性测试失败：kind=%s status=%s',
                                provider.pk, exc.kind, exc.status_code)
                 return _test_failed(exc.kind, exc.status_code)
             # 空回复/被截断说明 Key 与地址都通了（max_tokens 很小，推理模型常见）
             usage = exc.usage
-        call_log.success = True
-        call_log.prompt_tokens = (usage or {}).get('prompt_tokens')
-        call_log.completion_tokens = (usage or {}).get('completion_tokens')
-        call_log.save(update_fields=['success', 'prompt_tokens', 'completion_tokens'])
+        finish_call(call_log, True, usage=usage)
         return Response({'status': 'ok'})
 
 
@@ -117,14 +113,14 @@ def _test_failed(kind, status_code):
     )
 
 
-def _llm_failed(exc, purpose, provider, stock=None):
-    """AI 端点调用失败的统一出口：记流水、写日志，对外只给通用分类（SEC-07）。"""
+def _llm_failed(exc, purpose, call_log, stock=None):
+    """AI 端点调用失败的统一出口：回填流水、写日志，对外只给通用分类（SEC-07）。"""
     kind = getattr(exc, 'kind', None) or 'config'
     if kind == 'busy':
+        cancel_call(call_log)
         return _busy_response()
     status_code = getattr(exc, 'status_code', None)
-    log_call(purpose, provider=provider, stock=stock, success=False,
-             usage=getattr(exc, 'usage', None))
+    finish_call(call_log, False, usage=getattr(exc, 'usage', None))
     logger.warning('AI 调用失败 purpose=%s stock=%s kind=%s status=%s: %s',
                    purpose, stock.code if stock else '-', kind, status_code, exc)
     message = _TEST_ERROR_TEXT.get(kind, _TEST_ERROR_TEXT['upstream'])
@@ -154,20 +150,24 @@ def stock_ai_analysis(request, pk):
     if stock is None:
         return Response({'detail': '股票不存在'}, status=status.HTTP_404_NOT_FOUND)
 
-    allowed, reason = check_throttle('analysis', stock=stock)
-    if not allowed:
-        return Response({'detail': reason}, status=status.HTTP_429_TOO_MANY_REQUESTS)
-
     client, err = _get_active_provider()
     if err:
         return Response({'detail': err}, status=status.HTTP_400_BAD_REQUEST)
 
+    call_log, reason = reserve_call('analysis', provider=client.provider, stock=stock)
+    if call_log is None:
+        return Response({'detail': reason}, status=status.HTTP_429_TOO_MANY_REQUESTS)
+
     try:
         text, usage = client.chat(build_analysis_messages(stock), max_tokens=1500)
     except (LlmError, ValueError) as exc:
-        return _llm_failed(exc, 'analysis', client.provider, stock=stock)
+        return _llm_failed(exc, 'analysis', call_log, stock=stock)
+    except Exception:
+        # 意外异常也要回填占位，避免"进行中"流水一直挡住冷却
+        finish_call(call_log, False)
+        raise
 
-    log_call('analysis', provider=client.provider, stock=stock, usage=usage)
+    finish_call(call_log, True, usage=usage)
     return Response({'analysis': text, 'disclaimer': DISCLAIMER})
 
 
@@ -189,20 +189,24 @@ def screener_ai(request):
         return _invalid_input(ser.errors)
     query = ser.validated_data['query']
 
-    allowed, reason = check_throttle('screener_translate')
-    if not allowed:
-        return Response({'detail': reason}, status=status.HTTP_429_TOO_MANY_REQUESTS)
-
     client, err = _get_active_provider()
     if err:
         return Response({'detail': err}, status=status.HTTP_400_BAD_REQUEST)
 
+    call_log, reason = reserve_call('screener_translate', provider=client.provider)
+    if call_log is None:
+        return Response({'detail': reason}, status=status.HTTP_429_TOO_MANY_REQUESTS)
+
     try:
         spec, usage = client.chat_json(build_translate_messages(query))
     except (LlmError, ValueError) as exc:
-        return _llm_failed(exc, 'screener_translate', client.provider)
+        return _llm_failed(exc, 'screener_translate', call_log)
+    except Exception:
+        # 意外异常也要回填占位，避免"进行中"流水一直挡住冷却
+        finish_call(call_log, False)
+        raise
 
-    log_call('screener_translate', provider=client.provider, usage=usage)
+    finish_call(call_log, True, usage=usage)
 
     try:
         rows = run_screener(spec)
@@ -255,18 +259,22 @@ def screener_ai_comment(request):
         return Response({'detail': '结果中的股票都不在自选股池中'},
                         status=status.HTTP_400_BAD_REQUEST)
 
-    allowed, reason = check_throttle('screener_comment')
-    if not allowed:
-        return Response({'detail': reason}, status=status.HTTP_429_TOO_MANY_REQUESTS)
-
     client, err = _get_active_provider()
     if err:
         return Response({'detail': err}, status=status.HTTP_400_BAD_REQUEST)
 
+    call_log, reason = reserve_call('screener_comment', provider=client.provider)
+    if call_log is None:
+        return Response({'detail': reason}, status=status.HTTP_429_TOO_MANY_REQUESTS)
+
     try:
         text, usage = client.chat(build_comment_messages(rows, query), max_tokens=800)
     except (LlmError, ValueError) as exc:
-        return _llm_failed(exc, 'screener_comment', client.provider)
+        return _llm_failed(exc, 'screener_comment', call_log)
+    except Exception:
+        # 意外异常也要回填占位，避免"进行中"流水一直挡住冷却
+        finish_call(call_log, False)
+        raise
 
-    log_call('screener_comment', provider=client.provider, usage=usage)
+    finish_call(call_log, True, usage=usage)
     return Response({'comment': text, 'disclaimer': DISCLAIMER})
