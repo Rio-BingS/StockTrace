@@ -1,8 +1,8 @@
 <script setup>
-import { computed, onMounted, ref } from 'vue'
+import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
 import { useRouter } from 'vue-router'
 import { aiApi, presetApi, stockApi } from '../api/stocks.js'
-import { aiDisclaimer } from '../utils/aiRequest.js'
+import { aiDisclaimer, aiErrorText, createAiTask, isCanceled } from '../utils/aiRequest.js'
 import { formatPct, formatNum, pctClass } from '../utils/format.js'
 
 const router = useRouter()
@@ -105,6 +105,37 @@ const comment = ref('')
 const commentDisclaimer = ref('')
 const commentLoading = ref(false)
 const COMMENT_MAX_ROWS = 50
+
+// AI 请求保护（AIX-05）：新请求取消旧请求并丢弃迟到响应；显示已等待秒数，可取消
+const aiTask = createAiTask()
+const commentTask = createAiTask()
+const aiElapsed = ref(0)
+const commentElapsed = ref(0)
+const tickers = new Map()
+
+function startTicker(counter) {
+  stopTicker(counter)
+  counter.value = 0
+  tickers.set(counter, setInterval(() => { counter.value += 1 }, 1000))
+}
+function stopTicker(counter) {
+  clearInterval(tickers.get(counter))
+  tickers.delete(counter)
+}
+function cancelAi() {
+  aiTask.cancel()
+  aiLoading.value = false
+  stopTicker(aiElapsed)
+}
+function cancelComment() {
+  commentTask.cancel()
+  commentLoading.value = false
+  stopTicker(commentElapsed)
+}
+onBeforeUnmount(() => {
+  cancelAi()
+  cancelComment()
+})
 
 // 结果表动态附加列：条件与排序里用到、且固定列没展示的指标
 const FIXED_COLS = new Set(['change_pct', 'close_price', 'high_low_pct', 'turnover'])
@@ -248,6 +279,9 @@ async function deletePreset() {
 onMounted(loadPresets)
 
 async function runManual() {
+  // 手动结果会替换当前结果：进行中的 AI 选股/点评作废
+  cancelAi()
+  cancelComment()
   errorMsg.value = ''
   notice.value = ''
   comment.value = ''
@@ -272,38 +306,53 @@ async function runManual() {
 
 async function runAi() {
   if (!query.value.trim()) return
+  cancelComment()
+  const { signal, isCurrent } = aiTask.start()
   errorMsg.value = ''
   notice.value = ''
   comment.value = ''
   aiLoading.value = true
+  startTicker(aiElapsed)
   try {
-    const res = await aiApi.screenerAi(query.value.trim())
+    const res = await aiApi.screenerAi(query.value.trim(), { signal })
+    if (!isCurrent()) return
     results.value = res.data.results
     resultCount.value = res.data.count
     appliedConditions.value = res.data.conditions
     resultDisclaimer.value = aiDisclaimer(res.data)
     notice.value = 'AI 已把需求翻译为可复现的结构化条件并执行'
   } catch (e) {
-    errorMsg.value = errText(e)
+    if (!isCurrent() || isCanceled(e)) return
+    errorMsg.value = aiErrorText(e)
   } finally {
-    aiLoading.value = false
+    if (isCurrent()) {
+      aiLoading.value = false
+      stopTicker(aiElapsed)
+    }
   }
 }
 
 async function runComment() {
   if (!results.value.length) return
+  const { signal, isCurrent } = commentTask.start()
   comment.value = ''
   commentLoading.value = true
+  startTicker(commentElapsed)
   try {
     // 后端只认代码并按代码从库里取数，最多 50 只（AIX-01）
     const codes = results.value.slice(0, COMMENT_MAX_ROWS).map(r => ({ code: r.code }))
-    const res = await aiApi.screenerComment((query.value || '自定义条件').slice(0, 200), codes)
+    const res = await aiApi.screenerComment((query.value || '自定义条件').slice(0, 200), codes, { signal })
+    if (!isCurrent()) return
     comment.value = res.data.comment
     commentDisclaimer.value = aiDisclaimer(res.data)
   } catch (e) {
-    errorMsg.value = errText(e)
+    if (!isCurrent() || isCanceled(e)) return
+    errorMsg.value = aiErrorText(e)
   } finally {
-    commentLoading.value = false
+    if (isCurrent()) {
+      commentLoading.value = false
+      stopTicker(commentElapsed)
+    }
   }
 }
 
@@ -350,8 +399,9 @@ function fmtTurnover(v) {
           @keyup.enter="runAi"
         />
         <button class="btn primary" :disabled="aiLoading || !query.trim()" @click="runAi">
-          {{ aiLoading ? 'AI 翻译中…' : 'AI 选股' }}
+          {{ aiLoading ? `AI 翻译中… ${aiElapsed} 秒` : 'AI 选股' }}
         </button>
+        <button v-if="aiLoading" class="btn" @click="cancelAi">取消</button>
       </div>
       <p v-if="appliedConditions" class="cond-preview mono">{{ JSON.stringify(appliedConditions) }}</p>
     </div>
@@ -417,9 +467,12 @@ function fmtTurnover(v) {
     <div v-if="results.length" class="card">
       <div class="result-head">
         <h2>筛选结果（{{ resultCount }}）</h2>
-        <button class="btn" :disabled="commentLoading" @click="runComment">
-          {{ commentLoading ? 'AI 点评中…' : 'AI 点评' }}
-        </button>
+        <div class="comment-actions">
+          <button v-if="commentLoading" class="btn" @click="cancelComment">取消</button>
+          <button class="btn" :disabled="commentLoading" @click="runComment">
+            {{ commentLoading ? `AI 点评中… ${commentElapsed} 秒` : 'AI 点评' }}
+          </button>
+        </div>
       </div>
       <div v-if="results.length > COMMENT_MAX_ROWS" class="hint">
         AI 点评只针对前 {{ COMMENT_MAX_ROWS }} 只
@@ -456,7 +509,7 @@ function fmtTurnover(v) {
           </tr>
         </tbody>
       </table>
-      <div v-if="comment" class="comment">
+      <div v-if="comment" class="comment" aria-live="polite">
         <h3>AI 点评</h3>
         <pre class="comment-text">{{ comment }}</pre>
         <div class="disclaimer">{{ commentDisclaimer }}</div>
@@ -639,6 +692,10 @@ function fmtTurnover(v) {
 }
 .actions {
   white-space: nowrap;
+}
+.comment-actions {
+  display: flex;
+  gap: 8px;
 }
 .comment {
   margin-top: 14px;

@@ -196,7 +196,7 @@ export const presetApi = {
   },
 }
 
-// AI 功能（LLM 调用较慢，单独放宽超时）
+// AI 功能（LLM 调用较慢，单独放宽超时）；可传 { signal } 取消进行中的请求（AIX-05）
 const aiTimeout = { timeout: 120000 }
 
 export const aiApi = {
@@ -218,8 +218,8 @@ export const aiApi = {
   },
 
   // 个股 AI 分析（按需触发）
-  analyzeStock(id) {
-    return api.post(`/stocks/${id}/ai-analysis/`, {}, aiTimeout)
+  analyzeStock(id, { signal } = {}) {
+    return api.post(`/stocks/${id}/ai-analysis/`, {}, { ...aiTimeout, signal })
   },
 
   // 结构化条件选股（不调 LLM，快速）
@@ -228,13 +228,13 @@ export const aiApi = {
   },
 
   // 自然语言选股：LLM 翻译成条件后执行
-  screenerAi(query) {
-    return api.post('/screener/ai/', { query }, aiTimeout)
+  screenerAi(query, { signal } = {}) {
+    return api.post('/screener/ai/', { query }, { ...aiTimeout, signal })
   },
 
   // 对筛选结果做 AI 点评
-  screenerComment(query, results) {
-    return api.post('/screener/ai/comment/', { query, results }, aiTimeout)
+  screenerComment(query, results, { signal } = {}) {
+    return api.post('/screener/ai/comment/', { query, results }, { ...aiTimeout, signal })
   },
 }
 
