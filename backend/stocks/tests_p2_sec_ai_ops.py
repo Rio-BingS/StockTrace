@@ -476,3 +476,33 @@ class GunicornConfigTests(TestCase):
     def test_scheduler_autostart_removed(self):
         from django.conf import settings
         self.assertFalse(hasattr(settings, 'SCHEDULER_AUTOSTART'))
+
+
+class RuntimeVersionDeclTests(TestCase):
+    """OPS-07：运行时版本声明与 STATIC_ROOT 可配置。"""
+
+    def test_runtime_versions_declared(self):
+        import json
+        from pathlib import Path
+        from django.conf import settings
+        root = Path(settings.BASE_DIR).parent
+        self.assertEqual((root / '.python-version').read_text().strip(), '3.12')
+        self.assertEqual((root / 'frontend' / '.nvmrc').read_text().strip(), '22')
+        pkg = json.loads((root / 'frontend' / 'package.json').read_text(encoding='utf-8'))
+        self.assertIn('22.13', pkg['engines']['node'])
+
+    def test_static_root_from_env(self):
+        import os
+        import subprocess
+        import sys
+        from pathlib import Path
+        from django.conf import settings
+        self.assertEqual(Path(settings.STATIC_ROOT), Path(settings.BASE_DIR).parent / 'staticfiles')
+        env = dict(os.environ, STOCKTRACE_STATIC_ROOT='/srv/st-static',
+                   DJANGO_SETTINGS_MODULE='StockTrace.settings')
+        out = subprocess.run(
+            [sys.executable, '-c', 'import django;django.setup();'
+             'from django.conf import settings;print(settings.STATIC_ROOT)'],
+            cwd=settings.BASE_DIR, env=env, capture_output=True, text=True, timeout=60,
+        )
+        self.assertEqual(out.stdout.strip(), '/srv/st-static', out.stderr[-500:])

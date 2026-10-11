@@ -44,69 +44,99 @@ VPS 上的 `/opt/stocktrace` 是本仓库的 git 工作副本，按发布标签�
 
 ---
 
-## 1. 首次部署（概要）
+## 1. 首次部署（Ubuntu 22.04，OPS-07）
+
+运行时版本（与 CI 一致）：**Python 3.12**（`.python-version`）、**Node.js 22 LTS ≥ 22.13**
+（`frontend/.nvmrc`、`package.json` 的 `engines`）。Ubuntu 22.04 自带 Python 3.10、Node 12，
+都不能用，按下面装。以下命令以有 sudo 权限的管理员执行，从上到下顺序不能乱
+（nginx 配置引用了证书，证书不在时 `nginx -t` 会失败）。
 
 ```bash
-# 系统依赖（示例）
+# 1) 系统依赖：Python 3.12 来自 deadsnakes PPA，Node 22 来自 NodeSource
 sudo apt update
-sudo apt install -y python3.12 python3.12-venv nginx apache2-utils
+sudo apt install -y software-properties-common ca-certificates curl git \
+    nginx apache2-utils sqlite3 ufw
+sudo add-apt-repository -y ppa:deadsnakes/ppa
+sudo apt install -y python3.12 python3.12-venv python3.12-dev build-essential
+curl -fsSL https://deb.nodesource.com/setup_22.x | sudo -E bash -
+sudo apt install -y nodejs
+python3.12 --version    # 3.12.x
+node --version          # v22.13 及以上
 
-# 代码：克隆仓库到 /opt/stocktrace 并切到要发布的标签。
+# 2) 服务账号 www（系统用户、不能登录；HOME 由 systemd 单元指到 /var/cache/stocktrace）
+id www 2>/dev/null || sudo useradd --system --user-group --no-create-home \
+    --home-dir /nonexistent --shell /usr/sbin/nologin www
+
+# 3) 代码：克隆到 /opt/stocktrace 并切到要发布的标签。
 # 属主（SEC-10）：代码归 root，www 只拥有 backend/ 目录本身（SQLite 库与 WAL/-shm 需要在此建文件）
 # 和 staticfiles/；不要 chown -R，否则 Web 进程被攻破时可以改写全部代码与前端产物
-sudo mkdir -p /etc/stocktrace
 sudo git clone <仓库地址> /opt/stocktrace
 sudo git -C /opt/stocktrace checkout --detach vX.Y.Z
 sudo chown www:www /opt/stocktrace/backend
 sudo install -d -o www -g www -m 0755 /opt/stocktrace/staticfiles
-
-# 虚拟环境（放在 backend/venv，与线上保持一致）
 cd /opt/stocktrace
-python3.12 -m venv backend/venv
-source backend/venv/bin/activate
-pip install -r backend/requirements.lock   # 锁文件，全量精确版本（OPS-02）
 
-# 环境变量：含 SECRET_KEY / Fernet 密钥，只允许 root 读（systemd 以 root 读取 EnvironmentFile，SEC-10）
+# 4) 虚拟环境（backend/venv，归 root；装锁文件，全量精确版本，OPS-02）
+sudo python3.12 -m venv backend/venv
+sudo backend/venv/bin/pip install --upgrade pip
+sudo backend/venv/bin/pip install -r backend/requirements.lock
+
+# 5) 环境变量：含 SECRET_KEY / Fernet 密钥，只允许 root 读（systemd 以 root 读取 EnvironmentFile，SEC-10）
+sudo install -d -m 755 /etc/stocktrace
 sudo install -m 600 -o root -g root deploy/env.example /etc/stocktrace/env
-sudo nano /etc/stocktrace/env   # 填 SECRET_KEY、ALLOWED_HOSTS
+python3 -c "import secrets; print(secrets.token_urlsafe(64))"          # → DJANGO_SECRET_KEY
+backend/venv/bin/python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"  # → STOCKTRACE_FERNET_KEY
+sudo nano /etc/stocktrace/env   # 填上面两个密钥、DJANGO_ALLOWED_HOSTS、STOCKTRACE_TRUSTED_ORIGINS（你的域名）
 # 可选：STOCKTRACE_PUSH_URL（Server酱兼容；价格提醒 + 快照自检告警推送，
-# 未配置则静默跳过）、MARKET_SNAPSHOT_RETENTION_DAYS（快照保留天数，默认 600，下限 400）
+# 未配置则静默跳过）、MARKET_SNAPSHOT_RETENTION_DAYS（快照保留天数，默认 600，下限 400）、
+# STOCKTRACE_STATIC_ROOT（collectstatic 目录，默认 /opt/stocktrace/staticfiles）
 
-# 数据库
+# 6) 数据库与静态文件：manage.py 一律以 www 身份运行（root 建出的库/WAL 会让服务报只读）。
+# 环境变量只对 systemd 进程自动生效，手动跑 manage.py 先在 root shell 里加载，再 -E 传给 www
+sudo -i
 cd /opt/stocktrace/backend
-source ../backend/venv/bin/activate
-# 环境变量只对 systemd 进程自动生效，手动跑 manage.py 必须先加载：
 set -a; source /etc/stocktrace/env; set +a
-python manage.py migrate
-python manage.py collectstatic --noinput
+sudo -u www -E venv/bin/python manage.py check --deploy
+sudo -u www -E venv/bin/python manage.py migrate
+sudo -u www -E venv/bin/python manage.py collectstatic --noinput
+exit
 
-# 前端构建（需 Node >= 20）
+# 7) 前端构建（root 构建，dist 归 root，nginx 只读）
 cd /opt/stocktrace/frontend
-npm ci
-npm run build
+sudo npm ci
+sudo npm run build
 
-# systemd：Web（gunicorn）与调度器（run_scheduler）是两个独立单元（REL-01）
-sudo cp deploy/stocktrace.service deploy/stocktrace-scheduler.service /etc/systemd/system/
+# 8) systemd：Web（gunicorn）与调度器（run_scheduler）是两个独立单元（REL-01）
+sudo cp /opt/stocktrace/deploy/stocktrace.service /opt/stocktrace/deploy/stocktrace-scheduler.service /etc/systemd/system/
 sudo systemctl daemon-reload
 sudo systemctl enable --now stocktrace stocktrace-scheduler
+curl -s http://127.0.0.1:8000/api/health/ | python3 -m json.tool   # status ok、scheduler.alive true
 
-# Nginx + Basic Auth：<username> 换成不显眼的用户名（不要用 stocktrace/admin 等），
+# 9) 源站证书（第 5.1 节：Cloudflare 后台签发 Origin 证书，放到 /etc/ssl/stocktrace/）
+#    完成后再继续下一步
+
+# 10) Nginx + Basic Auth：<username> 换成不显眼的用户名（不要用 stocktrace/admin 等），
 # 密码用长随机串（如 openssl rand -base64 24），用户名与密码都不要写进仓库（SEC-02）
 sudo htpasswd -B -c /etc/nginx/.htpasswd_stocktrace <username>
-sudo cp deploy/nginx-stocktrace.conf /etc/nginx/sites-available/stocktrace
+sudo sed "s/stocktrace.yumeat.cc.cd/<你的域名>/g" /opt/stocktrace/deploy/nginx-stocktrace.conf \
+    | sudo tee /etc/nginx/sites-available/stocktrace >/dev/null
 sudo ln -sf /etc/nginx/sites-available/stocktrace /etc/nginx/sites-enabled/
+sudo rm -f /etc/nginx/sites-enabled/default
 sudo nginx -t && sudo systemctl reload nginx
 
-# 防火墙：80/443 只放行 Cloudflare 网段，防止绕过 CF 直连源站（SEC-10，见 5.2）
-sudo bash deploy/ufw-cloudflare.sh --dry-run   # 先看清要执行的规则
-sudo bash deploy/ufw-cloudflare.sh
+# 11) 防火墙：80/443 只放行 Cloudflare 网段，防止绕过 CF 直连源站（SEC-10，见 5.2）
+sudo bash /opt/stocktrace/deploy/ufw-cloudflare.sh --dry-run   # 先看清要执行的规则
+sudo bash /opt/stocktrace/deploy/ufw-cloudflare.sh
+
+# 12) Cloudflare SSL 模式切到 Full (strict)（第 5.3 节），然后装备份定时器（第 6.1 节）
 ```
 
 注意：
 
-- **Gunicorn 配置不要设 `user=`**，systemd 已是 `User=www`
+- **Gunicorn 配置不要设 `user=`**，systemd 已是 `User=www`；配置只有 `backend/gunicorn_config.py` 一份（REL-10）
 - Cloudflare SSL 模式：**Full (strict)**，需先配源站证书，见第 5 节
-- 域名改到你自己的 `server_name`
+- 域名：nginx 的 `server_name`、`DJANGO_ALLOWED_HOSTS`、`STOCKTRACE_TRUSTED_ORIGINS` 三处要一致
+- 第一次部署后自选为空，在页面添加股票即自动拉行情；探测器的融资余额等快照要积累约一周
 
 ---
 

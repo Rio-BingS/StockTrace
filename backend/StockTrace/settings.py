@@ -222,8 +222,9 @@ USE_TZ = True
 
 STATIC_URL = 'static/'
 
-# 静态文件收集目录（生产环境用）
-STATIC_ROOT = '/opt/stocktrace/staticfiles'
+# 静态文件收集目录（生产环境用）：缺省为仓库根下的 staticfiles/（生产即 /opt/stocktrace/staticfiles，
+# 与 nginx alias 一致）；部署到其他路径时用 STOCKTRACE_STATIC_ROOT 覆盖（OPS-07）
+STATIC_ROOT = Path(os.environ.get('STOCKTRACE_STATIC_ROOT') or BASE_DIR.parent / 'staticfiles')
 
 # 受信来源（SEC-05）：同时用于 CORS 白名单与 CSRF_TRUSTED_ORIGINS（含 scheme，逗号分隔）。
 # 站点只经 HTTPS 对外，删除了原 http 源，避免明文页面被当作受信来源。
