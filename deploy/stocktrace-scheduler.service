@@ -22,8 +22,39 @@ RestartSec=10
 # 停止时先 SIGTERM，run_scheduler 等在跑任务（分钟线循环/探测器扫描）结束再退出
 KillSignal=SIGTERM
 TimeoutStopSec=300
-# 1H2G：与 gunicorn(1200M) 分开计量；akshare/pandas 拉全市场数据时峰值较高
+# 1H2G：与 gunicorn(1200M) 分开计量；akshare/pandas 拉全市场数据时峰值较高。
+# MemoryHigh 软上限（超过后回收变慢、不杀进程），MemoryMax 硬上限（超过即 OOM kill 后重启）
+MemoryHigh=600M
 MemoryMax=700M
+
+# ---- 沙箱（SEC-10）----
+# 整个文件系统只读，只放行 SQLite 所在的 backend/（库、WAL、__pycache__）；
+# 锁/心跳在 RuntimeDirectory、可选日志在 LogsDirectory、库的缓存在 CacheDirectory，均由 systemd 建好并归属 www。
+# 未启用 MemoryDenyWriteExecute：akshare 依赖的 mini_racer(V8) 需要 JIT。
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+ProtectHostname=yes
+RestrictSUIDSGID=yes
+RestrictRealtime=yes
+RestrictNamespaces=yes
+LockPersonality=yes
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+UMask=0027
+ReadWritePaths=/opt/stocktrace/backend
+LogsDirectory=stocktrace
+LogsDirectoryMode=0750
+CacheDirectory=stocktrace
+# ProtectHome 后 ~ 不可访问：把 HOME/缓存指到可写的 CacheDirectory，第三方库写 ~/.xxx 也不会失败
+Environment=XDG_CACHE_HOME=/var/cache/stocktrace
+Environment=HOME=/var/cache/stocktrace
 
 [Install]
 WantedBy=multi-user.target

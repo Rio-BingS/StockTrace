@@ -51,12 +51,14 @@ VPS 上的 `/opt/stocktrace` 是本仓库的 git 工作副本，按发布标签�
 sudo apt update
 sudo apt install -y python3.12 python3.12-venv nginx apache2-utils
 
-# 代码：克隆仓库到 /opt/stocktrace 并切到要发布的标签
-sudo mkdir -p /opt/stocktrace /etc/stocktrace
-sudo chown www:www /opt/stocktrace
-sudo -u www git clone <仓库地址> /opt/stocktrace
-sudo -u www git -C /opt/stocktrace checkout --detach vX.Y.Z
-sudo -u www mkdir -p /opt/stocktrace/staticfiles
+# 代码：克隆仓库到 /opt/stocktrace 并切到要发布的标签。
+# 属主（SEC-10）：代码归 root，www 只拥有 backend/ 目录本身（SQLite 库与 WAL/-shm 需要在此建文件）
+# 和 staticfiles/；不要 chown -R，否则 Web 进程被攻破时可以改写全部代码与前端产物
+sudo mkdir -p /etc/stocktrace
+sudo git clone <仓库地址> /opt/stocktrace
+sudo git -C /opt/stocktrace checkout --detach vX.Y.Z
+sudo chown www:www /opt/stocktrace/backend
+sudo install -d -o www -g www -m 0755 /opt/stocktrace/staticfiles
 
 # 虚拟环境（放在 backend/venv，与线上保持一致）
 cd /opt/stocktrace
@@ -64,8 +66,8 @@ python3.12 -m venv backend/venv
 source backend/venv/bin/activate
 pip install -r backend/requirements.lock   # 锁文件，全量精确版本（OPS-02）
 
-# 环境变量
-sudo cp deploy/env.example /etc/stocktrace/env
+# 环境变量：含 SECRET_KEY / Fernet 密钥，只允许 root 读（systemd 以 root 读取 EnvironmentFile，SEC-10）
+sudo install -m 600 -o root -g root deploy/env.example /etc/stocktrace/env
 sudo nano /etc/stocktrace/env   # 填 SECRET_KEY、ALLOWED_HOSTS
 # 可选：STOCKTRACE_PUSH_URL（Server酱兼容；价格提醒 + 快照自检告警推送，
 # 未配置则静默跳过）、MARKET_SNAPSHOT_RETENTION_DAYS（快照保留天数，默认 600，下限 400）
@@ -94,6 +96,10 @@ sudo htpasswd -B -c /etc/nginx/.htpasswd_stocktrace <username>
 sudo cp deploy/nginx-stocktrace.conf /etc/nginx/sites-available/stocktrace
 sudo ln -sf /etc/nginx/sites-available/stocktrace /etc/nginx/sites-enabled/
 sudo nginx -t && sudo systemctl reload nginx
+
+# 防火墙：80/443 只放行 Cloudflare 网段，防止绕过 CF 直连源站（SEC-10，见 5.2）
+sudo bash deploy/ufw-cloudflare.sh --dry-run   # 先看清要执行的规则
+sudo bash deploy/ufw-cloudflare.sh
 ```
 
 注意：
@@ -115,15 +121,16 @@ sudo nginx -t && sudo systemctl reload nginx
 - 生产上只做**只读检查**：`check --deploy`、`migrate --plan`、启动后 `curl /api/health/`。
 - 每次升级前**先记录当前 tag、再做一次在线备份**，回滚才有据可依。
 
-以下命令以 root 执行，git / manage.py 一律以 `www` 身份运行（避免 root 改写目录属主，导致
-「attempt to write a readonly database」）。`NEW=vX.Y.Z` 换成要发布的标签。
+以下命令以 root 执行：git / pip / npm 以 root 运行（代码归 root，SEC-10）；**manage.py 一律以 `www`
+身份运行**（它会写库，root 建出的 -wal/-shm 会导致「attempt to write a readonly database」）。
+`NEW=vX.Y.Z` 换成要发布的标签。
 
 ### 2.1 升级
 
 ```bash
 NEW=vX.Y.Z
 cd /opt/stocktrace
-G="sudo -u www git -C /opt/stocktrace"
+G="git -C /opt/stocktrace"
 
 # 1) 记录当前版本（回滚目标），工作区必须干净（有改动说明有人在生产上手改过，先查清再继续）
 $G status --porcelain --untracked-files=no      # 应无输出
@@ -138,7 +145,7 @@ $G fetch --tags origin
 $G checkout --detach "$NEW"
 
 # 4) 依赖：一律装锁文件，不要装 requirements.txt、不要 pip install -U（第 7 节）
-sudo -u www backend/venv/bin/pip install -r backend/requirements.lock
+backend/venv/bin/pip install -r backend/requirements.lock
 
 # 5) 只读检查（服务仍在旧版本上运行）
 cd /opt/stocktrace/backend
@@ -148,7 +155,7 @@ sudo -u www -E venv/bin/python manage.py migrate --plan   # 看清本次要执�
 
 # 6) 前端构建（不影响运行中的服务；dist 原地替换）
 cd /opt/stocktrace/frontend
-sudo -u www npm ci && sudo -u www npm run build
+npm ci && npm run build
 
 # 7) 停服 → 迁移 → 静态文件 → 同步 systemd 单元 → 启动
 sudo systemctl stop stocktrace stocktrace-scheduler
@@ -182,7 +189,7 @@ sudo journalctl -u stocktrace -n 200 --no-pager | grep -i APScheduler    # 应�
 ```bash
 PREV=v上一个标签            # 取自 /var/backups/stocktrace/deploy-history.log
 cd /opt/stocktrace
-G="sudo -u www git -C /opt/stocktrace"
+G="git -C /opt/stocktrace"
 sudo systemctl stop stocktrace stocktrace-scheduler
 ```
 
@@ -190,8 +197,8 @@ sudo systemctl stop stocktrace stocktrace-scheduler
 
   ```bash
   $G checkout --detach "$PREV"
-  sudo -u www backend/venv/bin/pip install -r backend/requirements.lock
-  (cd frontend && sudo -u www npm ci && sudo -u www npm run build)
+  backend/venv/bin/pip install -r backend/requirements.lock
+  (cd frontend && npm ci && npm run build)
   sudo cp deploy/stocktrace.service deploy/stocktrace-scheduler.service /etc/systemd/system/ && sudo systemctl daemon-reload
   sudo systemctl start stocktrace stocktrace-scheduler
   curl -s http://127.0.0.1:8000/api/health/ | python3 -m json.tool
@@ -295,7 +302,14 @@ sudo nginx -t && sudo systemctl reload nginx
 - `limit_req_zone $binary_remote_addr rate=10r/s`，**server 级** `burst=20 nodelay`
   （`/`、`/static/` 也计入，防止借静态页高速试 Basic Auth 密码；SEC-02），`/admin/` 另叠加
   `zone=admin`（30r/m，burst=10），超限返回 429。正常看板 60s 轮询远低于阈值，只挡滥刷
-- 进一步可加防火墙：443 只放行 CF 网段、80/8000/8001 全封（服务器侧 ufw/安全组）
+- **防火墙只放行 CF 网段**（SEC-10）：`sudo bash deploy/ufw-cloudflare.sh`（先 `--dry-run`）。
+  它拉取 cloudflare.com/ips 的最新网段，80/443 只对这些网段开放，并保留 SSH。不能用 nginx 的
+  allow/deny 代替：real_ip 已把 `$remote_addr` 换成 `CF-Connecting-IP`，直连源站时这个头可以伪造。
+  云厂商安全组若也能配，同样只放行 CF 网段。
+- **安全响应头**（SEC-10）：`server_tokens off`、`X-Content-Type-Options: nosniff`、
+  `X-Frame-Options: DENY`、`Referrer-Policy: same-origin`；`/assets/`（带哈希的构建产物）一年
+  `immutable` 缓存，`index.html` `no-cache`，发版后不会因旧入口页引用已删除的资源而白屏。
+  验证：`curl -sI -u <user>:<pass> https://<域名>/ | grep -iE 'server|x-frame|nosniff|referrer|cache-control'`
 
 ### 5.3 切换 Cloudflare SSL 模式（后台操作）
 
@@ -336,6 +350,38 @@ sudo tail -f /var/log/nginx/access.log            # 日志里的 IP 应是真实
    - Cloudflare Zero Trust **Access**（零代码，邮箱 OTP / SSO 登录后才放行到源站）；
    - DRF 加 `SessionAuthentication` + `IsAuthenticated` + 登录页（需同时把 /api/ 纳入 Django CSRF，
      并与 `StockTrace/middleware.py` 的来源校验协调）。
+
+### 5.5 systemd 沙箱与目录属主（SEC-10）
+
+`stocktrace.service` / `stocktrace-scheduler.service` 已开启 `NoNewPrivileges`、`ProtectSystem=strict`、
+`ProtectHome`、`PrivateTmp` 等沙箱选项：整个文件系统只读，只有以下位置可写——
+
+| 路径 | 来源 | 用途 |
+|---|---|---|
+| `/opt/stocktrace/backend` | `ReadWritePaths=` | SQLite 库与 `-wal`/`-shm`、`__pycache__` |
+| `/run/stocktrace` | `RuntimeDirectory=` | 调度锁、任务锁、心跳 |
+| `/var/log/stocktrace` | `LogsDirectory=` | 可选的 `STOCKTRACE_LOG_FILE` |
+| `/var/cache/stocktrace` | `CacheDirectory=` | `HOME`/`XDG_CACHE_HOME`，第三方库的缓存 |
+
+内存：`MemoryHigh` 是软上限（超过后内核积极回收，进程变慢但不被杀），`MemoryMax` 是硬上限（超过即 OOM
+kill，再由 `Restart=always` 拉起）。两个单元都 `After=network-online.target`。
+
+已部署实例（旧文档让 www 拥有整个 `/opt/stocktrace`）一次性改属主：
+
+```bash
+sudo systemctl stop stocktrace stocktrace-scheduler
+sudo chown -R root:root /opt/stocktrace
+sudo chown www:www /opt/stocktrace/backend
+sudo sh -c 'chown www:www /opt/stocktrace/backend/db.sqlite3*'
+sudo chown -R www:www /opt/stocktrace/staticfiles
+sudo chmod 600 /etc/stocktrace/env && sudo chown root:root /etc/stocktrace/env
+sudo cp /opt/stocktrace/deploy/stocktrace*.service /etc/systemd/system/
+sudo systemctl daemon-reload && sudo systemctl start stocktrace stocktrace-scheduler
+sudo journalctl -u stocktrace -u stocktrace-scheduler -n 100 --no-pager | grep -iE 'denied|read-only|error'
+```
+
+出现 `Read-only file system` / `Permission denied` 时，说明有代码写到了上表以外的位置：先记下路径，
+临时在对应单元加 `ReadWritePaths=<路径>` 恢复服务，再反馈修正代码或单元文件。
 
 ---
 
@@ -480,7 +526,7 @@ sudo journalctl -u stocktrace-scheduler --since today | grep -E "ERROR|WARNING"
 | 环境变量 | 默认 | 说明 |
 |---|---|---|
 | `STOCKTRACE_LOGLEVEL` | `INFO` | `stocks.*` 业务日志级别（排障时可设 `DEBUG`） |
-| `STOCKTRACE_LOG_FILE` | 空 | 另写一份文件（`WatchedFileHandler`，配合 logrotate）。Web 与调度是两个进程，建议分开：在各自 unit 里用 `Environment=STOCKTRACE_LOG_FILE=/var/log/stocktrace/web.log` / `scheduler.log`，并 `mkdir -p /var/log/stocktrace && chown www:www` |
+| `STOCKTRACE_LOG_FILE` | 空 | 另写一份文件（`WatchedFileHandler`，配合 logrotate）。Web 与调度是两个进程，建议分开：在各自 unit 里用 `Environment=STOCKTRACE_LOG_FILE=/var/log/stocktrace/web.log` / `scheduler.log`。两个 unit 已声明 `LogsDirectory=stocktrace`，systemd 自动创建属主为 www 的 `/var/log/stocktrace`（沙箱下只有它可写） |
 
 `apscheduler` 只输出 WARNING 以上（job 抛异常、错过执行时间都会出现）。
 
