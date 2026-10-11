@@ -434,3 +434,28 @@ class EnvExampleTests(TestCase):
                 read.add(a or b)
         undocumented = sorted(read - self._example_vars() - self._INTERNAL)
         self.assertEqual(undocumented, [], '代码读取了这些环境变量，但 env.example 未列出')
+
+
+class DeployProcedureTests(TestCase):
+    """OPS-05：升级流程不在生产跑测试、有回滚；两个 systemd 单元都声明运行时目录"""
+
+    def setUp(self):
+        self.doc = (REPO_DIR / 'deploy' / 'DEPLOY.md').read_text(encoding='utf-8')
+        self.upgrade = self.doc.split('## 2. 升级与回滚', 1)[1].split('\n## 3.', 1)[0]
+
+    def test_upgrade_section_has_no_test_run_and_has_rollback(self):
+        self.assertNotIn('manage.py test', self.upgrade.replace('`manage.py test`', ''))
+        for needle in ('check --deploy', 'migrate --plan', '/api/health/', 'checkout --detach', '2.2 回滚',
+                       'stocktrace-backup.sh'):
+            self.assertIn(needle, self.upgrade)
+
+    def test_no_stale_release_snapshot_wording(self):
+        self.assertNotIn('发布快照', self.doc)
+        self.assertNotIn('本快照', self.doc)
+
+    def test_both_units_declare_preserved_runtime_directory(self):
+        for unit in ('stocktrace.service', 'stocktrace-scheduler.service'):
+            text = (REPO_DIR / 'deploy' / unit).read_text(encoding='utf-8')
+            self.assertIn('RuntimeDirectory=stocktrace', text, unit)
+            self.assertIn('RuntimeDirectoryPreserve=yes', text, unit)
+            self.assertIn('RuntimeDirectoryMode=0755', text, unit)

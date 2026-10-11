@@ -1,8 +1,8 @@
-# StockTrace v1.02 部署说明
+# StockTrace 部署说明
 
 目标环境：Ubuntu 22.04，**1H2G** VPS，路径 `/opt/stocktrace`，Nginx + Gunicorn + systemd，Cloudflare Full (strict) SSL（回源加密 + Nginx 限流，见第 5 节），HTTP Basic Auth。
 
-本目录为**发布快照**（与仓库根目录 `backend/`、`frontend/` 同步的一份拷贝）。日常开发改根目录；部署时把本快照或 git 同步到 VPS。
+VPS 上的 `/opt/stocktrace` 是本仓库的 git 工作副本，按发布标签（`vX.Y.Z`）部署，升级与回滚见第 2 节。
 
 ---
 
@@ -51,9 +51,12 @@
 sudo apt update
 sudo apt install -y python3.12 python3.12-venv nginx apache2-utils
 
-# 代码放到 /opt/stocktrace （本快照的 backend + frontend）
-sudo mkdir -p /opt/stocktrace /etc/stocktrace /opt/stocktrace/staticfiles
-sudo chown -R www:www /opt/stocktrace
+# 代码：克隆仓库到 /opt/stocktrace 并切到要发布的标签
+sudo mkdir -p /opt/stocktrace /etc/stocktrace
+sudo chown www:www /opt/stocktrace
+sudo -u www git clone <仓库地址> /opt/stocktrace
+sudo -u www git -C /opt/stocktrace checkout --detach vX.Y.Z
+sudo -u www mkdir -p /opt/stocktrace/staticfiles
 
 # 虚拟环境（放在 backend/venv，与线上保持一致）
 cd /opt/stocktrace
@@ -101,54 +104,106 @@ sudo nginx -t && sudo systemctl reload nginx
 
 ---
 
-## 2. 从旧版升级到 v1.02
+## 2. 升级与回滚（OPS-05）
+
+原则：
+
+- **只部署打过标签、CI 已通过的版本**（`git tag -a vX.Y.Z`，见 README 发版流程），生产目录是该仓库的
+  git 工作副本，用 `git checkout <tag>` 切版本，**不在生产机上改代码、不在生产目录 `git init`/`push`**。
+- **测试不在生产机上跑**：`manage.py test` 会触网（akshare 上游）且依赖开发依赖，在生产机停服后跑
+  既拉长停机、又可能"必红"。测试只在 CI，或非生产机断网执行（见 7 节、仓库 CI 配置）。
+- 生产上只做**只读检查**：`check --deploy`、`migrate --plan`、启动后 `curl /api/health/`。
+- 每次升级前**先记录当前 tag、再做一次在线备份**，回滚才有据可依。
+
+以下命令以 root 执行，git / manage.py 一律以 `www` 身份运行（避免 root 改写目录属主，导致
+「attempt to write a readonly database」）。`NEW=vX.Y.Z` 换成要发布的标签。
+
+### 2.1 升级
 
 ```bash
-# 备份（升级前务必先做一次在线一致性备份，见第 6 节；不要直接 cp，WAL 模式下会丢数据）
-sudo -u www /opt/stocktrace/deploy/stocktrace-backup.sh
-sudo systemctl stop stocktrace
-
-# 同步代码（按你习惯：scp / git / tar）
-# 保证 gunicorn_config.py、stocks/tasks.py、scheduler.py 等到位
-#
-# ⚠️ root 身份 tar 解包会把 backend/、frontend/ 目录属主重置为 root，
-#    导致 www 无法在目录里创建 SQLite journal 文件 → 所有查询报
-#    「attempt to write a readonly database」，且被各处容错 except 吞掉、
-#    页面表现为莫名「数据暂不可用」。同步后必须执行：
-#      chown -R www:www /opt/stocktrace
-
+NEW=vX.Y.Z
 cd /opt/stocktrace
-source backend/venv/bin/activate
-pip install -r backend/requirements.lock   # 锁文件，全量精确版本（OPS-02）
-# ⚠️ 一律装 requirements.lock，不要装 requirements.txt、不要 pip install -U（见第 7 节）。
-# ⚠️ akshare 版本已钉死（==1.18.64）：其接口频繁变动，
-#    同花顺板块资金流解析由 stocks/market/sectors.py 自实现——勿随手
-#    pip install -U akshare（2026-09 曾因静默升级破坏解析导致快照断供）。
-cd backend
-set -a; source /etc/stocktrace/env; set +a   # 手动 manage.py 必须加载环境变量
-python manage.py test stocks
-python manage.py migrate
-python manage.py collectstatic --noinput
+G="sudo -u www git -C /opt/stocktrace"
 
+# 1) 记录当前版本（回滚目标），工作区必须干净（有改动说明有人在生产上手改过，先查清再继续）
+$G status --porcelain --untracked-files=no      # 应无输出
+PREV=$($G describe --tags --exact-match 2>/dev/null || $G rev-parse HEAD)
+echo "$(date -Is) $PREV -> $NEW" | sudo tee -a /var/backups/stocktrace/deploy-history.log
+
+# 2) 升级前在线一致性备份（第 6 节；WAL 模式禁止 cp）
+sudo -u www /opt/stocktrace/deploy/stocktrace-backup.sh
+
+# 3) 切到新标签（只 fetch，不 push）
+$G fetch --tags origin
+$G checkout --detach "$NEW"
+
+# 4) 依赖：一律装锁文件，不要装 requirements.txt、不要 pip install -U（第 7 节）
+sudo -u www backend/venv/bin/pip install -r backend/requirements.lock
+
+# 5) 只读检查（服务仍在旧版本上运行）
+cd /opt/stocktrace/backend
+set -a; source /etc/stocktrace/env; set +a       # 手动 manage.py 必须加载环境变量
+sudo -u www -E venv/bin/python manage.py check --deploy
+sudo -u www -E venv/bin/python manage.py migrate --plan   # 看清本次要执行哪些迁移
+
+# 6) 前端构建（不影响运行中的服务；dist 原地替换）
 cd /opt/stocktrace/frontend
-npm ci && npm run build
+sudo -u www npm ci && sudo -u www npm run build
 
-# 同步 systemd 单元（Web + 独立调度进程）；/etc/stocktrace/env 里若有
-# STOCKTRACE_RUN_SCHEDULER_IN_WEB=1 要删掉，否则 Web 会继续在进程内跑调度
+# 7) 停服 → 迁移 → 静态文件 → 同步 systemd 单元 → 启动
+sudo systemctl stop stocktrace stocktrace-scheduler
+cd /opt/stocktrace/backend
+sudo -u www -E venv/bin/python manage.py migrate
+sudo -u www -E venv/bin/python manage.py collectstatic --noinput
 sudo cp /opt/stocktrace/deploy/stocktrace.service /opt/stocktrace/deploy/stocktrace-scheduler.service /etc/systemd/system/
 sudo cp /opt/stocktrace/deploy/gunicorn_config.py /opt/stocktrace/backend/gunicorn_config.py   # 若两份不同
 sudo systemctl daemon-reload
-sudo systemctl enable stocktrace-scheduler
+sudo systemctl enable stocktrace stocktrace-scheduler
 sudo systemctl start stocktrace stocktrace-scheduler
 
-# 确认调度只在独立进程里启动一次、Web 里没有
+# 8) 验证
+curl -s http://127.0.0.1:8000/api/health/ | python3 -m json.tool
 sudo journalctl -u stocktrace-scheduler -n 50 --no-pager | grep -i APScheduler
 sudo journalctl -u stocktrace -n 200 --no-pager | grep -i APScheduler    # 应无输出
-curl -s http://127.0.0.1:8000/api/health/ | python3 -m json.tool
 ```
 
-期望：`stocktrace-scheduler` 日志里 `APScheduler 已启动 ...，独立进程 pid=NNN` 出现一次；
-`/api/health/` 返回 `"status": "ok"`、`scheduler.alive: true`、各 job 的 `next_run_time`。
+期望：
+
+- `check --deploy` 只剩 `security.W004`（HSTS 默认关闭，有意为之，见 `STOCKTRACE_HSTS_SECONDS`）与
+  `security.W008`（HTTP→HTTPS 跳转由 Cloudflare/Nginx 完成）；出现其他告警（尤其 W009 SECRET_KEY）先修再继续。
+- `/api/health/` 返回 `"status": "ok"`、`scheduler.alive: true`、各 job 的 `next_run_time`；
+  `stocktrace-scheduler` 日志里 `APScheduler 已启动 ...，独立进程 pid=NNN` 出现一次。
+- 发版尽量避开 15:00–17:30（收盘汇总与 17:15 探测器）。
+- `/etc/stocktrace/env` 里若还有 `STOCKTRACE_RUN_SCHEDULER_IN_WEB=1` 要删掉，否则 Web 会继续在进程内跑调度。
+
+### 2.2 回滚
+
+`deploy-history.log` 最后一行是本次的 `PREV -> NEW`。
+
+```bash
+PREV=v上一个标签            # 取自 /var/backups/stocktrace/deploy-history.log
+cd /opt/stocktrace
+G="sudo -u www git -C /opt/stocktrace"
+sudo systemctl stop stocktrace stocktrace-scheduler
+```
+
+- **本次 `migrate --plan` 没有新迁移**：直接切回旧代码即可。
+
+  ```bash
+  $G checkout --detach "$PREV"
+  sudo -u www backend/venv/bin/pip install -r backend/requirements.lock
+  (cd frontend && sudo -u www npm ci && sudo -u www npm run build)
+  sudo cp deploy/stocktrace.service deploy/stocktrace-scheduler.service /etc/systemd/system/ && sudo systemctl daemon-reload
+  sudo systemctl start stocktrace stocktrace-scheduler
+  curl -s http://127.0.0.1:8000/api/health/ | python3 -m json.tool
+  ```
+- **有新迁移**：旧代码不认识新表结构，必须先把库退回去，二选一：
+  1. **恢复升级前的备份**（最稳妥；会丢失升级后写入的数据，通常只有几分钟）：按第 6.2 节恢复
+     第 2 步生成的那份备份，**跳过 6.2 里的 migrate**，再执行上面的「切回旧代码」。
+  2. **反向迁移**（保留新数据；仅当新迁移都可逆时）：在**新代码**下先
+     `sudo -u www -E venv/bin/python manage.py migrate stocks <旧版本最后一个迁移号>`，再切回旧代码。
+     不确定可逆性就用方案 1。
+- 回滚后在 `deploy-history.log` 追加一行 `ROLLBACK NEW -> PREV` 和原因。
 
 ---
 

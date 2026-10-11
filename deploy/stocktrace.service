@@ -11,6 +11,12 @@ EnvironmentFile=/etc/stocktrace/env
 # 调度器由独立的 stocktrace-scheduler.service 运行（REL-01）；Web 只读心跳文件给 /api/health/。
 # 注意 EnvironmentFile 里的同名变量优先于这里：/etc/stocktrace/env 不要设 STOCKTRACE_RUN_SCHEDULER_IN_WEB=1
 Environment=STOCKTRACE_RUN_SCHEDULER_IN_WEB=0
+# 两个单元共用 /run/stocktrace（OPS-05）：之前只有调度单元声明 RuntimeDirectory，
+# 只启动 Web、或调度单元未装时目录不存在，Web 侧需要的跨进程锁/心跳路径无处落地。
+# 两边都 Preserve=yes，任一单元停止都不会删掉另一方正在用的目录；Mode 必须与调度单元一致。
+RuntimeDirectory=stocktrace
+RuntimeDirectoryMode=0755
+RuntimeDirectoryPreserve=yes
 Environment=STOCKTRACE_RUN_DIR=/run/stocktrace
 ExecStart=/opt/stocktrace/backend/venv/bin/gunicorn \
     --config /opt/stocktrace/backend/gunicorn_config.py \
