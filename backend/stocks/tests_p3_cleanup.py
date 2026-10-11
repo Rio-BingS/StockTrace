@@ -226,3 +226,14 @@ class DetectorLoggingTests(SimpleTestCase):
                 self.assertLogs('stocks.detector.signals', level='WARNING'):
             self.assertIsNone(signals._previous_trading_days(date(2026, 9, 10), 3))
 
+
+class AlertPushTests(SimpleTestCase):
+    def test_push_request_error_degrades(self):
+        import requests
+
+        from stocks import alerts
+
+        with self.settings(STOCKTRACE_PUSH_URL='http://push.invalid/x'), \
+                patch('stocks.alerts.requests.post', side_effect=requests.ConnectionError('down')), \
+                self.assertLogs('stocks.alerts', level='WARNING'):
+            self.assertFalse(alerts.push_message('t', 'd'))

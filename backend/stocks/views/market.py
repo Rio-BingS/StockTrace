@@ -42,7 +42,7 @@ def _deadline_error_response(exc, label):
             {'detail': f'{label}上游连续超时，暂停访问 {_BREAKER_OPEN_SECONDS} 秒后再试'},
             status=status.HTTP_503_SERVICE_UNAVAILABLE,
         )
-    logger.warning(f'获取{label}超过 {_request_deadline():.0f}s 总时限')
+    logger.warning("获取%s超过 %.0fs 总时限", label, _request_deadline())
     return Response({'detail': f'获取{label}超时，请稍后重试'}, status=status.HTTP_504_GATEWAY_TIMEOUT)
 
 
@@ -51,7 +51,7 @@ def _market_response(loader, label):
         return Response(_call_with_deadline(loader, label))
     except (UpstreamTimeout, UpstreamCircuitOpen) as e:
         return _deadline_error_response(e, label)
-    except Exception:
+    except Exception:  # noqa: BLE001 视图边界：其余异常统一 502 不回显（SEC-07），堆栈由 _upstream_failed 记录
         return _upstream_failed(label)
 
 
@@ -62,7 +62,7 @@ def _upstream_failed(label):
     error_id 同时写进日志，排障时按它在日志里定位堆栈。
     """
     error_id = uuid.uuid4().hex[:12]
-    logger.exception(f'获取{label}失败 error_id={error_id}')
+    logger.exception("获取%s失败 error_id=%s", label, error_id)
     return Response(
         {'detail': f'获取{label}失败，请稍后重试（错误编号 {error_id}）',
          'error_id': error_id},
@@ -144,7 +144,7 @@ def _market_bad_request(loader, label='市场数据'):
         return _deadline_error_response(e, label)
     except BadRequest:
         raise
-    except Exception:
+    except Exception:  # noqa: BLE001 视图边界：同 _market_response
         return _upstream_failed(label)
 
 
@@ -254,5 +254,5 @@ def market_institutions(request):
         return _deadline_error_response(e, '机构持仓')
     except BadRequest:
         raise  # 全局 EXCEPTION_HANDLER 转 400
-    except Exception:
+    except Exception:  # noqa: BLE001 视图边界：同 _market_response
         return _upstream_failed('机构持仓')

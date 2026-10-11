@@ -129,8 +129,8 @@ def push_message(title, desp):
     try:
         requests.post(url, json={'title': title, 'desp': desp}, timeout=5).raise_for_status()
         return True
-    except Exception as e:
-        logger.warning(f"推送失败（不影响主流程）: {e}")
+    except requests.RequestException as e:
+        logger.warning("推送失败（不影响主流程）: %s", e)
         return False
 
 
@@ -193,13 +193,13 @@ def evaluate_alerts(now=None):
             continue
         try:
             event = _evaluate_one(alert, today)
-        except Exception:
-            logger.exception(f"价格提醒 #{alert.id} 评估失败（跳过该条，继续其余规则）")
+        except Exception:  # 边界：单条规则异常不影响其余规则
+            logger.exception("价格提醒 #%s 评估失败（跳过该条，继续其余规则）", alert.id)
             continue
         if event is not None:
             new_events.append(event)
 
     _push(new_events)
     if new_events:
-        logger.info(f"价格提醒触发 {len(new_events)} 条: {[e.message for e in new_events]}")
+        logger.info("价格提醒触发 %s 条: %s", len(new_events), [e.message for e in new_events])
     return new_events

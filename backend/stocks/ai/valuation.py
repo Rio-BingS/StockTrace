@@ -104,8 +104,8 @@ def fetch_valuation_map(codes):
                 entries[code] = {'ts': now, 'row': row}
                 fresh[code] = row
             cache_set('stock_valuation', entries)
-        except Exception as e:
-            logger.warning(f"腾讯估值快照拉取失败（字段按 None 处理）: {e}")
+        except Exception as e:  # noqa: BLE001 上游边界：腾讯行情请求与解析异常类型不固定，字段降级为 None
+            logger.warning("腾讯估值快照拉取失败（字段按 None 处理）: %s", e)
             globals()['_last_fail_at'] = time.time()
 
     return {c: fresh[c] for c in wanted if c in fresh}

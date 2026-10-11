@@ -54,7 +54,7 @@ def _call_with_deadline(loader, label):
             if st['timeouts'] >= _BREAKER_THRESHOLD:
                 st['open_until'] = time.monotonic() + _BREAKER_OPEN_SECONDS
                 st['timeouts'] = 0
-                logger.warning(f'{label} 连续 {_BREAKER_THRESHOLD} 次超时，熔断 {_BREAKER_OPEN_SECONDS}s')
+                logger.warning("%s 连续 %s 次超时，熔断 %ss", label, _BREAKER_THRESHOLD, _BREAKER_OPEN_SECONDS)
         raise UpstreamTimeout(label)
     with _breaker_lock:
         _breaker.pop(label, None)
