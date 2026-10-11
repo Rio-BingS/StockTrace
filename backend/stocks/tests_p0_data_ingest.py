@@ -68,7 +68,7 @@ class SinaMinuteDateFilterTests(_NoSleep, TestCase):
         })
 
     def _run(self, sources):
-        with patch('stocks.services.DATA_SOURCES', sources):
+        with patch('stocks.datasources.chain.DATA_SOURCES', sources):
             return services.fetch_minute_data(self.stock, trade_date='2026-09-02')
 
     def test_sina_fallback_uses_only_requested_day(self):
@@ -163,7 +163,7 @@ class MinuteBulkUpsertTests(_NoSleep, TestCase):
 
     def _fetch(self, bars):
         df = _sina_minute_df({'2026-09-02': bars})
-        with patch('stocks.services.DATA_SOURCES', [services.SinaSource()]), \
+        with patch('stocks.datasources.chain.DATA_SOURCES', [services.SinaSource()]), \
                 patch('akshare.stock_zh_a_minute', return_value=df):
             return services.fetch_minute_data(self.stock, trade_date='2026-09-02')
 
@@ -215,7 +215,7 @@ class VolumeUnitTests(_NoSleep, TestCase):
         self.stock = Stock.objects.create(code='000001', name='平安银行')
 
     def _daily(self, source):
-        with patch('stocks.services.DATA_SOURCES', [source]):
+        with patch('stocks.datasources.chain.DATA_SOURCES', [source]):
             services.fetch_daily_data(self.stock, start_date='20260901', end_date='20260901')
         return DailyQuote.objects.get(stock=self.stock, trade_date=date(2026, 9, 1))
 
@@ -251,7 +251,7 @@ class VolumeUnitTests(_NoSleep, TestCase):
         _make_quote(self.stock, date(2026, 9, 2))
         em_df = pd.DataFrame([{'时间': '2026-09-02 09:31:00', '开盘': 10, '收盘': 10,
                                '最高': 10.1, '最低': 9.9, '成交量': 12, '成交额': 12000.0}])
-        with patch('stocks.services.DATA_SOURCES', [services.EastMoneySource()]), \
+        with patch('stocks.datasources.chain.DATA_SOURCES', [services.EastMoneySource()]), \
                 patch('akshare.stock_zh_a_hist_min_em', return_value=em_df):
             services.fetch_minute_data(self.stock, trade_date='2026-09-02')
         bar = MinuteBar.objects.get(stock=self.stock)
@@ -259,7 +259,7 @@ class VolumeUnitTests(_NoSleep, TestCase):
                          (1200, Decimal('12000.00'), 'eastmoney', 1))
 
         sina_df = _sina_minute_df({'2026-09-02': [('09:31', 10.1, 9.9)]})
-        with patch('stocks.services.DATA_SOURCES', [services.SinaSource()]), \
+        with patch('stocks.datasources.chain.DATA_SOURCES', [services.SinaSource()]), \
                 patch('akshare.stock_zh_a_minute', return_value=sina_df):
             services.fetch_minute_data(self.stock, trade_date='2026-09-02')
         bar.refresh_from_db()
@@ -287,7 +287,7 @@ class MinuteFreqTests(_NoSleep, TestCase):
             ])
 
     def _fetch(self, source, patcher=None):
-        with patch('stocks.services.DATA_SOURCES', [source]):
+        with patch('stocks.datasources.chain.DATA_SOURCES', [source]):
             if patcher:
                 with patcher:
                     return services.fetch_minute_data(self.stock, trade_date='2026-09-02')
