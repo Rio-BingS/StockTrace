@@ -10,11 +10,6 @@ from ..models import Stock
 from ..serializers import AlertSerializer
 
 
-def _alert_row(alert):
-    """兼容旧导入路径保留一版；新代码直接用 serializers.AlertSerializer（ARC-01）。"""
-    return AlertSerializer(alert).data
-
-
 def _alert_rule_error(stock_id, rule_type, threshold_raw):
     """校验创建提醒的入参；通过返回 None，否则返回错误消息。"""
     from decimal import Decimal, InvalidOperation

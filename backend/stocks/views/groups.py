@@ -9,11 +9,6 @@ from ..common.envelope import list_response
 from ..serializers import StockGroupSerializer
 
 
-def _group_row(group):
-    """兼容旧导入路径保留一版；新代码直接用 serializers.StockGroupSerializer（ARC-01）。"""
-    return StockGroupSerializer(group).data
-
-
 @api_view(['GET', 'POST'])
 def stock_group_list(request):
     """分组列表（含各组活跃股票数）/ 新建"""

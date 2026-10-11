@@ -309,3 +309,13 @@ class CompatAliasRemovedTests(SimpleTestCase):
             text = path.read_text(encoding='utf-8')
             for needle in ('from .services', 'from ..services', 'stocks.services'):
                 self.assertNotIn(needle, text, str(path))
+
+    def test_views_package_only_exports_public_views(self):
+        from stocks import serializers, views
+
+        for old in ('_quote_row', '_alert_row', '_group_row', '_call_with_deadline', '_breaker',
+                    'UpstreamTimeout', '_market_bad_request', '_initial_fetch'):
+            self.assertFalse(hasattr(views, old), old)
+        self.assertFalse(hasattr(serializers, 'DashboardStockSerializer'))
+        for name in views.__all__:
+            self.assertTrue(callable(getattr(views, name)), name)

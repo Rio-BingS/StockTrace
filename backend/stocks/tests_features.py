@@ -24,7 +24,7 @@ from .models import (
     PriceAlert,
     Stock,
 )
-from .views import _quote_row
+from .serializers import QuoteRowSerializer
 
 _BASE = date(2026, 9, 4)
 
@@ -542,15 +542,16 @@ class DashboardCostTests(TestCase):
         stock = Stock.objects.create(
             code='600000', name='浦发银行', cost_price=Decimal('10.000'), quantity=1000,
         )
-        quote = _make_quote(stock, Decimal('11.0'), 10.0)
-        row = _quote_row(stock, quote)
-        self.assertEqual(row['cost_price'], Decimal('10.000'))
+        stock.latest_quote = _make_quote(stock, Decimal('11.0'), 10.0)
+        row = QuoteRowSerializer(stock).data
+        self.assertEqual(row['cost_price'], '10.000')
         self.assertEqual(row['quantity'], 1000)
         # 盈亏由前端按 (close - cost) * quantity 计算，后端不重复出口径
 
     def test_quote_row_without_cost_is_null(self):
         stock = Stock.objects.create(code='600000', name='浦发银行')
-        row = _quote_row(stock, None)
+        stock.latest_quote = None
+        row = QuoteRowSerializer(stock).data
         self.assertIsNone(row['cost_price'])
         self.assertIsNone(row['quantity'])
 

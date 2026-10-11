@@ -13,7 +13,7 @@ from django.utils import timezone
 from . import baostock_session, datasources, ingest, trading_calendar
 from .common import codes
 from .models import AlertEvent, DailyQuote, MinuteBar, PriceAlert, ScreenerPreset, Stock, StockGroup
-from .serializers import DailyQuoteSerializer, DashboardStockSerializer
+from .serializers import DailyQuoteSerializer, QuoteRowSerializer
 
 
 def _aware(s):
@@ -70,16 +70,14 @@ class PricePrecisionTests(_NoSleep, TestCase):
         bc.assert_not_called()
 
     def test_dashboard_serializer_three_decimals(self):
-        data = DashboardStockSerializer({
-            'id': 1, 'code': '510300', 'name': 'x', 'group_id': None, 'group_name': None,
-            'cost_price': None, 'quantity': None, 'trade_date': None,
-            'open_price': Decimal('1.234'), 'close_price': Decimal('1.235'),
-            'high_price': None, 'low_price': None, 'high_time': None, 'low_time': None,
-            'open_close_diff': Decimal('0.001'), 'open_close_pct': None,
-            'high_low_diff': None, 'high_low_pct': None, 'prev_close': Decimal('1.230'),
-            'change_diff': Decimal('0.005'), 'change_pct': None,
-            'volume': None, 'turnover': None,
-        }).data
+        etf = Stock.objects.create(code='510301', name='x')
+        etf.latest_quote = DailyQuote(
+            stock=etf, trade_date=date(2026, 9, 2), open_price=Decimal('1.234'),
+            close_price=Decimal('1.235'), high_price=Decimal('1.236'), low_price=Decimal('1.233'),
+            open_close_diff=Decimal('0.001'), prev_close=Decimal('1.230'),
+            change_diff=Decimal('0.005'),
+        )
+        data = QuoteRowSerializer(etf).data
         self.assertEqual(data['close_price'], '1.235')
         self.assertEqual(data['change_diff'], '0.005')
 

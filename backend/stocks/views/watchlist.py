@@ -219,62 +219,6 @@ class StockViewSet(viewsets.ModelViewSet):
         return list_response(request, serializer.data, meta={'code': stock.code, 'date': date_obj.isoformat()})
 
 
-def _quote_row(stock, quote):
-    """旧的 Dashboard 行字典（未经序列化的原始值）。
-
-    dashboard 已改用 serializers.QuoteRowSerializer（ARC-01）；此函数仅为旧导入
-    路径保留一版，下一版删除。
-    """
-    base = {
-        'id': stock.id,
-        'code': stock.code,
-        'name': stock.name,
-        'group_id': stock.group_id,
-        'group_name': stock.group.name if stock.group_id else None,
-        'cost_price': stock.cost_price,
-        'quantity': stock.quantity,
-    }
-    if quote is None:
-        base.update({
-            'trade_date': None,
-            'open_price': None,
-            'close_price': None,
-            'high_price': None,
-            'low_price': None,
-            'high_time': None,
-            'low_time': None,
-            'open_close_diff': None,
-            'open_close_pct': None,
-            'high_low_diff': None,
-            'high_low_pct': None,
-            'prev_close': None,
-            'change_diff': None,
-            'change_pct': None,
-            'volume': None,
-            'turnover': None,
-        })
-        return base
-    base.update({
-        'trade_date': quote.trade_date,
-        'open_price': quote.open_price,
-        'close_price': quote.close_price,
-        'high_price': quote.high_price,
-        'low_price': quote.low_price,
-        'high_time': quote.high_time,
-        'low_time': quote.low_time,
-        'open_close_diff': quote.open_close_diff,
-        'open_close_pct': quote.open_close_pct,
-        'high_low_diff': quote.high_low_diff,
-        'high_low_pct': quote.high_low_pct,
-        'prev_close': quote.prev_close,
-        'change_diff': quote.change_diff,
-        'change_pct': quote.change_pct,
-        'volume': quote.volume,
-        'turnover': quote.turnover,
-    })
-    return base
-
-
 @api_view(['GET'])
 def dashboard(request):
     """Dashboard 聚合：自选 + 每只最新日行情（2 次查询，避免 N+1）"""

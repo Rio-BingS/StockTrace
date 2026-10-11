@@ -493,13 +493,13 @@ class MarketDeadlineBreakerTests(SimpleTestCase):
     """REL-05：市场接口总时限超时 504；同接口连续 3 次超时熔断 60s 返回 503。"""
 
     def setUp(self):
-        from stocks import views
+        from stocks.common import upstream
         from stocks.views import market as market_views
 
         self.views = market_views  # patch 目标须是定义模块（ARC-01 拆包）
-        self.breaker = views._breaker
-        views._breaker.clear()
-        self.addCleanup(views._breaker.clear)
+        self.breaker = upstream._breaker
+        upstream._breaker.clear()
+        self.addCleanup(upstream._breaker.clear)
         self.release = threading.Event()
         self.addCleanup(self.release.set)  # 放走仍卡在池里的慢 loader
 
