@@ -1,5 +1,5 @@
 <script setup>
-import { ref, computed, onMounted, onUnmounted } from 'vue'
+import { ref, computed, onMounted } from 'vue'
 import { RouterLink } from 'vue-router'
 import VChart from 'vue-echarts'
 import { use } from 'echarts/core'
@@ -14,10 +14,13 @@ import { marketApi } from '../api/stocks.js'
 import PeriodPicker from '../components/PeriodPicker.vue'
 import { formatPct, formatNum, formatSigned, pctClass } from '../utils/format.js'
 import { formatYiAxis, formatTurnover, formatAmount } from '../utils/marketFormat.js'
-import { errorMessage, isCanceled } from '../utils/errorMessage.js'
-import { createRequestGuard } from '../utils/requestGuard.js'
+import { errorMessage } from '../utils/errorMessage.js'
+import { useAsync } from '../composables/useAsync.js'
+import { FLOW_PERIODS } from '../constants/periods.js'
 import { usePolling } from '../composables/usePolling.js'
 import { DOWN, FLAT, UP, trendColor } from '../constants/colors.js'
+// 图表 tooltip / 坐标轴配色统一取自 charts/theme.js（ARC-06）
+import { TOOLTIP_STYLE, AXIS_LABEL_COLOR, AXIS_LINE_COLOR, SPLIT_LINE_COLOR } from '../charts/theme.js'
 
 // 显式组件名：App.vue 的 KeepAlive include 按它匹配，不依赖文件名推断（FEF-15）
 defineOptions({ name: 'Market' })
@@ -53,35 +56,17 @@ const hsgt = computed(() => fund.value.hsgt || [])
 const mainHist = computed(() => flowData.value || fund.value.main_hist || { available: false, items: [], message: '' })
 
 // ── 大盘资金流区间（/market/market-flow/，未加载时回退 overview 内嵌 30 日视图） ──
-const FLOW_PERIODS = [
-  ['1d', '当日'], ['3d', '3日'], ['5d', '5日'], ['1w', '近1周'],
-  ['1m', '近1月'], ['3m', '近3月'], ['6m', '近半年'], ['ytd', '今年以来'],
-]
 const flowPeriod = ref('1m')
-const flowLoading = ref(false)
-const flowError = ref('')
-const flowData = ref(null)
+// loading/error/竞态取消由 useAsync 统一处理（ARC-06）；快速切换区间时旧响应自动丢弃
+const {
+  data: flowData, loading: flowLoading, error: flowError, run: loadFlow,
+} = useAsync(
+  async ({ signal }) => (await marketApi.getMarketFlow({ period: flowPeriod.value }, { signal })).data,
+  { errorText: '加载大盘资金流区间失败', onError: e => console.error(e) },
+)
 const flowSummary = computed(() => flowData.value?.summary || {})
 const flowNote = computed(() => flowData.value?.note || '')
 
-// 快速切换区间时取消旧请求、丢弃晚到的旧响应（FEF-06）
-const flowGuard = createRequestGuard()
-
-async function loadFlow() {
-  const req = flowGuard.next()
-  flowLoading.value = true
-  flowError.value = ''
-  try {
-    const res = await marketApi.getMarketFlow({ period: flowPeriod.value }, { signal: req.signal })
-    if (req.isLatest()) flowData.value = res.data
-  } catch (e) {
-    if (!req.isLatest() || isCanceled(e)) return
-    console.error(e)
-    flowError.value = errorMessage(e, '加载大盘资金流区间失败')
-  } finally {
-    if (req.isLatest()) flowLoading.value = false
-  }
-}
 function setFlowPeriod(p) {
   if (flowPeriod.value === p) return
   flowPeriod.value = p
@@ -104,28 +89,26 @@ const fundChartOption = computed(() => {
     backgroundColor: 'transparent',
     tooltip: {
       trigger: 'axis',
-      backgroundColor: '#1a1a2e',
-      borderColor: '#333',
-      textStyle: { color: '#ddd', fontSize: 12 },
+      ...TOOLTIP_STYLE,
       valueFormatter: (v) => formatAmount(v, { signed: true }),
     },
     grid: { left: '8%', right: '4%', top: '12%', bottom: '18%' },
     xAxis: {
       type: 'category',
       data: dates,
-      axisLabel: { color: '#888', fontSize: 11, rotate: 30 },
-      axisLine: { lineStyle: { color: '#444' } },
+      axisLabel: { color: AXIS_LABEL_COLOR, fontSize: 11, rotate: 30 },
+      axisLine: { lineStyle: { color: AXIS_LINE_COLOR } },
     },
     yAxis: {
       type: 'value',
-      axisLabel: { color: '#888', fontSize: 11, formatter: formatYiAxis },
-      splitLine: { lineStyle: { color: '#1a2744' } },
+      axisLabel: { color: AXIS_LABEL_COLOR, fontSize: 11, formatter: formatYiAxis },
+      splitLine: { lineStyle: { color: SPLIT_LINE_COLOR } },
     },
     series: [{
       name: '主力净流入',
       type: 'bar',
       data: main,
-      itemStyle: { color: (p) => colors[p.dataIndex] || '#888' },
+      itemStyle: { color: (p) => colors[p.dataIndex] || FLAT },
     }],
   }
 })
@@ -138,7 +121,7 @@ const activityChartOption = computed(() => {
   if (!up && !down && !flat) return {}
   return {
     backgroundColor: 'transparent',
-    tooltip: { trigger: 'item', backgroundColor: '#1a1a2e', textStyle: { color: '#ddd' } },
+    tooltip: { trigger: 'item', ...TOOLTIP_STYLE },
     series: [{
       type: 'pie',
       radius: ['42%', '68%'],
@@ -173,8 +156,6 @@ const { refresh: refreshMarket } = usePolling(loadMarket, { interval: 90000 })
 onMounted(() => {
   loadFlow()
 })
-
-onUnmounted(() => flowGuard.abort())
 </script>
 
 <template>

@@ -12,6 +12,7 @@ import { escapeHtml } from '../utils/escapeHtml.js'
 import { fmtSigned } from '../utils/number.js'
 import { DOWN, UP, trendColor } from '../constants/colors.js'
 import { useMediaQuery } from '../composables/useMediaQuery.js'
+import { tooltip } from '../charts/theme.js'
 import { NARROW_TOP_N, heatmapHeight, visibleRows } from '../utils/heatmapRows.js'
 
 use([HeatmapChart, GridComponent, TooltipComponent, VisualMapComponent, CanvasRenderer])
@@ -45,10 +46,7 @@ const option = computed(() => {
   return {
     backgroundColor: 'transparent',
     tooltip: {
-      position: 'top',
-      backgroundColor: '#101827',
-      borderColor: '#33415f',
-      textStyle: { color: '#ddd', fontSize: 11 },
+      ...tooltip({ position: 'top', textStyle: { fontSize: 11 } }),
       formatter: (p) => {
         const row = shownRows.value[p.value[1]]
         const dim = props.dims[p.value[0]]

@@ -18,6 +18,8 @@ import { formatVolume } from '../utils/marketFormat.js'
 import { escapeHtml } from '../utils/escapeHtml.js'
 import { byKey } from '../utils/sortBy.js'
 import { ACCENT, DOWN, UP, alpha, trendColor } from '../constants/colors.js'
+// 图表 tooltip / 坐标轴配色统一取自 charts/theme.js（ARC-06）
+import { TOOLTIP_STYLE, AXIS_LABEL_COLOR, AXIS_LINE_COLOR, SPLIT_LINE_COLOR } from '../charts/theme.js'
 
 use([
   LineChart,
@@ -243,9 +245,7 @@ const chartOption = computed(() => {
     animation: false,
     tooltip: {
       trigger: 'axis',
-      backgroundColor: '#1a1a2e',
-      borderColor: '#333',
-      textStyle: { color: '#ddd', fontSize: 12 },
+      ...TOOLTIP_STYLE,
       formatter(params) {
         const p = params[0]
         if (!p) return ''
@@ -265,9 +265,9 @@ const chartOption = computed(() => {
     xAxis: {
       type: 'category',
       data: times,
-      axisLine: { lineStyle: { color: '#444' } },
+      axisLine: { lineStyle: { color: AXIS_LINE_COLOR } },
       axisLabel: {
-        color: '#888',
+        color: AXIS_LABEL_COLOR,
         fontSize: 11,
         interval: Math.max(Math.floor(times.length / 6), 0),
       },
@@ -279,9 +279,9 @@ const chartOption = computed(() => {
         min: v => Math.min(v.min, basePrice),
         max: v => Math.max(v.max, basePrice),
       } : {}),
-      axisLine: { lineStyle: { color: '#444' } },
-      axisLabel: { color: '#888', fontSize: 11 },
-      splitLine: { lineStyle: { color: '#1a2744' } },
+      axisLine: { lineStyle: { color: AXIS_LINE_COLOR } },
+      axisLabel: { color: AXIS_LABEL_COLOR, fontSize: 11 },
+      splitLine: { lineStyle: { color: SPLIT_LINE_COLOR } },
     },
     dataZoom: [
       { type: 'inside', start: 0, end: 100 },
@@ -291,7 +291,7 @@ const chartOption = computed(() => {
         height: 12,
         borderColor: '#333',
         fillerColor: alpha(ACCENT, 0.2),
-        textStyle: { color: '#888' },
+        textStyle: { color: AXIS_LABEL_COLOR },
       },
     ],
     series: [{

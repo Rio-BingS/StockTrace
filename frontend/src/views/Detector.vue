@@ -10,6 +10,7 @@ import { errorMessage, isCanceled } from '../utils/errorMessage.js'
 import { createRequestGuard } from '../utils/requestGuard.js'
 import { onActivateKey } from '../utils/a11y.js'
 import { toastError } from '../stores/feedback.js'
+import { SEVERITY_LABEL, STATUS_LABEL } from '../constants/labels.js'
 
 const loading = ref(false), error = ref('')
 const data = ref(null)
@@ -29,8 +30,6 @@ const KIND_OPTIONS = [
   ['', '全部对象'], ['index', '指数'], ['stock', '自选股'], ['industry', '行业'], ['concept', '概念'],
 ]
 
-const SEVERITY_LABEL = { high: '高', medium: '中', low: '低' }
-const STATUS_LABEL = { watching: '观察中', active: '维持中', confirmed: '已兑现', missed: '未兑现' }
 
 // ── 热力图 ────────────────────────────────
 const board = ref('industry')

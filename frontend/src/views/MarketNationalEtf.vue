@@ -1,5 +1,5 @@
 <script setup>
-import { ref, computed, onMounted, onUnmounted } from 'vue'
+import { ref, computed, onMounted } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import VChart from 'vue-echarts'
 import { use } from 'echarts/core'
@@ -13,8 +13,10 @@ import PeriodPicker from '../components/PeriodPicker.vue'
 import { marketApi } from '../api/stocks.js'
 import { formatPct, formatNum, formatRate, pctClass } from '../utils/format.js'
 import { formatAmount, formatShare } from '../utils/marketFormat.js'
-import { errorMessage, isCanceled } from '../utils/errorMessage.js'
-import { createRequestGuard } from '../utils/requestGuard.js'
+import { errorMessage } from '../utils/errorMessage.js'
+import { useAsync } from '../composables/useAsync.js'
+import { FLOW_PERIODS_WITH_CUSTOM as FLOW_PERIODS } from '../constants/periods.js'
+import { tooltip } from '../charts/theme.js'
 import { escapeHtml } from '../utils/escapeHtml.js'
 import { onActivateKey } from '../utils/a11y.js'
 import { trendColor } from '../constants/colors.js'
@@ -54,33 +56,19 @@ async function load() {
 function select(row) { selectedCode.value = row.code; router.replace({ query: { code: row.code } }) }
 
 // ── 区间资金流向（历史每日主力净流入聚合） ──────────────
-const FLOW_PERIODS = [
-  ['1d', '当日'], ['3d', '3日'], ['5d', '5日'], ['1w', '近1周'],
-  ['1m', '近1月'], ['3m', '近3月'], ['6m', '近半年'], ['ytd', '今年以来'], ['custom', '自定义'],
-]
 const flowPeriod = ref('3m')
 const flowCustomStart = ref('')
 const flowCustomEnd = ref('')
-const flowLoading = ref(false), flowError = ref(''), flowData = ref(null)
 const flowItems = computed(() => flowData.value?.items || [])
 const flowSummary = computed(() => flowData.value?.summary || {})
 
-// 区间请求较慢（冷启动可达数十秒），切换区间时取消旧请求、丢弃旧响应（FEF-06）
-const flowGuard = createRequestGuard()
-
-async function loadFlow() {
-  const req = flowGuard.next()
-  flowLoading.value = true; flowError.value = ''
-  try {
-    const params = flowPeriod.value === 'custom'
-      ? { start: flowCustomStart.value, end: flowCustomEnd.value }
-      : { period: flowPeriod.value }
-    const res = await marketApi.getNationalEtfFlow(params, { signal: req.signal })
-    if (req.isLatest()) flowData.value = res.data
-  } catch (e) {
-    if (req.isLatest() && !isCanceled(e)) flowError.value = errorMessage(e, '加载区间资金流向失败')
-  } finally { if (req.isLatest()) flowLoading.value = false }
-}
+// 区间请求较慢（冷启动可达数十秒），切换区间时取消旧请求、丢弃旧响应；样板由 useAsync 统一（ARC-06）
+const { data: flowData, loading: flowLoading, error: flowError, run: loadFlow } = useAsync(async ({ signal }) => {
+  const params = flowPeriod.value === 'custom'
+    ? { start: flowCustomStart.value, end: flowCustomEnd.value }
+    : { period: flowPeriod.value }
+  return (await marketApi.getNationalEtfFlow(params, { signal })).data
+}, { errorText: '加载区间资金流向失败' })
 function setFlowPeriod(p) {
   if (flowPeriod.value === p) return
   flowPeriod.value = p
@@ -100,8 +88,7 @@ const flowBarOption = computed(() => {
   return {
     backgroundColor: 'transparent',
     tooltip: {
-      trigger: 'item',
-      backgroundColor: '#101827', borderColor: '#33415f', textStyle: { color: '#ddd' },
+      ...tooltip({ trigger: 'item' }),
       formatter: (p) => {
         const row = rows[p.dataIndex]
         // ETF 名称来自第三方数据源，拼 HTML 前转义（SEC-09）
@@ -132,7 +119,6 @@ const flowBarOption = computed(() => {
 })
 
 onMounted(() => { load(); loadFlow() })
-onUnmounted(() => flowGuard.abort())
 </script>
 
 <template>

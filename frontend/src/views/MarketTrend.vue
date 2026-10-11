@@ -17,6 +17,8 @@ import { formatPct, pctClass } from '../utils/format.js'
 import { errorMessage, isCanceled } from '../utils/errorMessage.js'
 import { createRequestGuard } from '../utils/requestGuard.js'
 import { ACCENT } from '../constants/colors.js'
+// 图表 tooltip / 坐标轴配色统一取自 charts/theme.js（ARC-06）
+import { TOOLTIP_STYLE, AXIS_LABEL_COLOR, AXIS_LINE_COLOR, SPLIT_LINE_COLOR } from '../charts/theme.js'
 
 // 显式组件名：App.vue 的 KeepAlive include 按它匹配，不依赖文件名推断（FEF-15）
 defineOptions({ name: 'MarketTrend' })
@@ -80,9 +82,7 @@ const chartOption = computed(() => {
     backgroundColor: 'transparent',
     tooltip: {
       trigger: 'axis',
-      backgroundColor: '#1a1a2e',
-      borderColor: '#333',
-      textStyle: { color: '#ddd', fontSize: 12 },
+      ...TOOLTIP_STYLE,
       valueFormatter: (v) => (v == null ? '-' : `${Number(v).toFixed(2)}%`),
     },
     legend: {
@@ -93,24 +93,24 @@ const chartOption = computed(() => {
     grid: { left: '8%', right: '4%', top: 48, bottom: 60 },
     dataZoom: [
       { type: 'inside', start: 0, end: 100 },
-      { type: 'slider', start: 0, end: 100, height: 18, bottom: 8, textStyle: { color: '#888' } },
+      { type: 'slider', start: 0, end: 100, height: 18, bottom: 8, textStyle: { color: AXIS_LABEL_COLOR } },
     ],
     xAxis: {
       type: 'category',
       data: dates,
-      axisLabel: { color: '#888', fontSize: 11 },
-      axisLine: { lineStyle: { color: '#444' } },
+      axisLabel: { color: AXIS_LABEL_COLOR, fontSize: 11 },
+      axisLine: { lineStyle: { color: AXIS_LINE_COLOR } },
     },
     yAxis: {
       type: 'value',
       name: '相对涨跌%',
-      nameTextStyle: { color: '#888', fontSize: 11 },
+      nameTextStyle: { color: AXIS_LABEL_COLOR, fontSize: 11 },
       axisLabel: {
-        color: '#888',
+        color: AXIS_LABEL_COLOR,
         fontSize: 11,
         formatter: (v) => `${v}%`,
       },
-      splitLine: { lineStyle: { color: '#1a2744' } },
+      splitLine: { lineStyle: { color: SPLIT_LINE_COLOR } },
     },
     series: chartSeries,
   }

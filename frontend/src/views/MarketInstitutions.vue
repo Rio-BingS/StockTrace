@@ -17,6 +17,9 @@ import { formatAmount, formatVolume } from '../utils/marketFormat.js'
 import { errorMessage, isCanceled } from '../utils/errorMessage.js'
 import { createRequestGuard } from '../utils/requestGuard.js'
 import { trendColor } from '../constants/colors.js'
+import { NORTH_PERIODS } from '../constants/periods.js'
+// 图表 tooltip / 坐标轴配色统一取自 charts/theme.js（ARC-06）
+import { TOOLTIP_STYLE, AXIS_LABEL_COLOR, AXIS_LINE_COLOR, SPLIT_LINE_COLOR } from '../charts/theme.js'
 
 // 显式组件名：App.vue 的 KeepAlive include 按它匹配，不依赖文件名推断（FEF-15）
 defineOptions({ name: 'MarketInstitutions' })
@@ -39,10 +42,6 @@ const stockItems = computed(() => byStock.value.items || [])
 const orgItems = computed(() => byOrg.value.items || [])
 
 // ── 北向资金区间（/market/northbound/，未加载时回退 institutions 内嵌 30 日视图） ──
-const NORTH_PERIODS = [
-  ['1d', '当日'], ['3d', '3日'], ['5d', '5日'], ['1w', '近1周'],
-  ['1m', '近1月'], ['3m', '近3月'], ['6m', '近半年'], ['1y', '近1年'], ['ytd', '今年以来'],
-]
 const northPeriod = ref('1m')
 const northLoading = ref(false)
 const northError = ref('')
@@ -84,23 +83,21 @@ const northChart = computed(() => {
     backgroundColor: 'transparent',
     tooltip: {
       trigger: 'axis',
-      backgroundColor: '#1a1a2e',
-      borderColor: '#333',
-      textStyle: { color: '#ddd', fontSize: 12 },
+      ...TOOLTIP_STYLE,
     },
     grid: { left: '8%', right: '4%', top: '14%', bottom: '18%' },
     xAxis: {
       type: 'category',
       data: dates,
-      axisLabel: { color: '#888', fontSize: 11, rotate: 30 },
-      axisLine: { lineStyle: { color: '#444' } },
+      axisLabel: { color: AXIS_LABEL_COLOR, fontSize: 11, rotate: 30 },
+      axisLine: { lineStyle: { color: AXIS_LINE_COLOR } },
     },
     yAxis: {
       type: 'value',
       name: '亿',
-      nameTextStyle: { color: '#888' },
-      axisLabel: { color: '#888', fontSize: 11 },
-      splitLine: { lineStyle: { color: '#1a2744' } },
+      nameTextStyle: { color: AXIS_LABEL_COLOR },
+      axisLabel: { color: AXIS_LABEL_COLOR, fontSize: 11 },
+      splitLine: { lineStyle: { color: SPLIT_LINE_COLOR } },
     },
     series: [{
       name: '北向净买额',

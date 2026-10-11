@@ -9,6 +9,7 @@ import { marketApi } from '../api/stocks.js'
 import { formatNum, formatPct, formatSigned, pctClass } from '../utils/format.js'
 import { formatAmount, formatShare } from '../utils/marketFormat.js'
 import { ACCENT } from '../constants/colors.js'
+import { tooltip } from '../charts/theme.js'
 import MarketDataStatus from './MarketDataStatus.vue'
 import { errorMessage, isCanceled } from '../utils/errorMessage.js'
 import { createRequestGuard } from '../utils/requestGuard.js'
@@ -63,7 +64,7 @@ const chartOption = computed(() => {
   }
   return {
     backgroundColor: 'transparent',
-    tooltip: { trigger: 'axis', backgroundColor: '#101827', borderColor: '#33415f', textStyle: { color: '#ddd' } },
+    tooltip: tooltip({ trigger: 'axis' }),
     legend: { data: hasShare ? ['收盘价', '成交额', '份额'] : ['收盘价', '成交额'], textStyle: { color: '#8490a8' }, top: 0 },
     grid: [{ left: 45, right: gridRight, top: 34, height: '54%' }, { left: 45, right: gridRight, top: '73%', height: '16%' }],
     xAxis: [

@@ -17,6 +17,8 @@ import { formatAmount, formatVolume } from '../utils/marketFormat.js'
 import { escapeHtml } from '../utils/escapeHtml.js'
 import { byKey } from '../utils/sortBy.js'
 import { ACCENT, DOWN, FLAT, UP, alpha, trendColor } from '../constants/colors.js'
+// 图表 tooltip / 坐标轴配色统一取自 charts/theme.js（ARC-06）
+import { TOOLTIP_STYLE, AXIS_LABEL_COLOR, AXIS_LINE_COLOR, SPLIT_LINE_COLOR } from '../charts/theme.js'
 
 use([
   CandlestickChart,
@@ -62,9 +64,7 @@ const chartOption = computed(() => {
     tooltip: {
       trigger: 'axis',
       axisPointer: { type: 'cross' },
-      backgroundColor: '#1a1a2e',
-      borderColor: '#333',
-      textStyle: { color: '#ddd' },
+      ...TOOLTIP_STYLE,
       formatter(params) {
         const d = params[0]
         if (!d) return ''
@@ -105,8 +105,8 @@ const chartOption = computed(() => {
       {
         type: 'category',
         data: dates,
-        axisLine: { lineStyle: { color: '#444' } },
-        axisLabel: { color: '#888', fontSize: 11 },
+        axisLine: { lineStyle: { color: AXIS_LINE_COLOR } },
+        axisLabel: { color: AXIS_LABEL_COLOR, fontSize: 11 },
         gridIndex: 0,
       },
       {
@@ -114,16 +114,16 @@ const chartOption = computed(() => {
         data: dates,
         gridIndex: 1,
         axisLabel: { show: false },
-        axisLine: { lineStyle: { color: '#444' } },
+        axisLine: { lineStyle: { color: AXIS_LINE_COLOR } },
         axisTick: { show: false },
       },
     ],
     yAxis: [
       {
         scale: true,
-        axisLine: { lineStyle: { color: '#444' } },
-        axisLabel: { color: '#888' },
-        splitLine: { lineStyle: { color: '#1a2744' } },
+        axisLine: { lineStyle: { color: AXIS_LINE_COLOR } },
+        axisLabel: { color: AXIS_LABEL_COLOR },
+        splitLine: { lineStyle: { color: SPLIT_LINE_COLOR } },
         gridIndex: 0,
       },
       {
@@ -147,7 +147,7 @@ const chartOption = computed(() => {
         height: 12,
         borderColor: '#333',
         fillerColor: alpha(ACCENT, 0.2),
-        textStyle: { color: '#888' },
+        textStyle: { color: AXIS_LABEL_COLOR },
       },
     ],
     series: [

@@ -9,6 +9,9 @@ import { GridComponent, TooltipComponent, MarkLineComponent } from 'echarts/comp
 import { CanvasRenderer } from 'echarts/renderers'
 import { detectorApi } from '../api/stocks.js'
 import { errorMessage } from '../utils/errorMessage.js'
+import { SEVERITY_LABEL, STATUS_LABEL, dirText } from '../constants/labels.js'
+import { axisLabel, tooltip } from '../charts/theme.js'
+import { fmtFixed } from '../utils/number.js'
 
 use([LineChart, GridComponent, TooltipComponent, MarkLineComponent, CanvasRenderer])
 
@@ -32,37 +35,29 @@ const dims = computed(() => {
   }))
 })
 
-const SEVERITY_LABEL = { high: '高', medium: '中', low: '低' }
-const STATUS_LABEL = { watching: '观察中', active: '维持中', confirmed: '已兑现', missed: '未兑现' }
-
-function dirText(direction) {
-  return direction === 'up' ? '↑' : direction === 'down' ? '↓' : '—'
-}
 
 function chartOption(dim) {
   const points = dim.points.filter(p => p.value != null)
   if (!points.length) return null
   return {
     backgroundColor: 'transparent',
-    tooltip: {
+    tooltip: tooltip({
       trigger: 'axis',
-      backgroundColor: '#101827',
-      borderColor: '#33415f',
-      textStyle: { color: '#ddd', fontSize: 11 },
-      valueFormatter: v => (v == null ? '-' : Number(v).toFixed(1)),
-    },
+      textStyle: { fontSize: 11 },
+      valueFormatter: v => fmtFixed(v, 1),
+    }),
     grid: { left: 6, right: 6, top: 8, bottom: 4, containLabel: true },
     xAxis: {
       type: 'category',
       data: dim.points.map(p => p.date.slice(5)),
       axisLine: { lineStyle: { color: '#2a3a5c' } },
-      axisLabel: { color: '#68758d', fontSize: 10 },
+      axisLabel: axisLabel({ fontSize: 10 }),
       axisTick: { show: false },
     },
     yAxis: {
       type: 'value',
       splitLine: { lineStyle: { color: '#1a2744' } },
-      axisLabel: { color: '#68758d', fontSize: 10 },
+      axisLabel: axisLabel({ fontSize: 10 }),
     },
     series: [{
       type: 'line',
