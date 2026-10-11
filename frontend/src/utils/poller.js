@@ -9,14 +9,17 @@ import { pollDelay } from './tradingTime.js'
 
 const defaultHidden = () => typeof document !== 'undefined' && document.visibilityState === 'hidden'
 
-export function createPoller(fn, {
-  interval,
-  idleInterval = 10 * 60 * 1000,
-  tradingOnly = true,
-  staleAfter = 5 * 60 * 1000,
-  now = () => Date.now(),
-  isHidden = defaultHidden,
-} = {}) {
+export function createPoller(
+  fn,
+  {
+    interval,
+    idleInterval = 10 * 60 * 1000,
+    tradingOnly = true,
+    staleAfter = 5 * 60 * 1000,
+    now = () => Date.now(),
+    isHidden = defaultHidden,
+  } = {},
+) {
   let active = false
   let timer = null
   let inFlight = null

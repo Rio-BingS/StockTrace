@@ -1,7 +1,12 @@
 import { test, mock } from 'node:test'
 import assert from 'node:assert/strict'
 import {
-  confirmDialog, dismissToast, feedback, promptDialog, resolveDialog, toast,
+  confirmDialog,
+  dismissToast,
+  feedback,
+  promptDialog,
+  resolveDialog,
+  toast,
 } from '../../stores/feedback.js'
 
 test('toast：加入列表、超时自动移除、最多保留 4 条（FEX-06）', () => {
@@ -14,7 +19,10 @@ test('toast：加入列表、超时自动移除、最多保留 4 条（FEX-06）
     mock.timers.tick(3000)
     assert.equal(feedback.toasts.length, 0)
     for (let i = 0; i < 6; i++) toast(`m${i}`, { timeout: 0 })
-    assert.deepEqual(feedback.toasts.map(t => t.message), ['m2', 'm3', 'm4', 'm5'])
+    assert.deepEqual(
+      feedback.toasts.map((t) => t.message),
+      ['m2', 'm3', 'm4', 'm5'],
+    )
     dismissToast(feedback.toasts[0].id)
     assert.equal(feedback.toasts.length, 3)
     assert.equal(toast(''), null)

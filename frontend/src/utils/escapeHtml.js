@@ -13,5 +13,5 @@ const HTML_ESCAPES = {
 
 export function escapeHtml(val) {
   if (val == null) return ''
-  return String(val).replace(/[&<>"']/g, ch => HTML_ESCAPES[ch])
+  return String(val).replace(/[&<>"']/g, (ch) => HTML_ESCAPES[ch])
 }

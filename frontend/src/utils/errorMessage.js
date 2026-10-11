@@ -74,7 +74,11 @@ export function errorMessage(err, fallback = '请求失败') {
     const text = flattenData(res.data)
     if (text) return text
     reason = STATUS_TEXT[res.status] || (res.status ? `HTTP ${res.status}` : '')
-  } else if (err.code === 'ECONNABORTED' || err.code === 'ETIMEDOUT' || /timeout/i.test(err.message || '')) {
+  } else if (
+    err.code === 'ECONNABORTED' ||
+    err.code === 'ETIMEDOUT' ||
+    /timeout/i.test(err.message || '')
+  ) {
     reason = '请求超时，数据源可能较慢，请稍后重试'
   } else if (err.code === 'ERR_NETWORK' || err.message === 'Network Error') {
     reason = '网络连接失败，请检查网络'
@@ -84,5 +88,8 @@ export function errorMessage(err, fallback = '请求失败') {
 
 /** 是否为主动取消（AbortController / 路由切走）导致的错误 */
 export function isCanceled(err) {
-  return !!err && (err.code === 'ERR_CANCELED' || err.name === 'CanceledError' || err.name === 'AbortError')
+  return (
+    !!err &&
+    (err.code === 'ERR_CANCELED' || err.name === 'CanceledError' || err.name === 'AbortError')
+  )
 }

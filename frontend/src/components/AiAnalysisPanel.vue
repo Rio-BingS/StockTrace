@@ -57,7 +57,9 @@ async function run() {
   phase.value = 'running'
   queuedAhead.value = 0
   stopTimer()
-  timer = setInterval(() => { elapsed.value += 1 }, 1000)
+  timer = setInterval(() => {
+    elapsed.value += 1
+  }, 1000)
   try {
     // 走后台排队：请求立即返回 job_id，不再占着服务端请求线程等 LLM
     const res = await aiApi.analyzeStockAsync(props.stockId, { signal })
@@ -96,7 +98,7 @@ async function run() {
       <div class="ai-actions">
         <button v-if="loading" class="btn ghost" @click="cancel">取消</button>
         <button class="btn" :disabled="loading" @click="run">
-          {{ loading ? `${phaseText}，已等待 ${elapsed} 秒…` : (analysis ? '重新分析' : '开始分析') }}
+          {{ loading ? `${phaseText}，已等待 ${elapsed} 秒…` : analysis ? '重新分析' : '开始分析' }}
         </button>
       </div>
     </div>

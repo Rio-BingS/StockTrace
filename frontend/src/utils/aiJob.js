@@ -30,7 +30,10 @@ function sleep(ms, signal) {
  * 成功返回 result；失败抛出与 axios 错误同形的对象（err.response.status/data），
  * 可直接交给 aiErrorText；signal 中止时抛 CanceledError；超过 timeoutMs 抛超时错误。
  */
-export async function pollAiJob(fetchJob, { signal, intervalMs = 2000, timeoutMs = 180000, onStatus } = {}) {
+export async function pollAiJob(
+  fetchJob,
+  { signal, intervalMs = 2000, timeoutMs = 180000, onStatus } = {},
+) {
   const deadline = Date.now() + timeoutMs
   for (;;) {
     if (signal?.aborted) throw canceledError()

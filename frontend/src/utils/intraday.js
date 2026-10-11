@@ -26,7 +26,7 @@ export function signedPctText(price, basePrice) {
  * 也不拿别的交易日的昨收当基准）
  */
 export function quoteForDate(dailyRows, latestQuote, date) {
-  const hit = (dailyRows || []).find(d => d.trade_date === date)
+  const hit = (dailyRows || []).find((d) => d.trade_date === date)
   if (hit) return hit
   return latestQuote && latestQuote.trade_date === date ? latestQuote : null
 }

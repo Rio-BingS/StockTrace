@@ -2,7 +2,14 @@
 import { ref, onMounted, computed, watch } from 'vue'
 import { useRoute } from 'vue-router'
 import { stockApi, marketApi } from '../api/stocks.js'
-import { formatPct, formatNum, formatRate, formatSigned, formatDateTime, pctClass } from '../utils/format.js'
+import {
+  formatPct,
+  formatNum,
+  formatRate,
+  formatSigned,
+  formatDateTime,
+  pctClass,
+} from '../utils/format.js'
 import { formatAmount } from '../utils/marketFormat.js'
 import { quoteForDate } from '../utils/intraday.js'
 import { pageTitle } from '../utils/routerHelpers.js'
@@ -164,9 +171,7 @@ watch(latestQuote, (q) => {
   <div class="stock-detail" v-if="!loading || latestQuote">
     <div class="detail-header">
       <router-link to="/" class="back-link">← 返回面板</router-link>
-      <h1 v-if="latestQuote">
-        {{ latestQuote.code }} {{ latestQuote.name }}
-      </h1>
+      <h1 v-if="latestQuote">{{ latestQuote.code }} {{ latestQuote.name }}</h1>
       <h1 v-else>{{ code }}</h1>
     </div>
 
@@ -234,11 +239,7 @@ watch(latestQuote, (q) => {
 
     <!-- 当日走势图 -->
     <div class="intraday-section">
-      <IntradayChart
-        :minuteData="minuteData"
-        :dailyQuote="intradayQuote"
-        :date="intradayDate"
-      />
+      <IntradayChart :minuteData="minuteData" :dailyQuote="intradayQuote" :date="intradayDate" />
     </div>
 
     <!-- K线图 -->
@@ -254,10 +255,7 @@ watch(latestQuote, (q) => {
           <option :value="365">1年</option>
         </select>
       </div>
-      <KlineChart
-        :data="dailyData"
-        @date-click="onKlineDateClick"
-      />
+      <KlineChart :data="dailyData" @date-click="onKlineDateClick" />
     </div>
 
     <!-- 两融余额（交易所官方披露） -->
@@ -285,7 +283,9 @@ watch(latestQuote, (q) => {
           </div>
         </div>
         <div class="margin-note">
-          截至 {{ margin.date }} · 交易所 T+1 披露<span v-if="margin.message"> · {{ margin.message }}</span>
+          截至 {{ margin.date }} · 交易所 T+1 披露<span v-if="margin.message">
+            · {{ margin.message }}</span
+          >
         </div>
       </template>
       <div v-else class="margin-note">{{ margin.message || '暂不可用' }}</div>
@@ -417,7 +417,9 @@ watch(latestQuote, (q) => {
     font-size: 22px;
   }
 }
-.margin-section { margin-top: 16px; }
+.margin-section {
+  margin-top: 16px;
+}
 .margin-grid {
   display: grid;
   grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
@@ -428,7 +430,20 @@ watch(latestQuote, (q) => {
   border-radius: 8px;
   padding: 10px 12px;
 }
-.margin-item .label { display: block; color: #909090; font-size: 12px; margin-bottom: 4px; }
-.margin-item .value { font-size: 16px; font-weight: bold; color: #eee; }
-.margin-note { margin-top: 8px; font-size: 12px; color: #909090; }
+.margin-item .label {
+  display: block;
+  color: #909090;
+  font-size: 12px;
+  margin-bottom: 4px;
+}
+.margin-item .value {
+  font-size: 16px;
+  font-weight: bold;
+  color: #eee;
+}
+.margin-note {
+  margin-top: 8px;
+  font-size: 12px;
+  color: #909090;
+}
 </style>

@@ -17,7 +17,7 @@ test('alpha：十六进制转 rgba', () => {
 
 test('图表色与 style.css 变量一致，强调色不等于上涨红', () => {
   const css = readFileSync(new URL('../../style.css', import.meta.url), 'utf8')
-  const v = name => css.match(new RegExp(`--${name}:\\s*(#[0-9a-fA-F]{6})`))[1].toLowerCase()
+  const v = (name) => css.match(new RegExp(`--${name}:\\s*(#[0-9a-fA-F]{6})`))[1].toLowerCase()
   assert.equal(v('up'), UP)
   assert.equal(v('down'), DOWN)
   assert.equal(v('flat'), FLAT)

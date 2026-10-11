@@ -43,9 +43,13 @@ const pnlMap = computed(() => {
 
 // 草稿在数据变化时同步（未编辑的行跟随服务端，编辑中的行保留），
 // 不在渲染期间写响应式状态（FEF-08）
-watch(() => props.data, (items) => {
-  costDrafts.value = syncDrafts(costDrafts.value, items)
-}, { immediate: true })
+watch(
+  () => props.data,
+  (items) => {
+    costDrafts.value = syncDrafts(costDrafts.value, items)
+  },
+  { immediate: true },
+)
 
 function draftOf(item, key) {
   return costDrafts.value[item.code]?.[key] ?? ''
@@ -138,12 +142,16 @@ async function handleDelete(e, item) {
             <td class="expand-icon">
               <!-- 键盘可达的展开按钮；整行点击仍可展开（FEX-03） -->
               <button
-                type="button" class="expand-btn"
+                type="button"
+                class="expand-btn"
                 :aria-expanded="isExpanded(item.code) ? 'true' : 'false'"
                 :aria-label="`${isExpanded(item.code) ? '收起' : '展开'} ${item.name || item.code} 详情`"
                 @click.stop="toggleRow(item.code)"
               >
-                <span :class="isExpanded(item.code) ? 'arrow-down' : 'arrow-right'" aria-hidden="true"></span>
+                <span
+                  :class="isExpanded(item.code) ? 'arrow-down' : 'arrow-right'"
+                  aria-hidden="true"
+                ></span>
               </button>
             </td>
             <td class="code">{{ item.code }}</td>
@@ -161,8 +169,17 @@ async function handleDelete(e, item) {
               {{ formatSigned(pnlMap[item.code]) }}
             </td>
             <td class="actions">
-              <button class="btn-kline" @click="handleGoDetail($event, item)" title="查看K线图">K线</button>
-              <button class="btn-delete" @click="handleDelete($event, item)" title="取消关注" :aria-label="`取消关注 ${item.name || item.code}`">✕</button>
+              <button class="btn-kline" @click="handleGoDetail($event, item)" title="查看K线图">
+                K线
+              </button>
+              <button
+                class="btn-delete"
+                @click="handleDelete($event, item)"
+                title="取消关注"
+                :aria-label="`取消关注 ${item.name || item.code}`"
+              >
+                ✕
+              </button>
             </td>
           </tr>
           <!-- 展开行 -->
@@ -177,7 +194,9 @@ async function handleDelete(e, item) {
                   </div>
                   <div class="expand-item">
                     <span class="elabel">日内涨幅（较开盘）</span>
-                    <span :class="pctClass(item.open_close_pct)">{{ formatPct(item.open_close_pct) }}</span>
+                    <span :class="pctClass(item.open_close_pct)">{{
+                      formatPct(item.open_close_pct)
+                    }}</span>
                   </div>
                   <div class="expand-item">
                     <span class="elabel">昨收</span>
@@ -201,12 +220,19 @@ async function handleDelete(e, item) {
                   </div>
                 </div>
                 <div class="expand-actions">
-                  <button class="btn-kline-lg" @click="handleGoDetail($event, item)">查看K线图 →</button>
-                  <button class="btn-kline-lg btn-ai-lg" @click="handleAi($event, item)">AI 分析</button>
+                  <button class="btn-kline-lg" @click="handleGoDetail($event, item)">
+                    查看K线图 →
+                  </button>
+                  <button class="btn-kline-lg btn-ai-lg" @click="handleAi($event, item)">
+                    AI 分析
+                  </button>
                 </div>
                 <div class="group-row">
                   <span class="elabel">分组</span>
-                  <select :value="item.group_id ?? ''" @change="changeGroup(item, $event.target.value)">
+                  <select
+                    :value="item.group_id ?? ''"
+                    @change="changeGroup(item, $event.target.value)"
+                  >
                     <option value="">未分组</option>
                     <option v-for="g in groups" :key="g.id" :value="g.id">{{ g.name }}</option>
                   </select>
@@ -214,19 +240,30 @@ async function handleDelete(e, item) {
                 <div class="cost-row">
                   <span class="elabel">持仓（可选，填后参与盈亏统计）</span>
                   <input
-                    type="number" step="any" placeholder="成本价"
+                    type="number"
+                    step="any"
+                    placeholder="成本价"
                     :value="draftOf(item, 'cost_price')"
                     @input="setDraft(item, 'cost_price', $event.target.value)"
                   />
                   <input
-                    type="number" step="1" min="0" placeholder="持股数"
+                    type="number"
+                    step="1"
+                    min="0"
+                    placeholder="持股数"
                     :value="draftOf(item, 'quantity')"
                     @input="setDraft(item, 'quantity', $event.target.value)"
                   />
-                  <button class="btn-kline-lg" :disabled="savingIds.has(item.code)" @click="saveCost(item)">
+                  <button
+                    class="btn-kline-lg"
+                    :disabled="savingIds.has(item.code)"
+                    @click="saveCost(item)"
+                  >
                     {{ savingIds.has(item.code) ? '保存中…' : '保存持仓' }}
                   </button>
-                  <span v-if="costErrors[item.code]" class="cost-error">{{ costErrors[item.code] }}</span>
+                  <span v-if="costErrors[item.code]" class="cost-error">{{
+                    costErrors[item.code]
+                  }}</span>
                 </div>
               </div>
             </td>

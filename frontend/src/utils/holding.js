@@ -4,7 +4,8 @@
 
 /** 盈亏：仅填了成本价、持股数且有现价的行参与；否则返回 null */
 export function computePnl(item) {
-  if (!item || item.cost_price == null || item.quantity == null || item.close_price == null) return null
+  if (!item || item.cost_price == null || item.quantity == null || item.close_price == null)
+    return null
   const pnl = (Number(item.close_price) - Number(item.cost_price)) * Number(item.quantity)
   return Number.isFinite(pnl) ? pnl : null
 }

@@ -6,11 +6,16 @@ import { dismissToast, feedback } from '../stores/feedback.js'
   <!-- 非阻塞提示区（FEX-06）：错误用 alert 角色立即播报，其余 polite -->
   <div class="toast-host" aria-live="polite">
     <div
-      v-for="t in feedback.toasts" :key="t.id"
-      class="toast" :class="t.type" :role="t.type === 'error' ? 'alert' : 'status'"
+      v-for="t in feedback.toasts"
+      :key="t.id"
+      class="toast"
+      :class="t.type"
+      :role="t.type === 'error' ? 'alert' : 'status'"
     >
       <span class="msg">{{ t.message }}</span>
-      <button type="button" class="close" aria-label="关闭提示" @click="dismissToast(t.id)">✕</button>
+      <button type="button" class="close" aria-label="关闭提示" @click="dismissToast(t.id)">
+        ✕
+      </button>
     </div>
   </div>
 </template>

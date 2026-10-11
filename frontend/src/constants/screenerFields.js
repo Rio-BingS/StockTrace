@@ -56,12 +56,26 @@ export const FIELDS = [
 ]
 // 布尔字段：值只能是 1（是）/ 0（否），与后端 BOOL_FIELDS 保持一致
 export const BOOL_FIELDS = new Set([
-  'above_ma5', 'above_ma10', 'above_ma20', 'above_ma60',
-  'ma5_gt_ma10', 'ma5_gt_ma20', 'ma10_gt_ma20',
-  'new_high_20d', 'new_low_20d', 'new_high_60d', 'new_low_60d',
-  'macd_dif_gt_dea', 'macd_golden_cross', 'macd_dead_cross', 'macd_dif_gt_zero',
-  'kdj_golden_cross', 'kdj_dead_cross',
-  'above_boll_mid', 'above_boll_upper', 'below_boll_lower',
+  'above_ma5',
+  'above_ma10',
+  'above_ma20',
+  'above_ma60',
+  'ma5_gt_ma10',
+  'ma5_gt_ma20',
+  'ma10_gt_ma20',
+  'new_high_20d',
+  'new_low_20d',
+  'new_high_60d',
+  'new_low_60d',
+  'macd_dif_gt_dea',
+  'macd_golden_cross',
+  'macd_dead_cross',
+  'macd_dif_gt_zero',
+  'kdj_golden_cross',
+  'kdj_dead_cross',
+  'above_boll_mid',
+  'above_boll_upper',
+  'below_boll_lower',
 ])
 export const OPS = [
   { key: 'gt', label: '>' },
@@ -73,5 +87,5 @@ export const OPS = [
 ]
 export const ORDER_OPTIONS = [
   { key: '', label: '默认' },
-  ...FIELDS.filter(f => !BOOL_FIELDS.has(f.key)).map(f => ({ key: f.key, label: f.label })),
+  ...FIELDS.filter((f) => !BOOL_FIELDS.has(f.key)).map((f) => ({ key: f.key, label: f.label })),
 ]

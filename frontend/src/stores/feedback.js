@@ -18,7 +18,7 @@ export const feedback = reactive({
 })
 
 export function dismissToast(id) {
-  const i = feedback.toasts.findIndex(t => t.id === id)
+  const i = feedback.toasts.findIndex((t) => t.id === id)
   if (i >= 0) feedback.toasts.splice(i, 1)
 }
 
@@ -53,10 +53,31 @@ export function resolveDialog(result) {
   d.resolve(result)
 }
 
-export function confirmDialog({ title = '请确认', message = '', confirmText = '确定', cancelText = '取消', danger = false } = {}) {
+export function confirmDialog({
+  title = '请确认',
+  message = '',
+  confirmText = '确定',
+  cancelText = '取消',
+  danger = false,
+} = {}) {
   return openDialog({ kind: 'confirm', title, message, confirmText, cancelText, danger })
 }
 
-export function promptDialog({ title = '请输入', message = '', defaultValue = '', placeholder = '', confirmText = '确定', cancelText = '取消' } = {}) {
-  return openDialog({ kind: 'prompt', title, message, defaultValue, placeholder, confirmText, cancelText })
+export function promptDialog({
+  title = '请输入',
+  message = '',
+  defaultValue = '',
+  placeholder = '',
+  confirmText = '确定',
+  cancelText = '取消',
+} = {}) {
+  return openDialog({
+    kind: 'prompt',
+    title,
+    message,
+    defaultValue,
+    placeholder,
+    confirmText,
+    cancelText,
+  })
 }

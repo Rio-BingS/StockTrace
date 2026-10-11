@@ -5,7 +5,9 @@ export function useMediaQuery(query) {
   const mql = typeof window !== 'undefined' && window.matchMedia ? window.matchMedia(query) : null
   const matches = ref(mql ? mql.matches : false)
   if (mql) {
-    const onChange = (e) => { matches.value = e.matches }
+    const onChange = (e) => {
+      matches.value = e.matches
+    }
     mql.addEventListener('change', onChange)
     onBeforeUnmount(() => mql.removeEventListener('change', onChange))
   }

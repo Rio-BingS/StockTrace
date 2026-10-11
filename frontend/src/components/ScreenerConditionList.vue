@@ -28,10 +28,7 @@ function onFieldChange(c) {
 
 <template>
   <div class="conds">
-    <div
-      v-for="(c, i) in conditions" :key="c.uid"
-      class="cond-row" :class="{ invalid: errors[i] }"
-    >
+    <div v-for="(c, i) in conditions" :key="c.uid" class="cond-row" :class="{ invalid: errors[i] }">
       <select v-model="c.field" aria-label="指标" @change="onFieldChange(c)">
         <option v-for="f in FIELDS" :key="f.key" :value="f.key">{{ f.label }}</option>
       </select>
@@ -43,12 +40,21 @@ function onFieldChange(c) {
         <option value="1">是</option>
         <option value="0">否</option>
       </select>
-      <input v-else v-model="c.value" type="number" class="val" placeholder="值" aria-label="数值" />
+      <input
+        v-else
+        v-model="c.value"
+        type="number"
+        class="val"
+        placeholder="值"
+        aria-label="数值"
+      />
       <template v-if="c.op === 'between'">
         <span>~</span>
         <input v-model="c.value2" type="number" class="val" placeholder="上限" aria-label="上限" />
       </template>
-      <button class="btn small" :disabled="conditions.length <= 1" @click="removeCondition(i)">删</button>
+      <button class="btn small" :disabled="conditions.length <= 1" @click="removeCondition(i)">
+        删
+      </button>
       <span v-if="errors[i]" class="cond-error">{{ errors[i] }}</span>
     </div>
     <button class="btn small" @click="addCondition">+ 加条件</button>

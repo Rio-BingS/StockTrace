@@ -42,17 +42,20 @@ export function buildInsights(summary, divergenceCount) {
   return [
     {
       tone: 'green',
-      title: concentration == null ? '集中度待更新' : concentration >= 65 ? '主线集中' : '轮动较均衡',
-      body: concentration == null
-        ? '当前上游未提供可计算样本。'
-        : `流入前三集中度 ${concentration.toFixed(1)}%，${concentration >= 65 ? '资金更偏向少数主线。' : '资金分布相对均衡。'}`,
+      title:
+        concentration == null ? '集中度待更新' : concentration >= 65 ? '主线集中' : '轮动较均衡',
+      body:
+        concentration == null
+          ? '当前上游未提供可计算样本。'
+          : `流入前三集中度 ${concentration.toFixed(1)}%，${concentration >= 65 ? '资金更偏向少数主线。' : '资金分布相对均衡。'}`,
     },
     {
       tone: 'amber',
       title: breadth == null ? '广度待更新' : breadth >= 50 ? '流入占优' : '流出占优',
-      body: breadth == null
-        ? '当前上游未提供可计算样本。'
-        : `资金广度 ${breadth.toFixed(1)}%，${breadth >= 50 ? '净流入板块占多数。' : '净流出板块占多数。'}`,
+      body:
+        breadth == null
+          ? '当前上游未提供可计算样本。'
+          : `资金广度 ${breadth.toFixed(1)}%，${breadth >= 50 ? '净流入板块占多数。' : '净流出板块占多数。'}`,
     },
     {
       tone: 'blue',

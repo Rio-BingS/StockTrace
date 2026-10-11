@@ -38,11 +38,11 @@ async function loadGroups() {
 
 const filteredData = computed(() => {
   if (activeGroup.value === 'all') return dashboardData.value
-  if (activeGroup.value === 'none') return dashboardData.value.filter(d => d.group_id == null)
-  return dashboardData.value.filter(d => d.group_id === Number(activeGroup.value))
+  if (activeGroup.value === 'none') return dashboardData.value.filter((d) => d.group_id == null)
+  return dashboardData.value.filter((d) => d.group_id === Number(activeGroup.value))
 })
 
-const ungroupedCount = computed(() => dashboardData.value.filter(d => d.group_id == null).length)
+const ungroupedCount = computed(() => dashboardData.value.filter((d) => d.group_id == null).length)
 
 async function addGroup() {
   const name = await promptDialog({ title: '新建分组', placeholder: '分组名称' })
@@ -56,7 +56,11 @@ async function addGroup() {
 }
 
 async function renameGroup(g) {
-  const name = await promptDialog({ title: '重命名分组', defaultValue: g.name, placeholder: '分组名称' })
+  const name = await promptDialog({
+    title: '重命名分组',
+    defaultValue: g.name,
+    placeholder: '分组名称',
+  })
   if (!name || !name.trim() || name.trim() === g.name) return
   try {
     await groupApi.update(g.id, { name: name.trim() })
@@ -138,7 +142,8 @@ async function pollFetchStatus() {
     const st = res.data
     if (st.running) {
       fetchLoading.value = true
-      fetchMessage.value = st.task === 'all' ? '正在拉取全部股票...' : `正在拉取 ${st.code || ''}...`
+      fetchMessage.value =
+        st.task === 'all' ? '正在拉取全部股票...' : `正在拉取 ${st.code || ''}...`
       return
     }
     // 任务已结束
@@ -228,11 +233,7 @@ onUnmounted(() => {
         <span v-if="refreshing" class="refresh-badge">刷新中…</span>
         <span v-else-if="lastLoadedAt" class="updated-at">更新于 {{ lastLoadedAt }}</span>
         <span v-if="fetchMessage" class="fetch-msg">{{ fetchMessage }}</span>
-        <button
-          class="btn btn-primary"
-          @click="fetchAllData"
-          :disabled="fetchLoading"
-        >
+        <button class="btn btn-primary" @click="fetchAllData" :disabled="fetchLoading">
           {{ fetchLoading ? '拉取中...' : '刷新数据' }}
         </button>
       </div>
@@ -243,11 +244,20 @@ onUnmounted(() => {
     <AlertPanel :stocks="dashboardData" />
 
     <div class="group-bar">
-      <button :class="{ active: activeGroup === 'all' }" :aria-pressed="activeGroup === 'all' ? 'true' : 'false'" @click="activeGroup = 'all'">
+      <button
+        :class="{ active: activeGroup === 'all' }"
+        :aria-pressed="activeGroup === 'all' ? 'true' : 'false'"
+        @click="activeGroup = 'all'"
+      >
         全部 {{ dashboardData.length }}
       </button>
       <!-- 分组切换与重命名/删除拆成独立按钮：原来操作图标是嵌在按钮里的 span，键盘无法触达（FEX-03） -->
-      <span v-for="g in groups" :key="g.id" class="group-chip" :class="{ active: activeGroup === g.id }">
+      <span
+        v-for="g in groups"
+        :key="g.id"
+        class="group-chip"
+        :class="{ active: activeGroup === g.id }"
+      >
         <button
           class="g-main"
           :aria-pressed="activeGroup === g.id ? 'true' : 'false'"
@@ -255,10 +265,29 @@ onUnmounted(() => {
         >
           {{ g.name }} {{ g.stock_count }}
         </button>
-        <button class="g-op" title="重命名" :aria-label="`重命名分组 ${g.name}`" @click="renameGroup(g)">✎</button>
-        <button class="g-op danger" title="删除分组" :aria-label="`删除分组 ${g.name}`" @click="removeGroup(g)">✕</button>
+        <button
+          class="g-op"
+          title="重命名"
+          :aria-label="`重命名分组 ${g.name}`"
+          @click="renameGroup(g)"
+        >
+          ✎
+        </button>
+        <button
+          class="g-op danger"
+          title="删除分组"
+          :aria-label="`删除分组 ${g.name}`"
+          @click="removeGroup(g)"
+        >
+          ✕
+        </button>
       </span>
-      <button v-if="ungroupedCount" :class="{ active: activeGroup === 'none' }" :aria-pressed="activeGroup === 'none' ? 'true' : 'false'" @click="activeGroup = 'none'">
+      <button
+        v-if="ungroupedCount"
+        :class="{ active: activeGroup === 'none' }"
+        :aria-pressed="activeGroup === 'none' ? 'true' : 'false'"
+        @click="activeGroup = 'none'"
+      >
         未分组 {{ ungroupedCount }}
       </button>
       <button class="g-add" @click="addGroup">＋ 新分组</button>

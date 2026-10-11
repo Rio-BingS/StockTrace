@@ -13,13 +13,14 @@ const DECORATIVE = new Set(['#2a3a5e'])
 
 function hex(h) {
   let s = h.slice(1).toLowerCase()
-  if (s.length === 3) s = [...s].map(c => c + c).join('')
+  if (s.length === 3) s = [...s].map((c) => c + c).join('')
   return '#' + s
 }
 
 function luminance(h) {
-  const [r, g, b] = [1, 3, 5].map(i => parseInt(h.slice(i, i + 2), 16) / 255)
-    .map(c => (c <= 0.03928 ? c / 12.92 : ((c + 0.055) / 1.055) ** 2.4))
+  const [r, g, b] = [1, 3, 5]
+    .map((i) => parseInt(h.slice(i, i + 2), 16) / 255)
+    .map((c) => (c <= 0.03928 ? c / 12.92 : ((c + 0.055) / 1.055) ** 2.4))
   return 0.2126 * r + 0.7152 * g + 0.0722 * b
 }
 
@@ -29,7 +30,7 @@ export function contrast(a, b) {
 }
 
 function vueFiles(dir) {
-  return readdirSync(dir, { withFileTypes: true }).flatMap(d => {
+  return readdirSync(dir, { withFileTypes: true }).flatMap((d) => {
     const p = join(dir, d.name)
     if (d.isDirectory()) return d.name === '__tests__' ? [] : vueFiles(p)
     return p.endsWith('.vue') ? [p] : []
@@ -46,10 +47,12 @@ test('组件样式中的文字颜色在深色卡片上对比度 ≥ 4.5', () => 
   for (const file of vueFiles(SRC)) {
     const src = readFileSync(file, 'utf8')
     for (const [, css] of src.matchAll(/<style[^>]*>([\s\S]*?)<\/style>/g)) {
-      for (const [, color] of css.matchAll(/(?:^|[;{\s])color:\s*(#[0-9a-fA-F]{6}|#[0-9a-fA-F]{3})\b/g)) {
+      for (const [, color] of css.matchAll(
+        /(?:^|[;{\s])color:\s*(#[0-9a-fA-F]{6}|#[0-9a-fA-F]{3})\b/g,
+      )) {
         const c = hex(color)
         if (DECORATIVE.has(c)) continue
-        const worst = Math.min(...BACKGROUNDS.map(bg => contrast(c, bg)))
+        const worst = Math.min(...BACKGROUNDS.map((bg) => contrast(c, bg)))
         if (worst < 4.5) failures.push(`${file.replace(SRC, '')}: ${color} (${worst.toFixed(2)})`)
       }
     }

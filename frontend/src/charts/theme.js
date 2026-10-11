@@ -14,7 +14,11 @@ export const AXIS_LINE_COLOR = '#444c5e'
 export const SPLIT_LINE_COLOR = '#1a2744'
 
 export function tooltip(extra = {}) {
-  return { ...TOOLTIP_STYLE, ...extra, textStyle: { ...TOOLTIP_STYLE.textStyle, ...(extra.textStyle || {}) } }
+  return {
+    ...TOOLTIP_STYLE,
+    ...extra,
+    textStyle: { ...TOOLTIP_STYLE.textStyle, ...(extra.textStyle || {}) },
+  }
 }
 
 export function axisLabel(extra = {}) {

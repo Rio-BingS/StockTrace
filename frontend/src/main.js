@@ -13,7 +13,4 @@ installGlobalErrorHandlers(app, toastError)
 app.mount('#app')
 
 // 首页空闲时预取图表库与详情页，首次点进个股/市场页不再等待下载（FEX-07）
-prefetchWhenIdle([
-  () => import('vue-echarts'),
-  () => import('./views/StockDetail.vue'),
-])
+prefetchWhenIdle([() => import('vue-echarts'), () => import('./views/StockDetail.vue')])

@@ -10,9 +10,17 @@ export function shouldPrefetch(nav = globalThis.navigator) {
   return !/2g/.test(c.effectiveType || '')
 }
 
-export function prefetchWhenIdle(loaders, { win = globalThis.window, nav = globalThis.navigator, timeout = 3000 } = {}) {
+export function prefetchWhenIdle(
+  loaders,
+  { win = globalThis.window, nav = globalThis.navigator, timeout = 3000 } = {},
+) {
   if (!win || !shouldPrefetch(nav)) return false
-  const run = () => loaders.forEach(load => load().catch(() => { /* 预取失败不影响正常按需加载 */ }))
+  const run = () =>
+    loaders.forEach((load) =>
+      load().catch(() => {
+        /* 预取失败不影响正常按需加载 */
+      }),
+    )
   if (typeof win.requestIdleCallback === 'function') win.requestIdleCallback(run, { timeout })
   else win.setTimeout(run, timeout)
   return true

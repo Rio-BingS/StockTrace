@@ -15,7 +15,7 @@ test('setInert：设置与移除 inert / aria-hidden', () => {
   const attrs = new Map()
   const el = {
     setAttribute: (k, v) => attrs.set(k, v),
-    removeAttribute: k => attrs.delete(k),
+    removeAttribute: (k) => attrs.delete(k),
   }
   setInert(el, true)
   assert.ok(attrs.has('inert') && attrs.get('aria-hidden') === 'true')

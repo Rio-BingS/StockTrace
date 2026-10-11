@@ -1,18 +1,35 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import {
-  assignRefs, changedKeys, parseEtfRadarQuery, parseNationalEtfQuery, parseSectorsQuery,
+  assignRefs,
+  changedKeys,
+  parseEtfRadarQuery,
+  parseNationalEtfQuery,
+  parseSectorsQuery,
 } from '../routeQuery.js'
 
-const ref = v => ({ value: v })
+const ref = (v) => ({ value: v })
 
 test('parseSectorsQuery：非法值回落默认，页码至少为 1（FEF-15）', () => {
   assert.deepEqual(parseSectorsQuery({}), {
-    board: 'industry', period: 'day', q: '', sort: 'net', order: 'desc', page: 1,
+    board: 'industry',
+    period: 'day',
+    q: '',
+    sort: 'net',
+    order: 'desc',
+    page: 1,
   })
-  assert.deepEqual(parseSectorsQuery({ board: 'concept', period: '5d', page: '3', order: 'asc', q: '芯片' }), {
-    board: 'concept', period: '5d', q: '芯片', sort: 'net', order: 'asc', page: 3,
-  })
+  assert.deepEqual(
+    parseSectorsQuery({ board: 'concept', period: '5d', page: '3', order: 'asc', q: '芯片' }),
+    {
+      board: 'concept',
+      period: '5d',
+      q: '芯片',
+      sort: 'net',
+      order: 'asc',
+      page: 3,
+    },
+  )
   assert.equal(parseSectorsQuery({ period: '99d', page: '-2' }).period, 'day')
   assert.equal(parseSectorsQuery({ page: 'abc' }).page, 1)
   assert.equal(parseSectorsQuery({ q: ['a', 'b'] }).q, 'a')

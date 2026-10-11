@@ -68,7 +68,9 @@ const { baseInfo, chartOption, tableData, extremaList } = useIntradayChart(props
           </tr>
           <tr>
             <td class="tlabel">现价</td>
-            <td :class="pctClass(tableData.change_pct)">{{ formatNum(tableData.current_price) }}</td>
+            <td :class="pctClass(tableData.change_pct)">
+              {{ formatNum(tableData.current_price) }}
+            </td>
             <td class="tlabel">涨跌幅</td>
             <td :class="pctClass(tableData.change_pct)">{{ formatPct(tableData.change_pct) }}</td>
           </tr>
@@ -76,7 +78,9 @@ const { baseInfo, chartOption, tableData, extremaList } = useIntradayChart(props
             <td class="tlabel">昨收</td>
             <td>{{ formatNum(tableData.prev_close) }}</td>
             <td class="tlabel">日内涨幅（较开盘）</td>
-            <td :class="pctClass(tableData.open_close_pct)">{{ formatPct(tableData.open_close_pct) }}</td>
+            <td :class="pctClass(tableData.open_close_pct)">
+              {{ formatPct(tableData.open_close_pct) }}
+            </td>
           </tr>
           <tr>
             <td class="tlabel">振幅</td>
@@ -180,8 +184,14 @@ const { baseInfo, chartOption, tableData, extremaList } = useIntradayChart(props
   font-weight: bold;
 }
 
-.up { color: var(--up); font-weight: bold; }
-.down { color: var(--down); font-weight: bold; }
+.up {
+  color: var(--up);
+  font-weight: bold;
+}
+.down {
+  color: var(--down);
+  font-weight: bold;
+}
 
 .extrema-section {
   margin-top: 16px;

@@ -18,7 +18,12 @@ import { errorMessage, isCanceled } from '../utils/errorMessage.js'
 import { createRequestGuard } from '../utils/requestGuard.js'
 import { ACCENT } from '../constants/colors.js'
 // 图表 tooltip / 坐标轴配色统一取自 charts/theme.js（ARC-06）
-import { TOOLTIP_STYLE, AXIS_LABEL_COLOR, AXIS_LINE_COLOR, SPLIT_LINE_COLOR } from '../charts/theme.js'
+import {
+  TOOLTIP_STYLE,
+  AXIS_LABEL_COLOR,
+  AXIS_LINE_COLOR,
+  SPLIT_LINE_COLOR,
+} from '../charts/theme.js'
 
 // 显式组件名：App.vue 的 KeepAlive include 按它匹配，不依赖文件名推断（FEF-15）
 defineOptions({ name: 'MarketTrend' })
@@ -36,8 +41,13 @@ use([
 const COLORS = [ACCENT, '#ffb74d', '#ba68c8', '#4fc3f7', '#f06292']
 
 const PERIOD_OPTIONS = [
-  ['1w', '近1周'], ['1m', '近1月'], ['3m', '近3月'],
-  ['6m', '近半年'], ['1y', '近1年'], ['ytd', '今年以来'], ['custom', '自定义'],
+  ['1w', '近1周'],
+  ['1m', '近1月'],
+  ['3m', '近3月'],
+  ['6m', '近半年'],
+  ['1y', '近1年'],
+  ['ytd', '今年以来'],
+  ['custom', '自定义'],
 ]
 const PERIOD_DAYS = { '1w': 5, '1m': 22, '3m': 66, '6m': 130, '1y': 260 }
 
@@ -62,17 +72,17 @@ const chartOption = computed(() => {
 
   // 对齐日期并集
   const dateSet = new Set()
-  list.forEach(s => (s.items || []).forEach(i => dateSet.add(i.date)))
+  list.forEach((s) => (s.items || []).forEach((i) => dateSet.add(i.date)))
   const dates = Array.from(dateSet).sort()
 
   const chartSeries = list.map((s, idx) => {
-    const map = Object.fromEntries((s.items || []).map(i => [i.date, i.norm_pct]))
+    const map = Object.fromEntries((s.items || []).map((i) => [i.date, i.norm_pct]))
     return {
       name: s.name,
       type: 'line',
       showSymbol: false,
       smooth: true,
-      data: dates.map(d => map[d] ?? null),
+      data: dates.map((d) => map[d] ?? null),
       itemStyle: { color: COLORS[idx % COLORS.length] },
       lineStyle: { width: 2 },
     }
@@ -86,14 +96,21 @@ const chartOption = computed(() => {
       valueFormatter: (v) => (v == null ? '-' : `${Number(v).toFixed(2)}%`),
     },
     legend: {
-      data: list.map(s => s.name),
+      data: list.map((s) => s.name),
       textStyle: { color: '#ccc', fontSize: 12 },
       top: 0,
     },
     grid: { left: '8%', right: '4%', top: 48, bottom: 60 },
     dataZoom: [
       { type: 'inside', start: 0, end: 100 },
-      { type: 'slider', start: 0, end: 100, height: 18, bottom: 8, textStyle: { color: AXIS_LABEL_COLOR } },
+      {
+        type: 'slider',
+        start: 0,
+        end: 100,
+        height: 18,
+        bottom: 8,
+        textStyle: { color: AXIS_LABEL_COLOR },
+      },
     ],
     xAxis: {
       type: 'category',
@@ -124,9 +141,10 @@ async function load() {
   loading.value = true
   error.value = ''
   try {
-    const params = period.value === 'custom'
-      ? { start: customStart.value, end: customEnd.value }
-      : { period: period.value }
+    const params =
+      period.value === 'custom'
+        ? { start: customStart.value, end: customEnd.value }
+        : { period: period.value }
     const res = await marketApi.getTrend(params, { signal: req.signal })
     if (!req.isLatest()) return
     data.value = res.data
@@ -215,7 +233,9 @@ onUnmounted(() => guard.abort())
 </template>
 
 <style scoped>
-.page { color: #ddd; }
+.page {
+  color: #ddd;
+}
 .page-header {
   display: flex;
   justify-content: space-between;
@@ -223,8 +243,16 @@ onUnmounted(() => guard.abort())
   gap: 12px;
   margin-bottom: 16px;
 }
-.page-header h1 { margin: 0; font-size: 22px; color: #eee; }
-.sub { color: #909090; font-size: 13px; margin-top: 4px; }
+.page-header h1 {
+  margin: 0;
+  font-size: 22px;
+  color: #eee;
+}
+.sub {
+  color: #909090;
+  font-size: 13px;
+  margin-top: 4px;
+}
 .btn {
   padding: 8px 16px;
   border: none;
@@ -233,7 +261,9 @@ onUnmounted(() => guard.abort())
   color: #fff;
   cursor: pointer;
 }
-.btn:disabled { opacity: 0.6; }
+.btn:disabled {
+  opacity: 0.6;
+}
 .range-bar {
   display: flex;
   flex-wrap: wrap;
@@ -241,10 +271,32 @@ onUnmounted(() => guard.abort())
   gap: 8px;
   margin-bottom: 12px;
 }
-.custom-range { display: flex; align-items: center; gap: 6px; font-size: 12px; color: #9eabb8; }
-.custom-range input { background: #121b24; border: 1px solid #2b3947; color: #ddd; border-radius: 5px; padding: 4px 7px; color-scheme: dark; }
-.apply-btn { padding: 5px 12px; border: 1px solid #286391; background: #174673; color: #fff; border-radius: 5px; cursor: pointer; }
-.apply-btn:disabled { opacity: .5; }
+.custom-range {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12px;
+  color: #9eabb8;
+}
+.custom-range input {
+  background: #121b24;
+  border: 1px solid #2b3947;
+  color: #ddd;
+  border-radius: 5px;
+  padding: 4px 7px;
+  color-scheme: dark;
+}
+.apply-btn {
+  padding: 5px 12px;
+  border: 1px solid #286391;
+  background: #174673;
+  color: #fff;
+  border-radius: 5px;
+  cursor: pointer;
+}
+.apply-btn:disabled {
+  opacity: 0.5;
+}
 .error-box {
   background: var(--danger-bg);
   color: #ff8a9a;
@@ -274,15 +326,28 @@ onUnmounted(() => guard.abort())
   padding: 12px;
   border: 1px solid #1a2744;
 }
-.name { font-weight: 600; color: #eee; font-size: 14px; }
-.code { color: #919191; font-size: 12px; margin: 2px 0 8px; }
-.pct { font-size: 20px; font-weight: 700; }
+.name {
+  font-weight: 600;
+  color: #eee;
+  font-size: 14px;
+}
+.code {
+  color: #919191;
+  font-size: 12px;
+  margin: 2px 0 8px;
+}
+.pct {
+  font-size: 20px;
+  font-weight: 700;
+}
 .empty {
   text-align: center;
   color: #919191;
   padding: 40px;
 }
 @media (max-width: 640px) {
-  .page-header h1 { font-size: 18px; }
+  .page-header h1 {
+    font-size: 18px;
+  }
 }
 </style>

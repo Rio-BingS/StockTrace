@@ -18,8 +18,8 @@ export function findLocalExtrema(prices, windowSize = 20) {
     const rightSlice = prices.slice(i + 1, i + windowSize + 1)
     const current = prices[i]
 
-    const isPeak = leftSlice.every(v => v <= current) && rightSlice.every(v => v <= current)
-    const isValley = leftSlice.every(v => v >= current) && rightSlice.every(v => v >= current)
+    const isPeak = leftSlice.every((v) => v <= current) && rightSlice.every((v) => v <= current)
+    const isValley = leftSlice.every((v) => v >= current) && rightSlice.every((v) => v >= current)
 
     if (isPeak) {
       // 与上一个峰/谷比较，过滤过小幅波动

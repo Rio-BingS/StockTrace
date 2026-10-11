@@ -29,10 +29,12 @@ export function createSerialRunner(fn) {
     if (!running) return start()
     if (!pending) {
       // 当前这次结束后（无论成败）补跑一次
-      pending = running.catch(() => {}).then(() => {
-        pending = null
-        return start()
-      })
+      pending = running
+        .catch(() => {})
+        .then(() => {
+          pending = null
+          return start()
+        })
     }
     return pending
   }
@@ -67,15 +69,18 @@ export function createBurstScheduler(run, delays = [3000, 8000, 15000]) {
       const wait = delays[idx] - elapsed
       elapsed = delays[idx]
       idx += 1
-      timer = setTimeout(async () => {
-        timer = null
-        try {
-          await run()
-        } catch {
-          // run 自己负责展示错误
-        }
-        if (myGen === gen) next()
-      }, Math.max(0, wait))
+      timer = setTimeout(
+        async () => {
+          timer = null
+          try {
+            await run()
+          } catch {
+            // run 自己负责展示错误
+          }
+          if (myGen === gen) next()
+        },
+        Math.max(0, wait),
+      )
     }
     next()
   }

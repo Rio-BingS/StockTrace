@@ -5,7 +5,9 @@ import { formatPct, formatRate, formatSigned, pctFrom, pctClass } from '../forma
 
 test('pctFrom：涨跌幅以昨收为基准（FEF-01）', () => {
   // 高开低走但收盘仍高于昨收：较昨收为正，较开盘为负
-  const prevClose = 10, open = 10.5, close = 10.4
+  const prevClose = 10,
+    open = 10.5,
+    close = 10.4
   assert.ok(pctFrom(close, prevClose) > 0)
   assert.ok(pctFrom(close, open) < 0)
   assert.equal(formatPct(pctFrom(close, prevClose)), '+4.00%')

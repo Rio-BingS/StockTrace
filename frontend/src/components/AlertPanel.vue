@@ -116,7 +116,9 @@ usePolling(load, { interval: 60000 })
         <span v-if="unreadCount" class="badge">{{ unreadCount }}</span>
       </h2>
       <div class="head-actions">
-        <button class="btn small" @click="toggleEvents">{{ expanded ? '只看未读' : '查看全部记录' }}</button>
+        <button class="btn small" @click="toggleEvents">
+          {{ expanded ? '只看未读' : '查看全部记录' }}
+        </button>
         <button v-if="unreadCount" class="btn small" @click="markAllRead">全部已读</button>
       </div>
     </div>
@@ -132,34 +134,60 @@ usePolling(load, { interval: 60000 })
       <select v-model="form.rule_type" aria-label="规则类型">
         <option v-for="o in RULE_OPTIONS" :key="o.value" :value="o.value">{{ o.label }}</option>
       </select>
-      <input v-model="form.threshold" type="number" step="any" placeholder="阈值" aria-label="阈值" />
-      <input v-model="form.note" maxlength="100" placeholder="备注（可选）" aria-label="备注" class="note" />
+      <input
+        v-model="form.threshold"
+        type="number"
+        step="any"
+        placeholder="阈值"
+        aria-label="阈值"
+      />
+      <input
+        v-model="form.note"
+        maxlength="100"
+        placeholder="备注（可选）"
+        aria-label="备注"
+        class="note"
+      />
       <button class="btn primary" type="submit" :disabled="loading">+ 添加</button>
     </form>
 
     <!-- 规则列表 -->
     <div v-if="rules.length" class="table-scroll">
-    <table class="rule-table">
-      <thead>
-        <tr><th>股票</th><th>规则</th><th>阈值</th><th>备注</th><th>状态</th><th>操作</th></tr>
-      </thead>
-      <tbody>
-        <tr v-for="r in rules" :key="r.id">
-          <td>{{ r.code }} {{ r.name }}</td>
-          <td>{{ r.rule_display }}</td>
-          <td>{{ r.threshold }}</td>
-          <td class="note-cell">{{ r.note || '-' }}</td>
-          <td>
-            <button class="btn small" :class="r.is_active ? 'on' : 'off'" :aria-pressed="r.is_active ? 'true' : 'false'" @click="toggleRule(r)">
-              {{ r.is_active ? '监控中' : '已停用' }}
-            </button>
-          </td>
-          <td><button class="btn small danger" @click="removeRule(r)">删除</button></td>
-        </tr>
-      </tbody>
-    </table>
+      <table class="rule-table">
+        <thead>
+          <tr>
+            <th>股票</th>
+            <th>规则</th>
+            <th>阈值</th>
+            <th>备注</th>
+            <th>状态</th>
+            <th>操作</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr v-for="r in rules" :key="r.id">
+            <td>{{ r.code }} {{ r.name }}</td>
+            <td>{{ r.rule_display }}</td>
+            <td>{{ r.threshold }}</td>
+            <td class="note-cell">{{ r.note || '-' }}</td>
+            <td>
+              <button
+                class="btn small"
+                :class="r.is_active ? 'on' : 'off'"
+                :aria-pressed="r.is_active ? 'true' : 'false'"
+                @click="toggleRule(r)"
+              >
+                {{ r.is_active ? '监控中' : '已停用' }}
+              </button>
+            </td>
+            <td><button class="btn small danger" @click="removeRule(r)">删除</button></td>
+          </tr>
+        </tbody>
+      </table>
     </div>
-    <p v-else class="empty-hint">还没有提醒规则。添加后，盘中每 5 分钟和收盘汇总会自动评估，触发记录会显示在这里。</p>
+    <p v-else class="empty-hint">
+      还没有提醒规则。添加后，盘中每 5 分钟和收盘汇总会自动评估，触发记录会显示在这里。
+    </p>
 
     <!-- 触发记录 -->
     <div v-if="events.length" class="events">

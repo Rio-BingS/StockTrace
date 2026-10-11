@@ -10,7 +10,7 @@ export const ACCENT = '#5b9bff'
 /** 十六进制颜色加透明度："#ff6b81" + 0.5 → "rgba(255,107,129,0.5)" */
 export function alpha(hex, a) {
   const h = hex.replace('#', '')
-  const [r, g, b] = [0, 2, 4].map(i => parseInt(h.slice(i, i + 2), 16))
+  const [r, g, b] = [0, 2, 4].map((i) => parseInt(h.slice(i, i + 2), 16))
   return `rgba(${r},${g},${b},${a})`
 }
 

@@ -3,12 +3,21 @@ import assert from 'node:assert/strict'
 import { intradayBase, quoteForDate, signedPctText } from '../intraday.js'
 
 test('intradayBase：优先昨收，缺失时回退开盘并注明（FEF-13）', () => {
-  assert.deepEqual(intradayBase({ prev_close: '10.00', open_price: '10.5' }),
-    { price: 10, label: '较昨收', isPrevClose: true })
-  assert.deepEqual(intradayBase({ prev_close: null, open_price: '10.5' }),
-    { price: 10.5, label: '较开盘', isPrevClose: false })
-  assert.deepEqual(intradayBase({ prev_close: '', open_price: '' }),
-    { price: null, label: '', isPrevClose: false })
+  assert.deepEqual(intradayBase({ prev_close: '10.00', open_price: '10.5' }), {
+    price: 10,
+    label: '较昨收',
+    isPrevClose: true,
+  })
+  assert.deepEqual(intradayBase({ prev_close: null, open_price: '10.5' }), {
+    price: 10.5,
+    label: '较开盘',
+    isPrevClose: false,
+  })
+  assert.deepEqual(intradayBase({ prev_close: '', open_price: '' }), {
+    price: null,
+    label: '',
+    isPrevClose: false,
+  })
   assert.equal(intradayBase(null).price, null)
 })
 

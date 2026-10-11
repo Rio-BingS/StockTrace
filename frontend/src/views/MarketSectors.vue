@@ -33,15 +33,20 @@ const order = ref(initial.order)
 const page = ref(initial.page)
 
 // 缓存页被前进/后退或站内链接改了 query 时，按新参数重新加载（FEF-15）
-useRouteQuery('MarketSectors', { board, period, q, sort, order, page }, parseSectorsQuery, () => load())
+useRouteQuery('MarketSectors', { board, period, q, sort, order, page }, parseSectorsQuery, () =>
+  load(),
+)
 
 const items = computed(() => data.value?.items || [])
 const summary = computed(() => data.value?.summary || {})
-const pagination = computed(() => data.value?.pagination || {
-  page: 1,
-  total_pages: 1,
-  total: 0,
-})
+const pagination = computed(
+  () =>
+    data.value?.pagination || {
+      page: 1,
+      total_pages: 1,
+      total: 0,
+    },
+)
 
 // 竞态守卫：切换筛选时取消上一次请求并丢弃晚到的旧响应（FEF-06）
 const guard = createRequestGuard()
@@ -55,15 +60,20 @@ async function load(reset = false, { fromUser = false } = {}) {
   loading.value = true
   error.value = ''
   try {
-    const res = (await marketApi.getSectors({
-      board: board.value,
-      period: period.value,
-      q: q.value || undefined,
-      sort: sort.value,
-      order: order.value,
-      page: page.value,
-      page_size: 50,
-    }, { signal: req.signal })).data
+    const res = (
+      await marketApi.getSectors(
+        {
+          board: board.value,
+          period: period.value,
+          q: q.value || undefined,
+          sort: sort.value,
+          order: order.value,
+          page: page.value,
+          page_size: 50,
+        },
+        { signal: req.signal },
+      )
+    ).data
     if (!req.isLatest()) return
     data.value = res
     page.value = res.pagination?.page || 1
@@ -126,31 +136,57 @@ onUnmounted(() => guard.abort())
 </script>
 
 <template>
-  <div class='page'>
+  <div class="page">
     <MarketSubNav />
-    <header class='page-header'>
+    <header class="page-header">
       <div>
-        <div class='title-row'>
+        <div class="title-row">
           <h1>板块资金轮动</h1>
-          <span class='live-badge'>数据截至 {{ data?.meta?.data_as_of || '最近交易日' }}</span>
+          <span class="live-badge">数据截至 {{ data?.meta?.data_as_of || '最近交易日' }}</span>
         </div>
         <p>行业与概念板块的资金强弱、集中度和价流背离</p>
       </div>
-      <div class='header-meta'>
-        <span v-if='data?.updated_at'>更新 {{ formatDateTime(data.updated_at) }}</span>
-        <button class='icon-button' type='button' title='刷新' aria-label='刷新' :disabled='loading' @click='load()'>↻</button>
+      <div class="header-meta">
+        <span v-if="data?.updated_at">更新 {{ formatDateTime(data.updated_at) }}</span>
+        <button
+          class="icon-button"
+          type="button"
+          title="刷新"
+          aria-label="刷新"
+          :disabled="loading"
+          @click="load()"
+        >
+          ↻
+        </button>
       </div>
     </header>
-    <div v-if='error' class='error-box'>{{ error }}</div>
-    <section class='control-bar' aria-label='板块资金筛选'>
-      <div class='segmented' aria-label='板块类型'>
-        <button type='button' :class='{ active: board === `industry` }' @click='switchBoard(`industry`)'>行业资金</button>
-        <button type='button' :class='{ active: board === `concept` }' @click='switchBoard(`concept`)'>概念资金</button>
+    <div v-if="error" class="error-box">{{ error }}</div>
+    <section class="control-bar" aria-label="板块资金筛选">
+      <div class="segmented" aria-label="板块类型">
+        <button
+          type="button"
+          :class="{ active: board === `industry` }"
+          @click="switchBoard(`industry`)"
+        >
+          行业资金
+        </button>
+        <button
+          type="button"
+          :class="{ active: board === `concept` }"
+          @click="switchBoard(`concept`)"
+        >
+          概念资金
+        </button>
       </div>
       <div>
         <PeriodPicker
           :model-value="period"
-          :options="[['day', '当日'], ['5d', '5日'], ['10d', '10日'], ['20d', '20日']]"
+          :options="[
+            ['day', '当日'],
+            ['5d', '5日'],
+            ['10d', '10日'],
+            ['20d', '20日'],
+          ]"
           :disabled-options="[
             ['1m', '1月', '需要日度快照积累后开放'],
             ['3m', '3月', '需要日度快照积累后开放'],
@@ -164,72 +200,121 @@ onUnmounted(() => guard.abort())
           · 1月/3月/1年待日度快照积累后开放
         </small>
       </div>
-      <form class='search-form' @submit.prevent='load(true, { fromUser: true })'>
-        <input v-model.trim='q' aria-label='搜索板块或领涨股' placeholder='搜索板块或领涨股' />
-        <button type='submit'>查询</button>
+      <form class="search-form" @submit.prevent="load(true, { fromUser: true })">
+        <input v-model.trim="q" aria-label="搜索板块或领涨股" placeholder="搜索板块或领涨股" />
+        <button type="submit">查询</button>
       </form>
     </section>
 
     <div v-if="period !== 'day' && data?.message" class="snapshot-note">{{ data.message }}</div>
 
-    <section class='snapshot-strip' aria-label='资金概览'>
-      <div><span>板块样本</span><strong>{{ summary.sample_count ?? '-' }}</strong></div>
-      <div><span>流入 / 流出</span><strong>{{ summary.inflow_count ?? '-' }} / {{ summary.outflow_count ?? '-' }}</strong></div>
-      <div><span>资金广度</span><strong>{{ formatPct(summary.breadth_pct) }}</strong></div>
-      <div><span>前三集中度</span><strong>{{ formatPct(summary.top_three_inflow_concentration_pct) }}</strong></div>
+    <section class="snapshot-strip" aria-label="资金概览">
+      <div>
+        <span>板块样本</span><strong>{{ summary.sample_count ?? '-' }}</strong>
+      </div>
+      <div>
+        <span>流入 / 流出</span
+        ><strong>{{ summary.inflow_count ?? '-' }} / {{ summary.outflow_count ?? '-' }}</strong>
+      </div>
+      <div>
+        <span>资金广度</span><strong>{{ formatPct(summary.breadth_pct) }}</strong>
+      </div>
+      <div>
+        <span>前三集中度</span
+        ><strong>{{ formatPct(summary.top_three_inflow_concentration_pct) }}</strong>
+      </div>
     </section>
 
     <SectorFlowStage :board="board" :period="period" :loading="loading" :data="data" />
-    <SectorInsights :summary='summary' :divergence-count='data?.divergences?.length || 0' />
+    <SectorInsights :summary="summary" :divergence-count="data?.divergences?.length || 0" />
 
-    <section v-if='data?.divergences?.length' class='divergences'>
-      <div class='section-title'><h2>价流背离</h2><span>{{ data.divergences.length }} 个板块</span></div>
-      <div class='divergence-list'>
-        <span v-for='row in data.divergences' :key='row.name'>
+    <section v-if="data?.divergences?.length" class="divergences">
+      <div class="section-title">
+        <h2>价流背离</h2>
+        <span>{{ data.divergences.length }} 个板块</span>
+      </div>
+      <div class="divergence-list">
+        <span v-for="row in data.divergences" :key="row.name">
           {{ row.name }}
-          <b :class='pctClass(row.net)'>{{ signedAmount(row.net) }}</b>
-          <b :class='pctClass(row.change_pct)'>{{ formatPct(row.change_pct) }}</b>
+          <b :class="pctClass(row.net)">{{ signedAmount(row.net) }}</b>
+          <b :class="pctClass(row.change_pct)">{{ formatPct(row.change_pct) }}</b>
         </span>
       </div>
     </section>
-    <section class='table-card'>
-      <div class='table-title'>
-        <div><h2>{{ board === 'industry' ? '行业' : '概念' }}完整明细</h2><span>{{ pagination.total }} 条</span></div>
-        <small>{{ period === 'day' ? '当日资金快照' : `${period.replace('d', '')}日累计（日度快照）` }}</small>
+    <section class="table-card">
+      <div class="table-title">
+        <div>
+          <h2>{{ board === 'industry' ? '行业' : '概念' }}完整明细</h2>
+          <span>{{ pagination.total }} 条</span>
+        </div>
+        <small>{{
+          period === 'day' ? '当日资金快照' : `${period.replace('d', '')}日累计（日度快照）`
+        }}</small>
       </div>
-      <div class='table-wrap'>
+      <div class="table-wrap">
         <table>
-          <thead><tr>
-            <th>名称</th>
-            <th :aria-sort='ariaSort(sort, order, `net`)'><button type='button' @click='sortBy(`net`)'>净额 {{ sortMark('net') }}</button></th>
-            <th :aria-sort='ariaSort(sort, order, `inflow`)'><button type='button' @click='sortBy(`inflow`)'>流入 {{ sortMark('inflow') }}</button></th>
-            <th :aria-sort='ariaSort(sort, order, `outflow`)'><button type='button' @click='sortBy(`outflow`)'>流出 {{ sortMark('outflow') }}</button></th>
-            <th :aria-sort='ariaSort(sort, order, `change_pct`)'><button type='button' @click='sortBy(`change_pct`)'>涨跌幅 {{ sortMark('change_pct') }}</button></th>
-            <th>公司数</th><th>领涨股</th>
-            <th :aria-sort='ariaSort(sort, order, `leader_pct`)'><button type='button' @click='sortBy(`leader_pct`)'>领涨% {{ sortMark('leader_pct') }}</button></th>
-          </tr></thead>
-          <tbody><tr v-for='row in items' :key='row.name'>
-            <td class='name'>{{ row.name }}</td>
-            <td :class='pctClass(row.net)'>{{ signedAmount(row.net) }}</td>
-            <td>{{ formatAmount(row.inflow) }}</td>
-            <td>{{ formatAmount(row.outflow) }}</td>
-            <td :class='pctClass(row.change_pct)'>{{ formatPct(row.change_pct) }}</td>
-            <td>{{ row.company_count ?? '-' }}</td>
-            <td>{{ row.leader || '-' }}</td>
-            <td :class='pctClass(row.leader_pct)'>{{ formatPct(row.leader_pct) }}</td>
-          </tr></tbody>
+          <thead>
+            <tr>
+              <th>名称</th>
+              <th :aria-sort="ariaSort(sort, order, `net`)">
+                <button type="button" @click="sortBy(`net`)">净额 {{ sortMark('net') }}</button>
+              </th>
+              <th :aria-sort="ariaSort(sort, order, `inflow`)">
+                <button type="button" @click="sortBy(`inflow`)">
+                  流入 {{ sortMark('inflow') }}
+                </button>
+              </th>
+              <th :aria-sort="ariaSort(sort, order, `outflow`)">
+                <button type="button" @click="sortBy(`outflow`)">
+                  流出 {{ sortMark('outflow') }}
+                </button>
+              </th>
+              <th :aria-sort="ariaSort(sort, order, `change_pct`)">
+                <button type="button" @click="sortBy(`change_pct`)">
+                  涨跌幅 {{ sortMark('change_pct') }}
+                </button>
+              </th>
+              <th>公司数</th>
+              <th>领涨股</th>
+              <th :aria-sort="ariaSort(sort, order, `leader_pct`)">
+                <button type="button" @click="sortBy(`leader_pct`)">
+                  领涨% {{ sortMark('leader_pct') }}
+                </button>
+              </th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr v-for="row in items" :key="row.name">
+              <td class="name">{{ row.name }}</td>
+              <td :class="pctClass(row.net)">{{ signedAmount(row.net) }}</td>
+              <td>{{ formatAmount(row.inflow) }}</td>
+              <td>{{ formatAmount(row.outflow) }}</td>
+              <td :class="pctClass(row.change_pct)">{{ formatPct(row.change_pct) }}</td>
+              <td>{{ row.company_count ?? '-' }}</td>
+              <td>{{ row.leader || '-' }}</td>
+              <td :class="pctClass(row.leader_pct)">{{ formatPct(row.leader_pct) }}</td>
+            </tr>
+          </tbody>
         </table>
-        <div v-if='!items.length && !loading' class='empty'>暂无符合条件的板块</div>
+        <div v-if="!items.length && !loading" class="empty">暂无符合条件的板块</div>
       </div>
-      <div class='pager'>
+      <div class="pager">
         <span>第 {{ pagination.page }} / {{ pagination.total_pages }} 页</span>
         <div>
-          <button type='button' :disabled='pagination.page <= 1 || loading' @click='changePage(-1)'>上一页</button>
-          <button type='button' :disabled='pagination.page >= pagination.total_pages || loading' @click='changePage(1)'>下一页</button>
+          <button type="button" :disabled="pagination.page <= 1 || loading" @click="changePage(-1)">
+            上一页
+          </button>
+          <button
+            type="button"
+            :disabled="pagination.page >= pagination.total_pages || loading"
+            @click="changePage(1)"
+          >
+            下一页
+          </button>
         </div>
       </div>
     </section>
-    <MarketDataStatus :meta='data?.meta' />
+    <MarketDataStatus :meta="data?.meta" />
   </div>
 </template>
 
@@ -300,7 +385,7 @@ button:hover:not(:disabled) {
 
 button:disabled {
   cursor: not-allowed;
-  opacity: .38;
+  opacity: 0.38;
 }
 
 .icon-button {
@@ -313,7 +398,7 @@ button:disabled {
 }
 
 .spinning {
-  animation: spin .8s linear infinite;
+  animation: spin 0.8s linear infinite;
 }
 
 .error-box {
@@ -571,7 +656,9 @@ td.name {
 }
 
 @keyframes spin {
-  to { transform: rotate(360deg); }
+  to {
+    transform: rotate(360deg);
+  }
 }
 
 @media (max-width: 1120px) {

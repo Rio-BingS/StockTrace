@@ -8,7 +8,9 @@ const route = useRoute()
 <template>
   <div class="not-found">
     <h1>页面不存在</h1>
-    <p>没有找到 <code>{{ route.fullPath }}</code> 对应的页面，可能是链接有误或页面已调整。</p>
+    <p>
+      没有找到 <code>{{ route.fullPath }}</code> 对应的页面，可能是链接有误或页面已调整。
+    </p>
     <RouterLink to="/" class="home-link">返回自选面板</RouterLink>
   </div>
 </template>

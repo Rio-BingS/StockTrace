@@ -12,9 +12,9 @@ import { TOOLTIP_STYLE, AXIS_LABEL_COLOR, AXIS_LINE_COLOR, SPLIT_LINE_COLOR } fr
 export function buildIntradayOption({ bars, prices, extrema, quote, base }) {
   if (!bars.length) return {}
   const sorted = bars
-  const signedPctText = price => pctTextFrom(price, base.price)
+  const signedPctText = (price) => pctTextFrom(price, base.price)
 
-  const times = sorted.map(d => d.datetime.slice(11, 16))
+  const times = sorted.map((d) => d.datetime.slice(11, 16))
 
   const openPrice = quote?.open_price ? Number(quote.open_price) : null
   const closePrice = quote?.close_price ? Number(quote.close_price) : null
@@ -25,7 +25,8 @@ export function buildIntradayOption({ bars, prices, extrema, quote, base }) {
   const lineColor = basePrice ? trendColor(prices[prices.length - 1] - basePrice) : ACCENT
 
   // 找最高/最低/现价在数据中的索引
-  let highIdx = 0, lowIdx = 0
+  let highIdx = 0,
+    lowIdx = 0
   prices.forEach((p, i) => {
     if (p >= (prices[highIdx] ?? p)) highIdx = i
     if (p <= (prices[lowIdx] ?? p)) lowIdx = i
@@ -196,10 +197,12 @@ export function buildIntradayOption({ bars, prices, extrema, quote, base }) {
     yAxis: {
       scale: true,
       // 保证昨收线落在可视范围内
-      ...(isPrevClose ? {
-        min: v => Math.min(v.min, basePrice),
-        max: v => Math.max(v.max, basePrice),
-      } : {}),
+      ...(isPrevClose
+        ? {
+            min: (v) => Math.min(v.min, basePrice),
+            max: (v) => Math.max(v.max, basePrice),
+          }
+        : {}),
       axisLine: { lineStyle: { color: AXIS_LINE_COLOR } },
       axisLabel: { color: AXIS_LABEL_COLOR, fontSize: 11 },
       splitLine: { lineStyle: { color: SPLIT_LINE_COLOR } },
@@ -215,24 +218,26 @@ export function buildIntradayOption({ bars, prices, extrema, quote, base }) {
         textStyle: { color: AXIS_LABEL_COLOR },
       },
     ],
-    series: [{
-      name: '价格',
-      type: 'line',
-      data: prices,
-      smooth: false,
-      symbol: 'none',
-      lineStyle: { color: lineColor, width: 1.5 },
-      areaStyle: { color: alpha(lineColor, 0.08) },
-      markPoint: {
-        data: markPointData,
-        animation: false,
-      },
-      markLine: {
-        data: markLineData,
+    series: [
+      {
+        name: '价格',
+        type: 'line',
+        data: prices,
+        smooth: false,
         symbol: 'none',
-        animation: false,
+        lineStyle: { color: lineColor, width: 1.5 },
+        areaStyle: { color: alpha(lineColor, 0.08) },
+        markPoint: {
+          data: markPointData,
+          animation: false,
+        },
+        markLine: {
+          data: markLineData,
+          symbol: 'none',
+          animation: false,
+        },
       },
-    }],
+    ],
   }
 }
 
@@ -246,7 +251,7 @@ export function buildExtremaList({ bars, extrema, base }) {
     pct: pctTextFrom(e.price, base.price),
   })
   return [
-    ...extrema.peaks.map(e => row('峰', e)),
-    ...extrema.valleys.map(e => row('谷', e)),
+    ...extrema.peaks.map((e) => row('峰', e)),
+    ...extrema.valleys.map((e) => row('谷', e)),
   ].sort((a, b) => a.time.localeCompare(b.time))
 }

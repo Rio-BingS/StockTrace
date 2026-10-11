@@ -30,7 +30,7 @@ export function pctFrom(price, base) {
   const p = toNum(price)
   const b = toNum(base)
   if (p == null || b == null || b === 0) return null
-  return (p - b) / b * 100
+  return ((p - b) / b) * 100
 }
 
 /** 涨跌着色：按两位小数舍入后判断，兼容 "+1.23%" 这类已格式化的文本 */

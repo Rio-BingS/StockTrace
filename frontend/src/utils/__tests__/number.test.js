@@ -2,45 +2,87 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import {
-  toNum, fmtFixed, fmtSigned, fmtPct, fmtRate, fmtAmount, fmtVolume, fmtShare, signClass,
+  toNum,
+  fmtFixed,
+  fmtSigned,
+  fmtPct,
+  fmtRate,
+  fmtAmount,
+  fmtVolume,
+  fmtShare,
+  signClass,
 } from '../number.js'
 
 function table(fn, cases) {
   for (const [input, expected] of cases) {
     const args = Array.isArray(input) ? input : [input]
-    assert.equal(fn(...args), expected, `${fn.name}(${args.map(a => JSON.stringify(a)).join(', ')})`)
+    assert.equal(
+      fn(...args),
+      expected,
+      `${fn.name}(${args.map((a) => JSON.stringify(a)).join(', ')})`,
+    )
   }
 }
 
 test('toNum：空串、空白、NaN、Infinity 视为无值', () => {
   table(toNum, [
-    [null, null], [undefined, null], ['', null], ['  ', null], ['abc', null],
-    [Infinity, null], [-Infinity, null], [NaN, null],
-    ['1.5', 1.5], [0, 0], ['-0', -0], [' 2 ', 2],
+    [null, null],
+    [undefined, null],
+    ['', null],
+    ['  ', null],
+    ['abc', null],
+    [Infinity, null],
+    [-Infinity, null],
+    [NaN, null],
+    ['1.5', 1.5],
+    [0, 0],
+    ['-0', -0],
+    [' 2 ', 2],
   ])
 })
 
 test('fmtFixed：空串显示 "-"，-0 不带负号', () => {
   table(fmtFixed, [
-    ['', '-'], [null, '-'], [Infinity, '-'],
-    [0, '0.00'], [-0.004, '0.00'], [-0, '0.00'],
-    [12.345, '12.35'], ['-3.1', '-3.10'], [[1.23456, 3], '1.235'],
+    ['', '-'],
+    [null, '-'],
+    [Infinity, '-'],
+    [0, '0.00'],
+    [-0.004, '0.00'],
+    [-0, '0.00'],
+    [12.345, '12.35'],
+    ['-3.1', '-3.10'],
+    [[1.23456, 3], '1.235'],
   ])
 })
 
 test('fmtSigned / fmtPct：按舍入后的值决定正负号，0 不带 "+"', () => {
   table(fmtSigned, [
-    [0.004, '0.00'], [-0.004, '0.00'], [0, '0.00'], [0.005, '+0.01'],
-    [0.4, '+0.40'], ['-0.25', '-0.25'], ['', '-'],
+    [0.004, '0.00'],
+    [-0.004, '0.00'],
+    [0, '0.00'],
+    [0.005, '+0.01'],
+    [0.4, '+0.40'],
+    ['-0.25', '-0.25'],
+    ['', '-'],
   ])
   table(fmtPct, [
-    [0.004, '0.00%'], [-0.004, '0.00%'], [1.234, '+1.23%'], [-1.235, '-1.24%'],
-    [Infinity, '-'], ['', '-'], [null, '-'],
+    [0.004, '0.00%'],
+    [-0.004, '0.00%'],
+    [1.234, '+1.23%'],
+    [-1.235, '-1.24%'],
+    [Infinity, '-'],
+    ['', '-'],
+    [null, '-'],
   ])
 })
 
 test('fmtRate：振幅、换手率不加正号', () => {
-  table(fmtRate, [[5.2, '5.20%'], [0, '0.00%'], [null, '-'], ['', '-']])
+  table(fmtRate, [
+    [5.2, '5.20%'],
+    [0, '0.00%'],
+    [null, '-'],
+    ['', '-'],
+  ])
 })
 
 test('fmtAmount：元 → 万/亿/万亿，边界进位', () => {
@@ -91,5 +133,12 @@ test('fmtShare：份额与份额变化', () => {
 })
 
 test('signClass：与显示文本一致，舍入为 0 时不着色', () => {
-  table(signClass, [[0.004, ''], [-0.004, ''], [0.01, 'up'], [-2, 'down'], ['', ''], [null, '']])
+  table(signClass, [
+    [0.004, ''],
+    [-0.004, ''],
+    [0.01, 'up'],
+    [-2, 'down'],
+    ['', ''],
+    [null, ''],
+  ])
 })

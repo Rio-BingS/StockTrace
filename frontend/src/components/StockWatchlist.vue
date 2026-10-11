@@ -26,10 +26,17 @@ let blurTimer = null
 // 序号守卫：丢弃过期的搜索响应，避免旧关键词结果覆盖新结果（FEF-06/FEF-10）
 const guard = createRequestGuard()
 
-const activeId = computed(() => (highlighted.value >= 0 ? `${LISTBOX_ID}-opt-${highlighted.value}` : undefined))
-const notFound = computed(() =>
-  !searching.value && !searchError.value && searchedKeyword.value !== ''
-  && searchedKeyword.value === keyword.value.trim() && !searchResults.value.length)
+const activeId = computed(() =>
+  highlighted.value >= 0 ? `${LISTBOX_ID}-opt-${highlighted.value}` : undefined,
+)
+const notFound = computed(
+  () =>
+    !searching.value &&
+    !searchError.value &&
+    searchedKeyword.value !== '' &&
+    searchedKeyword.value === keyword.value.trim() &&
+    !searchResults.value.length,
+)
 
 function resetSearch() {
   guard.abort()
@@ -121,7 +128,11 @@ function onKeydown(e) {
     if (!searchResults.value.length) return
     e.preventDefault()
     showDropdown.value = true
-    highlighted.value = moveHighlight(highlighted.value, e.key === 'ArrowDown' ? 1 : -1, searchResults.value.length)
+    highlighted.value = moveHighlight(
+      highlighted.value,
+      e.key === 'ArrowDown' ? 1 : -1,
+      searchResults.value.length,
+    )
   } else if (e.key === 'Enter') {
     e.preventDefault()
     onEnter()
@@ -143,7 +154,10 @@ function onBlur() {
 }
 
 function onFocus() {
-  if (keyword.value.trim().length >= 2 && (searchResults.value.length || searching.value || notFound.value)) {
+  if (
+    keyword.value.trim().length >= 2 &&
+    (searchResults.value.length || searching.value || notFound.value)
+  ) {
     showDropdown.value = true
   }
 }
@@ -199,11 +213,7 @@ onUnmounted(() => {
         </div>
         <div v-if="hint" class="search-hint">{{ hint }}</div>
       </div>
-      <button
-        class="btn btn-add"
-        @click="onEnter"
-        :disabled="adding || !keyword.trim()"
-      >
+      <button class="btn btn-add" @click="onEnter" :disabled="adding || !keyword.trim()">
         {{ adding ? '添加中...' : '添加' }}
       </button>
     </div>

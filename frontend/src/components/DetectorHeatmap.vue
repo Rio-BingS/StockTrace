@@ -18,14 +18,16 @@ import { NARROW_TOP_N, heatmapHeight, visibleRows } from '../utils/heatmapRows.j
 use([HeatmapChart, GridComponent, TooltipComponent, VisualMapComponent, CanvasRenderer])
 
 const props = defineProps({
-  dims: { type: Array, default: () => [] },   // [{key, name}]
-  rows: { type: Array, default: () => [] },   // [{code, name, values: {key: value|null}}]
+  dims: { type: Array, default: () => [] }, // [{key, name}]
+  rows: { type: Array, default: () => [] }, // [{code, name, values: {key: value|null}}]
 })
 
 // 窄屏默认只画前 N 个板块，可展开全部（FEX-05）
 const narrow = useMediaQuery('(max-width: 640px)')
 const expanded = ref(false)
-const shownRows = computed(() => visibleRows(props.rows, { narrow: narrow.value, expanded: expanded.value }))
+const shownRows = computed(() =>
+  visibleRows(props.rows, { narrow: narrow.value, expanded: expanded.value }),
+)
 const canExpand = computed(() => narrow.value && props.rows.length > NARROW_TOP_N)
 
 const chartData = computed(() => {
@@ -58,7 +60,7 @@ const option = computed(() => {
     grid: { left: 8, right: 12, top: 6, bottom: 40, containLabel: true },
     xAxis: {
       type: 'category',
-      data: props.dims.map(d => d.name),
+      data: props.dims.map((d) => d.name),
       splitArea: { show: true },
       axisLine: { show: false },
       axisTick: { show: false },
@@ -66,7 +68,7 @@ const option = computed(() => {
     },
     yAxis: {
       type: 'category',
-      data: shownRows.value.map(r => r.name),
+      data: shownRows.value.map((r) => r.name),
       inverse: true, // 分值最高的板块排最上
       splitArea: { show: true },
       axisLine: { show: false },
@@ -85,19 +87,26 @@ const option = computed(() => {
       // A 股配色：红=向上微变、绿=向下微变、中段深色=接近 0
       inRange: { color: [DOWN, '#0f3d2e', '#16213e', '#3d1e2b', UP] },
     },
-    series: [{
-      type: 'heatmap',
-      data: chartData.value,
-      itemStyle: { borderColor: '#111d34', borderWidth: 2, borderRadius: 3 },
-      emphasis: { itemStyle: { shadowBlur: 6, shadowColor: 'rgba(0,0,0,0.5)' } },
-    }],
+    series: [
+      {
+        type: 'heatmap',
+        data: chartData.value,
+        itemStyle: { borderColor: '#111d34', borderWidth: 2, borderRadius: 3 },
+        emphasis: { itemStyle: { shadowBlur: 6, shadowColor: 'rgba(0,0,0,0.5)' } },
+      },
+    ],
   }
 })
 </script>
 
 <template>
   <div>
-    <v-chart v-if="chartData.length" :option="option" autoresize :style="{ height: height + 'px', width: '100%' }" />
+    <v-chart
+      v-if="chartData.length"
+      :option="option"
+      autoresize
+      :style="{ height: height + 'px', width: '100%' }"
+    />
     <div v-else class="empty">矩阵内暂有板块但无有效分值</div>
     <button v-if="canExpand" type="button" class="expand" @click="expanded = !expanded">
       {{ expanded ? `只看前 ${NARROW_TOP_N} 个板块` : `展开全部 ${rows.length} 个板块` }}
@@ -106,6 +115,20 @@ const option = computed(() => {
 </template>
 
 <style scoped>
-.expand { display: block; margin: 6px auto 0; background: none; border: 1px solid #293b5b; color: var(--accent); border-radius: 6px; padding: 5px 12px; cursor: pointer; font-size: 12px; }
-.empty { text-align: center; padding: 36px 20px; color: #8690a4; }
+.expand {
+  display: block;
+  margin: 6px auto 0;
+  background: none;
+  border: 1px solid #293b5b;
+  color: var(--accent);
+  border-radius: 6px;
+  padding: 5px 12px;
+  cursor: pointer;
+  font-size: 12px;
+}
+.empty {
+  text-align: center;
+  padding: 36px 20px;
+  color: #8690a4;
+}
 </style>

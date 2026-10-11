@@ -18,7 +18,12 @@ import { escapeHtml } from '../utils/escapeHtml.js'
 import { byKey } from '../utils/sortBy.js'
 import { ACCENT, DOWN, FLAT, UP, alpha, trendColor } from '../constants/colors.js'
 // 图表 tooltip / 坐标轴配色统一取自 charts/theme.js（ARC-06）
-import { TOOLTIP_STYLE, AXIS_LABEL_COLOR, AXIS_LINE_COLOR, SPLIT_LINE_COLOR } from '../charts/theme.js'
+import {
+  TOOLTIP_STYLE,
+  AXIS_LABEL_COLOR,
+  AXIS_LINE_COLOR,
+  SPLIT_LINE_COLOR,
+} from '../charts/theme.js'
 
 use([
   CandlestickChart,
@@ -41,7 +46,7 @@ const emit = defineEmits(['date-click'])
 // 排序后的数据供点击事件与图表配置共用
 const sortedData = computed(() =>
   // 按日期正序排列（字符串比较，避免 Safari 日期解析问题）
-  [...props.data].sort(byKey('trade_date'))
+  [...props.data].sort(byKey('trade_date')),
 )
 
 // 将日K数据转为 ECharts 格式
@@ -49,15 +54,15 @@ const chartOption = computed(() => {
   const sorted = sortedData.value
   if (!sorted.length) return {}
 
-  const dates = sorted.map(d => d.trade_date)
+  const dates = sorted.map((d) => d.trade_date)
   // ECharts K线数据: [open, close, low, high]
-  const klineData = sorted.map(d => [
+  const klineData = sorted.map((d) => [
     Number(d.open_price),
     Number(d.close_price),
     Number(d.low_price),
     Number(d.high_price),
   ])
-  const volumes = sorted.map(d => d.volume || 0)
+  const volumes = sorted.map((d) => d.volume || 0)
 
   return {
     backgroundColor: '#16213e',

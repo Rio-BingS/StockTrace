@@ -33,7 +33,11 @@
   --ok-bg: #0f2a2a;
   --border: #2a2a3e;
 
-  font-family: 'Inter', system-ui, -apple-system, sans-serif;
+  font-family:
+    'Inter',
+    system-ui,
+    -apple-system,
+    sans-serif;
   font-size: 14px;
   line-height: 1.5;
   color: var(--text-primary);

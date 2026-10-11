@@ -4,17 +4,32 @@ import { extraColumnsFor, fmtCell } from '../screenerColumns.js'
 
 test('extraColumnsFor：条件与排序用到、固定列外的指标去重（ARC-09）', () => {
   const cols = extraColumnsFor({
-    conditions: [{ field: 'change_pct' }, { field: 'pct_5d' }, { field: 'above_ma5' }, { field: 'pct_5d' }],
+    conditions: [
+      { field: 'change_pct' },
+      { field: 'pct_5d' },
+      { field: 'above_ma5' },
+      { field: 'pct_5d' },
+    ],
     order_by: 'volume',
   })
-  assert.deepEqual(cols.map(c => c.key), ['pct_5d', 'above_ma5', 'volume'])
+  assert.deepEqual(
+    cols.map((c) => c.key),
+    ['pct_5d', 'above_ma5', 'volume'],
+  )
   assert.equal(cols[1].bool, true)
   assert.equal(cols[0].label, '5日涨跌幅(%)')
   assert.deepEqual(extraColumnsFor(null), [])
 })
 
 test('fmtCell：按字段类型格式化', () => {
-  const row = { pct_5d: 1.234, above_ma5: 1, volume: 1_234_567, up_days: 3, turnover_5d_avg: 2.5e8, x: null }
+  const row = {
+    pct_5d: 1.234,
+    above_ma5: 1,
+    volume: 1_234_567,
+    up_days: 3,
+    turnover_5d_avg: 2.5e8,
+    x: null,
+  }
   assert.equal(fmtCell(row, { key: 'pct_5d' }), '+1.23%')
   assert.equal(fmtCell(row, { key: 'above_ma5', bool: true }), '是')
   assert.equal(fmtCell(row, { key: 'volume' }), '123.46 万股')

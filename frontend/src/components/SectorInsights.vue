@@ -12,26 +12,53 @@ const insights = computed(() => buildInsights(props.summary, props.divergenceCou
 </script>
 
 <template>
-  <section class='insight-panel'>
+  <section class="insight-panel">
     <h2>解读</h2>
-    <div class='insight-grid'>
-      <article v-for='(item, index) in insights' :key='item.title'>
-        <span class='insight-index' :class='item.tone'>{{ index + 1 }}</span>
-        <div><strong>{{ item.title }}</strong><p>{{ item.body }}</p></div>
+    <div class="insight-grid">
+      <article v-for="(item, index) in insights" :key="item.title">
+        <span class="insight-index" :class="item.tone">{{ index + 1 }}</span>
+        <div>
+          <strong>{{ item.title }}</strong>
+          <p>{{ item.body }}</p>
+        </div>
       </article>
     </div>
   </section>
 
-  <section class='strength-panel'>
-    <div class='strength-item'>
-      <div class='strength-heading'><span>轮动广度</span><strong>{{ formatPct(summary.breadth_pct) }}</strong></div>
-      <div class='meter'><i class='breadth-meter' :style='{ width: metricWidth(summary.breadth_pct) }'></i></div>
-      <p>{{ Number(summary.breadth_pct) >= 50 ? '净流入板块占多数，市场扩散度较高。' : '净流出板块占多数，市场扩散度偏弱。' }}</p>
+  <section class="strength-panel">
+    <div class="strength-item">
+      <div class="strength-heading">
+        <span>轮动广度</span><strong>{{ formatPct(summary.breadth_pct) }}</strong>
+      </div>
+      <div class="meter">
+        <i class="breadth-meter" :style="{ width: metricWidth(summary.breadth_pct) }"></i>
+      </div>
+      <p>
+        {{
+          Number(summary.breadth_pct) >= 50
+            ? '净流入板块占多数，市场扩散度较高。'
+            : '净流出板块占多数，市场扩散度偏弱。'
+        }}
+      </p>
     </div>
-    <div class='strength-item'>
-      <div class='strength-heading'><span>拥挤程度</span><strong>{{ formatPct(summary.top_three_inflow_concentration_pct) }}</strong></div>
-      <div class='meter'><i class='crowding-meter' :style='{ width: metricWidth(summary.top_three_inflow_concentration_pct) }'></i></div>
-      <p>{{ Number(summary.top_three_inflow_concentration_pct) >= 65 ? '流入集中于少数主线，注意拥挤风险。' : '主线集中度适中，资金分布相对均衡。' }}</p>
+    <div class="strength-item">
+      <div class="strength-heading">
+        <span>拥挤程度</span
+        ><strong>{{ formatPct(summary.top_three_inflow_concentration_pct) }}</strong>
+      </div>
+      <div class="meter">
+        <i
+          class="crowding-meter"
+          :style="{ width: metricWidth(summary.top_three_inflow_concentration_pct) }"
+        ></i>
+      </div>
+      <p>
+        {{
+          Number(summary.top_three_inflow_concentration_pct) >= 65
+            ? '流入集中于少数主线，注意拥挤风险。'
+            : '主线集中度适中，资金分布相对均衡。'
+        }}
+      </p>
     </div>
   </section>
 </template>

@@ -12,16 +12,18 @@ export function useIntradayChart(props) {
   // 百分比基准：昨收优先，缺失时回退开盘并注明（FEF-13）
   const baseInfo = computed(() => intradayBase(props.dailyQuote))
   const sortedBars = computed(() => [...props.minuteData].sort(byKey('datetime')))
-  const priceSeries = computed(() => sortedBars.value.map(d => Number(d.close)))
+  const priceSeries = computed(() => sortedBars.value.map((d) => Number(d.close)))
   const extrema = computed(() => findLocalExtrema(priceSeries.value))
 
-  const chartOption = computed(() => buildIntradayOption({
-    bars: sortedBars.value,
-    prices: priceSeries.value,
-    extrema: extrema.value,
-    quote: props.dailyQuote,
-    base: baseInfo.value,
-  }))
+  const chartOption = computed(() =>
+    buildIntradayOption({
+      bars: sortedBars.value,
+      prices: priceSeries.value,
+      extrema: extrema.value,
+      quote: props.dailyQuote,
+      base: baseInfo.value,
+    }),
+  )
 
   const tableData = computed(() => {
     const q = props.dailyQuote || {}
@@ -40,9 +42,13 @@ export function useIntradayChart(props) {
     }
   })
 
-  const extremaList = computed(() => buildExtremaList({
-    bars: sortedBars.value, extrema: extrema.value, base: baseInfo.value,
-  }))
+  const extremaList = computed(() =>
+    buildExtremaList({
+      bars: sortedBars.value,
+      extrema: extrema.value,
+      base: baseInfo.value,
+    }),
+  )
 
   return { baseInfo, chartOption, tableData, extremaList }
 }

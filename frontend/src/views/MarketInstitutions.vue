@@ -3,11 +3,7 @@ import { ref, computed, onMounted, onUnmounted } from 'vue'
 import VChart from 'vue-echarts'
 import { use } from 'echarts/core'
 import { BarChart, LineChart } from 'echarts/charts'
-import {
-  TooltipComponent,
-  GridComponent,
-  LegendComponent,
-} from 'echarts/components'
+import { TooltipComponent, GridComponent, LegendComponent } from 'echarts/components'
 import { CanvasRenderer } from 'echarts/renderers'
 import MarketSubNav from '../components/MarketSubNav.vue'
 import PeriodPicker from '../components/PeriodPicker.vue'
@@ -19,7 +15,12 @@ import { createRequestGuard } from '../utils/requestGuard.js'
 import { trendColor } from '../constants/colors.js'
 import { NORTH_PERIODS } from '../constants/periods.js'
 // 图表 tooltip / 坐标轴配色统一取自 charts/theme.js（ARC-06）
-import { TOOLTIP_STYLE, AXIS_LABEL_COLOR, AXIS_LINE_COLOR, SPLIT_LINE_COLOR } from '../charts/theme.js'
+import {
+  TOOLTIP_STYLE,
+  AXIS_LABEL_COLOR,
+  AXIS_LINE_COLOR,
+  SPLIT_LINE_COLOR,
+} from '../charts/theme.js'
 
 // 显式组件名：App.vue 的 KeepAlive include 按它匹配，不依赖文件名推断（FEF-15）
 defineOptions({ name: 'MarketInstitutions' })
@@ -77,8 +78,8 @@ function setNorthPeriod(p) {
 const northChart = computed(() => {
   const items = north.value.items || []
   if (!items.length) return {}
-  const dates = items.map(i => i.date)
-  const nets = items.map(i => i.net_buy)
+  const dates = items.map((i) => i.date)
+  const nets = items.map((i) => i.net_buy)
   return {
     backgroundColor: 'transparent',
     tooltip: {
@@ -99,14 +100,16 @@ const northChart = computed(() => {
       axisLabel: { color: AXIS_LABEL_COLOR, fontSize: 11 },
       splitLine: { lineStyle: { color: SPLIT_LINE_COLOR } },
     },
-    series: [{
-      name: '北向净买额',
-      type: 'bar',
-      data: nets,
-      itemStyle: {
-        color: (p) => trendColor(p.value),
+    series: [
+      {
+        name: '北向净买额',
+        type: 'bar',
+        data: nets,
+        itemStyle: {
+          color: (p) => trendColor(p.value),
+        },
       },
-    }],
+    ],
   }
 })
 
@@ -166,8 +169,14 @@ async function loadDetail() {
   }
 }
 
-onMounted(() => { load(); loadNorth() })
-onUnmounted(() => { northGuard.abort(); detailGuard.abort() })
+onMounted(() => {
+  load()
+  loadNorth()
+})
+onUnmounted(() => {
+  northGuard.abort()
+  detailGuard.abort()
+})
 </script>
 
 <template>
@@ -204,12 +213,21 @@ onUnmounted(() => { northGuard.abort(); detailGuard.abort() })
       <p class="hint" v-if="!north.available">{{ north.message || '暂无北向序列' }}</p>
       <template v-else>
         <div class="north-summary" v-if="northSummary.days != null">
-          <span>区间交易日 <b>{{ northSummary.days }}</b></span>
-          <span>合计净买额 <b :class="pctClass(northSummary.total_net_buy)">
-            {{ northSummary.total_net_buy != null ? `${northSummary.total_net_buy} 亿` : '-' }}
-          </b></span>
-          <span>净流入 <b class="up">{{ northSummary.inflow_days ?? '-' }} 天</b></span>
-          <span>净流出 <b class="down">{{ northSummary.outflow_days ?? '-' }} 天</b></span>
+          <span
+            >区间交易日 <b>{{ northSummary.days }}</b></span
+          >
+          <span
+            >合计净买额
+            <b :class="pctClass(northSummary.total_net_buy)">
+              {{ northSummary.total_net_buy != null ? `${northSummary.total_net_buy} 亿` : '-' }}
+            </b></span
+          >
+          <span
+            >净流入 <b class="up">{{ northSummary.inflow_days ?? '-' }} 天</b></span
+          >
+          <span
+            >净流出 <b class="down">{{ northSummary.outflow_days ?? '-' }} 天</b></span
+          >
           <span v-if="northData?.window?.label" class="muted">{{ northData.window.label }}</span>
         </div>
         <v-chart
@@ -240,7 +258,9 @@ onUnmounted(() => { northGuard.abort(); detailGuard.abort() })
       <template v-if="stockDetail?.available">
         <p class="hint">
           {{ stockDetail.code }}
-          <span v-if="stockDetail.quarter_label"> · 机构明细季报 {{ stockDetail.quarter_label }}</span>
+          <span v-if="stockDetail.quarter_label">
+            · 机构明细季报 {{ stockDetail.quarter_label }}</span
+          >
         </p>
         <div class="detail-grid">
           <div class="table-wrap">
@@ -298,11 +318,19 @@ onUnmounted(() => { northGuard.abort(); detailGuard.abort() })
     </section>
 
     <div class="seg">
-      <button :class="{ active: tab === 'stock' }" :aria-pressed="tab === 'stock' ? 'true' : 'false'" @click="tab = 'stock'">
+      <button
+        :class="{ active: tab === 'stock' }"
+        :aria-pressed="tab === 'stock' ? 'true' : 'false'"
+        @click="tab = 'stock'"
+      >
         按股票
         <span v-if="byStock.quarter_label" class="tag">{{ byStock.quarter_label }}</span>
       </button>
-      <button :class="{ active: tab === 'org' }" :aria-pressed="tab === 'org' ? 'true' : 'false'" @click="tab = 'org'">
+      <button
+        :class="{ active: tab === 'org' }"
+        :aria-pressed="tab === 'org' ? 'true' : 'false'"
+        @click="tab = 'org'"
+      >
         按机构
         <span v-if="byOrg.report_date" class="tag">{{ byOrg.report_date }}</span>
       </button>
@@ -379,7 +407,8 @@ onUnmounted(() => { northGuard.abort(); detailGuard.abort() })
                   v-for="(s, j) in (row.sample_stocks || []).slice(0, 3)"
                   :key="j"
                   class="sample"
-                >{{ s.name || s.code }}</span>
+                  >{{ s.name || s.code }}</span
+                >
               </td>
             </tr>
           </tbody>
@@ -564,8 +593,12 @@ onUnmounted(() => { northGuard.abort(); detailGuard.abort() })
   word-break: break-all;
 }
 
-.data-table .up { color: var(--up); }
-.data-table .down { color: var(--down); }
+.data-table .up {
+  color: var(--up);
+}
+.data-table .down {
+  color: var(--down);
+}
 
 .link-btn {
   background: none;
@@ -599,7 +632,8 @@ onUnmounted(() => { northGuard.abort(); detailGuard.abort() })
   .detail-grid {
     grid-template-columns: 1fr;
   }
-}.section-head {
+}
+.section-head {
   display: flex;
   justify-content: space-between;
   align-items: center;
@@ -622,7 +656,11 @@ onUnmounted(() => { northGuard.abort(); detailGuard.abort() })
   margin-bottom: 10px;
 }
 
-.north-summary b { color: #eee; font-size: 13px; }
-.north-summary .muted { color: #8f8f9c; }
-
+.north-summary b {
+  color: #eee;
+  font-size: 13px;
+}
+.north-summary .muted {
+  color: #8f8f9c;
+}
 </style>

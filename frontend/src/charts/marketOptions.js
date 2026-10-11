@@ -12,16 +12,16 @@ import { TOOLTIP_STYLE, AXIS_LABEL_COLOR, AXIS_LINE_COLOR, SPLIT_LINE_COLOR } fr
 export function mainNetInYuan(mainHist) {
   const items = mainHist?.items || []
   const factor = mainHist?.source === 'eastmoney_hsgt_hist_north' ? 1e8 : 1
-  return items.map(i => (i.main_net == null ? null : i.main_net * factor))
+  return items.map((i) => (i.main_net == null ? null : i.main_net * factor))
 }
 
 /** 大盘主力净流入柱状图 */
 export function buildFundFlowOption(mainHist) {
   const items = mainHist?.items || []
   if (!items.length) return {}
-  const dates = items.map(i => String(i.date).slice(0, 10))
+  const dates = items.map((i) => String(i.date).slice(0, 10))
   const main = mainNetInYuan(mainHist)
-  const colors = main.map(v => trendColor(v))
+  const colors = main.map((v) => trendColor(v))
   return {
     backgroundColor: 'transparent',
     tooltip: {
@@ -41,12 +41,14 @@ export function buildFundFlowOption(mainHist) {
       axisLabel: { color: AXIS_LABEL_COLOR, fontSize: 11, formatter: formatYiAxis },
       splitLine: { lineStyle: { color: SPLIT_LINE_COLOR } },
     },
-    series: [{
-      name: '主力净流入',
-      type: 'bar',
-      data: main,
-      itemStyle: { color: (p) => colors[p.dataIndex] || FLAT },
-    }],
+    series: [
+      {
+        name: '主力净流入',
+        type: 'bar',
+        data: main,
+        itemStyle: { color: (p) => colors[p.dataIndex] || FLAT },
+      },
+    ],
   }
 }
 
@@ -60,16 +62,18 @@ export function buildActivityOption(activity) {
   return {
     backgroundColor: 'transparent',
     tooltip: { trigger: 'item', ...TOOLTIP_STYLE },
-    series: [{
-      type: 'pie',
-      radius: ['42%', '68%'],
-      center: ['50%', '52%'],
-      label: { color: '#ccc', fontSize: 12 },
-      data: [
-        { name: '上涨', value: up, itemStyle: { color: UP } },
-        { name: '下跌', value: down, itemStyle: { color: DOWN } },
-        { name: '平盘', value: flat, itemStyle: { color: FLAT } },
-      ],
-    }],
+    series: [
+      {
+        type: 'pie',
+        radius: ['42%', '68%'],
+        center: ['50%', '52%'],
+        label: { color: '#ccc', fontSize: 12 },
+        data: [
+          { name: '上涨', value: up, itemStyle: { color: UP } },
+          { name: '下跌', value: down, itemStyle: { color: DOWN } },
+          { name: '平盘', value: flat, itemStyle: { color: FLAT } },
+        ],
+      },
+    ],
   }
 }

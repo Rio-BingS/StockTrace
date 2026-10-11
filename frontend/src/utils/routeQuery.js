@@ -46,7 +46,7 @@ export function parseNationalEtfQuery(query = {}) {
 
 /** 返回 next 中与当前 refs 取值不同的键；refs 为 { key: Ref } */
 export function changedKeys(refs, next) {
-  return Object.keys(next).filter(k => String(refs[k].value) !== String(next[k]))
+  return Object.keys(next).filter((k) => String(refs[k].value) !== String(next[k]))
 }
 
 /** 把解析结果写回 refs */

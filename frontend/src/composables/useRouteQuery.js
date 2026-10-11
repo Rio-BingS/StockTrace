@@ -10,12 +10,15 @@ import { assignRefs, changedKeys } from '../utils/routeQuery.js'
  */
 export function useRouteQuery(routeName, refs, parse, onChange) {
   const route = useRoute()
-  watch(() => route.query, (query) => {
-    if (route.name !== routeName) return
-    const next = parse(query)
-    const keys = changedKeys(refs, next)
-    if (!keys.length) return
-    assignRefs(refs, next)
-    onChange(keys)
-  })
+  watch(
+    () => route.query,
+    (query) => {
+      if (route.name !== routeName) return
+      const next = parse(query)
+      const keys = changedKeys(refs, next)
+      if (!keys.length) return
+      assignRefs(refs, next)
+      onChange(keys)
+    },
+  )
 }

@@ -7,7 +7,12 @@ import { formatPct, formatNum, formatRate, pctClass } from '../utils/format.js'
 import { formatAmount } from '../utils/marketFormat.js'
 import { errorMessage } from '../utils/errorMessage.js'
 import { confirmDialog } from '../stores/feedback.js'
-import { buildConditions, conditionErrors, hasDetail, newCondition } from '../utils/screenerConditions.js'
+import {
+  buildConditions,
+  conditionErrors,
+  hasDetail,
+  newCondition,
+} from '../utils/screenerConditions.js'
 import { BOOL_FIELDS, ORDER_OPTIONS } from '../constants/screenerFields.js'
 import { extraColumnsFor, fmtCell } from '../utils/screenerColumns.js'
 import ScreenerConditionList from '../components/ScreenerConditionList.vue'
@@ -48,7 +53,12 @@ const tickers = new Map()
 function startTicker(counter) {
   stopTicker(counter)
   counter.value = 0
-  tickers.set(counter, setInterval(() => { counter.value += 1 }, 1000))
+  tickers.set(
+    counter,
+    setInterval(() => {
+      counter.value += 1
+    }, 1000),
+  )
 }
 function stopTicker(counter) {
   clearInterval(tickers.get(counter))
@@ -123,12 +133,14 @@ async function savePreset() {
 
 function applyPreset(p) {
   logic.value = p.spec.logic || 'all'
-  conditions.value = (p.spec.conditions || []).map(c => newCondition({
-    field: c.field,
-    op: c.op,
-    value: c.op === 'between' ? c.value?.[0] : c.value,
-    value2: c.op === 'between' ? c.value?.[1] : undefined,
-  }))
+  conditions.value = (p.spec.conditions || []).map((c) =>
+    newCondition({
+      field: c.field,
+      op: c.op,
+      value: c.op === 'between' ? c.value?.[0] : c.value,
+      value2: c.op === 'between' ? c.value?.[1] : undefined,
+    }),
+  )
   if (!conditions.value.length) {
     conditions.value = [newCondition()]
   }
@@ -142,15 +154,20 @@ function presetKey(p) {
 }
 
 function onPresetSelect(key) {
-  const p = presets.value.find(x => presetKey(x) === key)
+  const p = presets.value.find((x) => presetKey(x) === key)
   if (p) applyPreset(p)
 }
 
 async function deletePreset() {
   if (!selectedPreset.value || selectedPreset.value.startsWith('builtin:')) return
-  const p = presets.value.find(x => presetKey(x) === selectedPreset.value)
+  const p = presets.value.find((x) => presetKey(x) === selectedPreset.value)
   if (!p) return
-  const ok = await confirmDialog({ title: '删除预设', message: `删除预设「${p.name}」？`, confirmText: '删除', danger: true })
+  const ok = await confirmDialog({
+    title: '删除预设',
+    message: `删除预设「${p.name}」？`,
+    confirmText: '删除',
+    danger: true,
+  })
   if (!ok) return
   try {
     await presetApi.remove(p.id)
@@ -225,8 +242,10 @@ async function runComment() {
   startTicker(commentElapsed)
   try {
     // 后端只认代码并按代码从库里取数，最多 50 只（AIX-01）
-    const codes = results.value.slice(0, COMMENT_MAX_ROWS).map(r => ({ code: r.code }))
-    const res = await aiApi.screenerComment((query.value || '自定义条件').slice(0, 200), codes, { signal })
+    const codes = results.value.slice(0, COMMENT_MAX_ROWS).map((r) => ({ code: r.code }))
+    const res = await aiApi.screenerComment((query.value || '自定义条件').slice(0, 200), codes, {
+      signal,
+    })
     if (!isCurrent()) return
     comment.value = res.data.comment
     commentDisclaimer.value = aiDisclaimer(res.data)
@@ -255,14 +274,16 @@ function goDetail(row) {
   if (!hasDetail(row)) return
   router.push(`/stock/${row.stock_id}`)
 }
-
 </script>
 
 <template>
   <div class="page">
     <div class="page-header">
       <h1>条件选股</h1>
-      <p class="hint">基于自选股池最新日线数据筛选；AI 只负责把自然语言翻译成可复现的条件，数据全部来自真实落库行情。</p>
+      <p class="hint">
+        基于自选股池最新日线数据筛选；AI
+        只负责把自然语言翻译成可复现的条件，数据全部来自真实落库行情。
+      </p>
     </div>
 
     <div v-if="errorMsg" class="msg error">{{ errorMsg }}</div>
@@ -284,7 +305,9 @@ function goDetail(row) {
         </button>
         <button v-if="aiLoading" class="btn" @click="cancelAi">取消</button>
       </div>
-      <p v-if="appliedConditions" class="cond-preview mono">{{ JSON.stringify(appliedConditions) }}</p>
+      <p v-if="appliedConditions" class="cond-preview mono">
+        {{ JSON.stringify(appliedConditions) }}
+      </p>
     </div>
 
     <!-- 手动条件 -->
@@ -306,7 +329,8 @@ function goDetail(row) {
           <option value="asc">升序</option>
         </select>
         <button
-          class="btn primary" :disabled="manualLoading || invalidCount > 0"
+          class="btn primary"
+          :disabled="manualLoading || invalidCount > 0"
           :title="invalidCount ? `有 ${invalidCount} 个条件未填写完整` : ''"
           @click="runManual"
         >
@@ -322,8 +346,19 @@ function goDetail(row) {
             {{ p.builtin ? '★ ' + p.name : p.name }}
           </option>
         </select>
-        <button class="btn small" :disabled="!selectedPreset || selectedPreset.startsWith('builtin:')" @click="deletePreset">删除所选</button>
-        <input v-model="presetName" maxlength="50" placeholder="当前条件存为预设（名称）" class="preset-name" />
+        <button
+          class="btn small"
+          :disabled="!selectedPreset || selectedPreset.startsWith('builtin:')"
+          @click="deletePreset"
+        >
+          删除所选
+        </button>
+        <input
+          v-model="presetName"
+          maxlength="50"
+          placeholder="当前条件存为预设（名称）"
+          class="preset-name"
+        />
         <button class="btn small" @click="savePreset">保存预设</button>
       </div>
     </div>
@@ -342,40 +377,48 @@ function goDetail(row) {
       <div v-if="results.length > COMMENT_MAX_ROWS" class="hint">
         AI 点评只针对前 {{ COMMENT_MAX_ROWS }} 只
       </div>
-      <div v-if="resultDisclaimer" class="disclaimer">条件由 AI 翻译生成。{{ resultDisclaimer }}</div>
+      <div v-if="resultDisclaimer" class="disclaimer">
+        条件由 AI 翻译生成。{{ resultDisclaimer }}
+      </div>
       <!-- 窄屏下表格横向滚动，不撑宽整页（FEX-05） -->
       <div class="table-scroll">
-      <table class="result-table">
-        <thead>
-          <tr>
-            <th>代码</th>
-            <th>名称</th>
-            <th>涨跌幅</th>
-            <th>收盘价</th>
-            <th>振幅</th>
-            <th v-for="col in extraColumns" :key="col.key">{{ col.label }}</th>
-            <th>成交额</th>
-            <th>数据日期</th>
-            <th>操作</th>
-          </tr>
-        </thead>
-        <tbody>
-          <tr v-for="r in results" :key="r.code">
-            <td class="mono">{{ r.code }}</td>
-            <td>{{ r.name || '-' }}</td>
-            <td :class="pctClass(r.change_pct)">{{ formatPct(r.change_pct) }}</td>
-            <td>{{ formatNum(r.close_price) }}</td>
-            <td>{{ formatRate(r.high_low_pct) }}</td>
-            <td v-for="col in extraColumns" :key="col.key" :class="pctClass(col.bool ? null : r[col.key])">{{ fmtCell(r, col) }}</td>
-            <td>{{ formatAmount(r.turnover) }}</td>
-            <td>{{ r.trade_date }}</td>
-            <td class="actions">
-              <button v-if="hasDetail(r)" class="btn small" @click="goDetail(r)">详情</button>
-              <button class="btn small" @click="addToWatchlist(r)">+自选</button>
-            </td>
-          </tr>
-        </tbody>
-      </table>
+        <table class="result-table">
+          <thead>
+            <tr>
+              <th>代码</th>
+              <th>名称</th>
+              <th>涨跌幅</th>
+              <th>收盘价</th>
+              <th>振幅</th>
+              <th v-for="col in extraColumns" :key="col.key">{{ col.label }}</th>
+              <th>成交额</th>
+              <th>数据日期</th>
+              <th>操作</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr v-for="r in results" :key="r.code">
+              <td class="mono">{{ r.code }}</td>
+              <td>{{ r.name || '-' }}</td>
+              <td :class="pctClass(r.change_pct)">{{ formatPct(r.change_pct) }}</td>
+              <td>{{ formatNum(r.close_price) }}</td>
+              <td>{{ formatRate(r.high_low_pct) }}</td>
+              <td
+                v-for="col in extraColumns"
+                :key="col.key"
+                :class="pctClass(col.bool ? null : r[col.key])"
+              >
+                {{ fmtCell(r, col) }}
+              </td>
+              <td>{{ formatAmount(r.turnover) }}</td>
+              <td>{{ r.trade_date }}</td>
+              <td class="actions">
+                <button v-if="hasDetail(r)" class="btn small" @click="goDetail(r)">详情</button>
+                <button class="btn small" @click="addToWatchlist(r)">+自选</button>
+              </td>
+            </tr>
+          </tbody>
+        </table>
       </div>
       <div v-if="comment" class="comment" aria-live="polite">
         <h3>AI 点评</h3>

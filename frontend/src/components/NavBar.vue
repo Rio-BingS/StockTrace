@@ -16,11 +16,36 @@ const isSettings = computed(() => route.path.startsWith('/settings'))
       <RouterLink to="/">StockTrace</RouterLink>
     </div>
     <div class="nav-links">
-      <RouterLink to="/" :class="{ active: isWatchlist }" :aria-current="isWatchlist ? 'page' : null">自选</RouterLink>
-      <RouterLink to="/market" :class="{ active: isMarket }" :aria-current="isMarket ? 'page' : null">数据</RouterLink>
-      <RouterLink to="/detector" :class="{ active: isDetector }" :aria-current="isDetector ? 'page' : null">探测器</RouterLink>
-      <RouterLink to="/screener" :class="{ active: isScreener }" :aria-current="isScreener ? 'page' : null">选股</RouterLink>
-      <RouterLink to="/settings" :class="{ active: isSettings }" :aria-current="isSettings ? 'page' : null">设置</RouterLink>
+      <RouterLink
+        to="/"
+        :class="{ active: isWatchlist }"
+        :aria-current="isWatchlist ? 'page' : null"
+        >自选</RouterLink
+      >
+      <RouterLink
+        to="/market"
+        :class="{ active: isMarket }"
+        :aria-current="isMarket ? 'page' : null"
+        >数据</RouterLink
+      >
+      <RouterLink
+        to="/detector"
+        :class="{ active: isDetector }"
+        :aria-current="isDetector ? 'page' : null"
+        >探测器</RouterLink
+      >
+      <RouterLink
+        to="/screener"
+        :class="{ active: isScreener }"
+        :aria-current="isScreener ? 'page' : null"
+        >选股</RouterLink
+      >
+      <RouterLink
+        to="/settings"
+        :class="{ active: isSettings }"
+        :aria-current="isSettings ? 'page' : null"
+        >设置</RouterLink
+      >
     </div>
   </nav>
 </template>
@@ -33,7 +58,7 @@ const isSettings = computed(() => route.path.startsWith('/settings'))
   padding: 12px 24px;
   background: #1a1a2e;
   color: #fff;
-  box-shadow: 0 2px 8px rgba(0,0,0,0.15);
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.15);
 }
 
 .nav-brand a {
@@ -55,7 +80,9 @@ const isSettings = computed(() => route.path.startsWith('/settings'))
   margin-left: 8px;
   padding: 6px 12px;
   border-radius: 6px;
-  transition: color 0.2s, background 0.2s;
+  transition:
+    color 0.2s,
+    background 0.2s;
 }
 
 .nav-links a:hover {

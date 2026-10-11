@@ -17,9 +17,9 @@ export function extraColumnsFor(spec) {
   if (spec.order_by && !FIXED_COLS.has(spec.order_by) && !keys.includes(spec.order_by)) {
     keys.push(spec.order_by)
   }
-  return keys.map(k => ({
+  return keys.map((k) => ({
     key: k,
-    label: (FIELDS.find(f => f.key === k) || {}).label || k,
+    label: (FIELDS.find((f) => f.key === k) || {}).label || k,
     bool: BOOL_FIELDS.has(k),
   }))
 }
@@ -28,7 +28,15 @@ export function extraColumnsFor(spec) {
 const AMOUNT_FIELDS = new Set(['turnover', 'turnover_5d_avg', 'float_mv', 'total_mv'])
 // 非负比率：不加正号
 const RATE_FIELDS = new Set(['high_low_pct', 'turnover_rate'])
-const PCT_FIELDS = new Set(['change_pct', 'open_close_pct', 'pct_5d', 'pct_10d', 'pct_20d', 'pct_60d', 'pct_from_high_20d'])
+const PCT_FIELDS = new Set([
+  'change_pct',
+  'open_close_pct',
+  'pct_5d',
+  'pct_10d',
+  'pct_20d',
+  'pct_60d',
+  'pct_from_high_20d',
+])
 
 export function fmtCell(row, col) {
   const v = row[col.key]

@@ -8,9 +8,10 @@ import ConfirmDialog from './components/ConfirmDialog.vue'
 
 // KeepAlive 缓存名单来自路由 meta.keepAlive；页面组件用 defineOptions 显式声明同名，
 // 不依赖 SFC 文件名推断的组件名（FEF-15）
-const keepAliveNames = useRouter().getRoutes()
-  .filter(r => r.meta?.keepAlive)
-  .map(r => r.name)
+const keepAliveNames = useRouter()
+  .getRoutes()
+  .filter((r) => r.meta?.keepAlive)
+  .map((r) => r.name)
 
 // 首次访问自动弹出；页脚「免责声明」可随时重开
 const disclaimerRef = ref(null)

@@ -13,13 +13,17 @@ test('globalErrorText：取消的请求不提示，接口错误用统一文案�
 
 test('installGlobalErrorHandlers：挂上 Vue errorHandler 与 unhandledrejection', () => {
   const listeners = {}
-  globalThis.window = { addEventListener: (k, fn) => { listeners[k] = fn } }
+  globalThis.window = {
+    addEventListener: (k, fn) => {
+      listeners[k] = fn
+    },
+  }
   const origError = console.error
   console.error = () => {}
   try {
     const app = { config: {} }
     const seen = []
-    installGlobalErrorHandlers(app, msg => seen.push(msg))
+    installGlobalErrorHandlers(app, (msg) => seen.push(msg))
     app.config.errorHandler(new Error('boom'), null, 'render')
     listeners.unhandledrejection({ reason: { name: 'CanceledError', code: 'ERR_CANCELED' } })
     listeners.unhandledrejection({ reason: new Error('async boom') })

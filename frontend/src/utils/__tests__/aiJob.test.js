@@ -11,7 +11,11 @@ function seq(...jobs) {
 test('pollAiJob：排队→运行→完成，返回 result 并回调状态', async () => {
   const seen = []
   const result = await pollAiJob(
-    seq({ status: 'queued', queued_ahead: 1 }, { status: 'running' }, { status: 'done', result: { analysis: 'x' } }),
+    seq(
+      { status: 'queued', queued_ahead: 1 },
+      { status: 'running' },
+      { status: 'done', result: { analysis: 'x' } },
+    ),
     { intervalMs: 1, onStatus: (j) => seen.push(j.status) },
   )
   assert.deepEqual(result, { analysis: 'x' })
@@ -20,7 +24,9 @@ test('pollAiJob：排队→运行→完成，返回 result 并回调状态', asy
 
 test('pollAiJob：失败时抛出与 axios 同形的错误', async () => {
   await assert.rejects(
-    pollAiJob(seq({ status: 'failed', http_status: 502, result: { detail: '服务商返回错误' } }), { intervalMs: 1 }),
+    pollAiJob(seq({ status: 'failed', http_status: 502, result: { detail: '服务商返回错误' } }), {
+      intervalMs: 1,
+    }),
     (err) => err.response.status === 502 && err.response.data.detail === '服务商返回错误',
   )
 })

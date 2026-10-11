@@ -35,19 +35,32 @@ watch(current, (d, old) => {
   <Teleport to="body">
     <div v-if="current" class="overlay" @click.self="cancel">
       <div
-        ref="dialogRef" class="dialog" role="dialog" aria-modal="true"
-        :aria-labelledby="`dlg-title-${current.id}`" tabindex="-1"
+        ref="dialogRef"
+        class="dialog"
+        role="dialog"
+        aria-modal="true"
+        :aria-labelledby="`dlg-title-${current.id}`"
+        tabindex="-1"
       >
         <h2 :id="`dlg-title-${current.id}`">{{ current.title }}</h2>
         <p v-if="current.message" class="message">{{ current.message }}</p>
         <form @submit.prevent="confirm">
           <input
-            v-if="current.kind === 'prompt'" ref="inputRef" v-model="inputValue"
-            class="input" :placeholder="current.placeholder" :aria-label="current.title"
+            v-if="current.kind === 'prompt'"
+            ref="inputRef"
+            v-model="inputValue"
+            class="input"
+            :placeholder="current.placeholder"
+            :aria-label="current.title"
           />
           <div class="actions">
             <button type="button" class="btn" @click="cancel">{{ current.cancelText }}</button>
-            <button ref="confirmBtnRef" type="submit" class="btn primary" :class="{ danger: current.danger }">
+            <button
+              ref="confirmBtnRef"
+              type="submit"
+              class="btn primary"
+              :class="{ danger: current.danger }"
+            >
               {{ current.confirmText }}
             </button>
           </div>
