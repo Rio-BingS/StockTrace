@@ -104,6 +104,7 @@ const notice = ref('')
 const comment = ref('')
 const commentDisclaimer = ref('')
 const commentLoading = ref(false)
+const COMMENT_MAX_ROWS = 50
 
 // 结果表动态附加列：条件与排序里用到、且固定列没展示的指标
 const FIXED_COLS = new Set(['change_pct', 'close_price', 'high_low_pct', 'turnover'])
@@ -294,7 +295,9 @@ async function runComment() {
   comment.value = ''
   commentLoading.value = true
   try {
-    const res = await aiApi.screenerComment(query.value || '自定义条件', results.value)
+    // 后端只认代码并按代码从库里取数，最多 50 只（AIX-01）
+    const codes = results.value.slice(0, COMMENT_MAX_ROWS).map(r => ({ code: r.code }))
+    const res = await aiApi.screenerComment((query.value || '自定义条件').slice(0, 200), codes)
     comment.value = res.data.comment
     commentDisclaimer.value = aiDisclaimer(res.data)
   } catch (e) {
@@ -417,6 +420,9 @@ function fmtTurnover(v) {
         <button class="btn" :disabled="commentLoading" @click="runComment">
           {{ commentLoading ? 'AI 点评中…' : 'AI 点评' }}
         </button>
+      </div>
+      <div v-if="results.length > COMMENT_MAX_ROWS" class="hint">
+        AI 点评只针对前 {{ COMMENT_MAX_ROWS }} 只
       </div>
       <div v-if="resultDisclaimer" class="disclaimer">条件由 AI 翻译生成。{{ resultDisclaimer }}</div>
       <table class="result-table">
