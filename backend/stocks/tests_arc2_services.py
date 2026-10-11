@@ -146,3 +146,41 @@ class LocalDateTodayTests(SimpleTestCase):
             sentiment._sh_margin_rows()
         self.assertEqual(sse.call_args.kwargs['end_date'], '20260908')
         self.assertEqual(sse.call_args.kwargs['start_date'], '20260818')
+
+
+class TrySourcesLoggingTests(SimpleTestCase):
+    """全部源只返回空时不打 ERROR；有异常时 ERROR 带上最后一个真实错误"""
+
+    def _src(self, name, behavior):
+        from stocks.datasources import DataSource
+
+        class _S(DataSource):
+            def fetch_daily(self, *a):
+                if behavior == 'raise':
+                    raise RuntimeError(f'{name} boom')
+                return pd.DataFrame()
+
+        s = _S()
+        s.name = name
+        return s
+
+    def test_all_empty_logs_warning_not_error(self):
+        from stocks.datasources import _try_sources
+
+        with patch('stocks.datasources.chain.time.sleep'), \
+                self.assertLogs('stocks.datasources.chain', level='WARNING') as cm:
+            res = _try_sources('fetch_daily', '600000', '20260901', '20260901',
+                               sources=[self._src('e1', 'empty'), self._src('e2', 'empty')])
+        self.assertEqual(res, (None, None))
+        self.assertFalse([r for r in cm.records if r.levelname == 'ERROR'])
+        self.assertTrue(any('均返回空数据' in m for m in cm.output))
+        self.assertFalse(any('None' in m for m in cm.output))
+
+    def test_exception_logs_error_with_last_error(self):
+        from stocks.datasources import _try_sources
+
+        with patch('stocks.datasources.chain.time.sleep'), \
+                self.assertLogs('stocks.datasources.chain', level='ERROR') as cm:
+            _try_sources('fetch_daily', '600000', '20260901', '20260901',
+                         sources=[self._src('x1', 'raise'), self._src('x2', 'empty')])
+        self.assertTrue(any('最后错误 [x1]: x1 boom' in m for m in cm.output))

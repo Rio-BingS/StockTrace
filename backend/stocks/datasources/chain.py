@@ -28,10 +28,21 @@ def _stock_backoff(attempt):
     return min(2 ** attempt, 2)
 
 
-def _source_call(source, method_name):
-    """把数据源方法包成 SourceChain 候选；分钟线按请求区间过滤（DAT-01）"""
+def _source_call(source, method_name, attempts=None):
+    """把数据源方法包成 SourceChain 候选；分钟线按请求区间过滤（DAT-01）
+
+    attempts：可选列表，每次真正调用追加 (源名, 异常或 None)，供 _try_sources
+    在全部失败时区分「有源抛异常」与「都只是返回空」。
+    """
     def call(*args, **kwargs):
-        result = getattr(source, method_name)(*args, **kwargs)
+        try:
+            result = getattr(source, method_name)(*args, **kwargs)
+        except Exception as e:
+            if attempts is not None:
+                attempts.append((source.name, e))
+            raise
+        if attempts is not None:
+            attempts.append((source.name, None))
         if method_name == 'fetch_minute' and len(args) >= 3:
             # 按请求区间过滤；过滤后为空（源返回的全是别的日子）视为该源无数据
             before = len(result) if isinstance(result, pd.DataFrame) else 0
@@ -62,17 +73,29 @@ def _try_sources(method_name, *args, sources=None, **kwargs):
     source_list = sources if sources is not None else DATA_SOURCES
     by_name = {}
     candidates = []
+    attempts = []
     for source in source_list:
         chain_name = f'stock_{source.name}_{method_name}'
         by_name[chain_name] = source
-        candidates.append((_source_call(source, method_name), chain_name))
+        candidates.append((_source_call(source, method_name, attempts), chain_name))
     chain = SourceChain(
         backoff=_stock_backoff, empty_is_failure=False,
         sleep=lambda sec: time.sleep(sec),  # 运行时取 time.sleep（测试可打桩）
     )
     result, chain_name = chain.run(candidates, *args, **kwargs)
     if chain_name is None:
-        logger.error(f"所有数据源获取 {method_name} 均失败或无数据")
+        errors = [(name, e) for name, e in attempts if e is not None]
+        if errors:
+            name, err = errors[-1]
+            logger.error(
+                f"所有数据源获取 {method_name} 均失败（{len(errors)} 个源抛异常），"
+                f"最后错误 [{name}]: {err}"
+            )
+        elif attempts:
+            # 源都正常返回、只是没有数据（如该区间无成交、北交所不支持）：不是故障
+            logger.warning(f"所有数据源获取 {method_name} 均返回空数据（无异常）")
+        else:
+            logger.warning(f"所有数据源获取 {method_name} 均处于冷却，本次未请求上游")
         return None, None
     source = by_name[chain_name]
     logger.info(f"数据源 {source.name} 获取 {method_name} 成功")
