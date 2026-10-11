@@ -68,3 +68,48 @@ class SectorBasisTests(SimpleTestCase):
     def test_10d_non_net_sort_rejected(self):
         with self.assertRaisesMessage(ValueError, '仅支持按净额排序'):
             market.get_sector_rotation(board='industry', period='10d', sort='leader_pct')
+
+
+class InstitutionQuarterTests(SimpleTestCase):
+    """DAT-16：「最近季度」只选披露截止日已过的报告期。"""
+
+    def test_latest_disclosed_quarter_by_deadline(self):
+        from datetime import date
+
+        from .market.institutions import _latest_disclosed_quarter, _recent_report_quarters
+
+        cases = {
+            date(2026, 10, 11): (2026, 2),   # 三季报 10/31 前仍在披露
+            date(2026, 10, 31): (2026, 2),   # 截止日当天仍未完
+            date(2026, 11, 1): (2026, 3),
+            date(2026, 8, 31): (2026, 1),
+            date(2026, 9, 1): (2026, 2),
+            date(2026, 2, 15): (2025, 3),    # 年报 4/30 前
+            date(2026, 4, 30): (2025, 3),
+            date(2026, 5, 1): (2026, 1),     # 年报与一季报同日截止
+        }
+        for today, expected in cases.items():
+            self.assertEqual(_latest_disclosed_quarter(today), expected, today)
+        self.assertEqual(
+            _recent_report_quarters(3, today=date(2026, 5, 1)), ['20261', '20254', '20253'],
+        )
+
+    def test_hold_stocks_skips_quarter_in_disclosure(self):
+        from datetime import date
+
+        df = pd.DataFrame([{'证券代码': '600000', '证券简称': '浦发银行', '机构数': 10}])
+        with patch('stocks.market.institutions.timezone.localdate', return_value=date(2026, 10, 11)), \
+                patch('akshare.stock_institute_hold', return_value=df) as hold:
+            data = market.institutions.fetch_institute_hold_stocks()
+        hold.assert_called_once_with(symbol='20262')
+        self.assertEqual(data['quarter'], '20262')
+
+    def test_shareholder_changes_never_request_future_dates(self):
+        from datetime import date
+
+        with patch('stocks.market.institutions.timezone.localdate', return_value=date(2026, 2, 15)), \
+                patch('akshare.stock_gdfx_free_holding_change_em', return_value=pd.DataFrame()) as chg:
+            market.institutions.fetch_institution_shareholder_changes()
+        dates = [c.kwargs['date'] for c in chg.call_args_list]
+        self.assertEqual(dates[0], '20250930')
+        self.assertTrue(all(d <= '20250930' for d in dates))

@@ -2,10 +2,11 @@
 
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import date
 
 import akshare as ak
 import pandas as pd
+from django.utils import timezone
 
 from ._cache import _cache_get, _cache_set, _now_str, _stale_or, _to_float
 from ._sources import _safe_df_call, get_source_health
@@ -15,24 +16,41 @@ from ._sources import _safe_df_call, get_source_health
 NORTH_DISCLOSURE_MSG = '北向净买额自 2024-08 披露调整后上游不再提供，暂无可展示数据'
 
 
-def _recent_report_quarters(n=8):
-    """生成候选季报代码：YYYY + 季度(1-4)，从当前往前推。"""
-    now = datetime.now()
-    y, m = now.year, now.month
-    q = (m - 1) // 3 + 1
-    # 季报披露滞后，先从上一完整季开始
-    q -= 1
-    if q <= 0:
-        q = 4
-        y -= 1
-    out = []
-    for _ in range(n):
-        out.append(f'{y}{q}')
+# 定期报告法定披露截止日（DAT-16）：季度 -> (相对报告期年份的偏移, 月, 日)。
+# 一季报 4/30、半年报 8/31、三季报 10/31、年报次年 4/30；截止日（含）之前该季
+# 仍在陆续披露，上游只给出部分样本，不能当作「最新季度」
+_REPORT_DEADLINES = {1: (0, 4, 30), 2: (0, 8, 31), 3: (0, 10, 31), 4: (1, 4, 30)}
+_QUARTER_END_MD = {1: '0331', 2: '0630', 3: '0930', 4: '1231'}
+
+
+def _latest_disclosed_quarter(today=None):
+    """披露截止日已过的最近报告期 (year, quarter)；today 缺省取本地日期。"""
+    today = today or timezone.localdate()
+    y, q = today.year, (today.month - 1) // 3 + 1
+    while True:
+        dy, m, d = _REPORT_DEADLINES[q]
+        if today > date(y + dy, m, d):
+            return y, q
         q -= 1
         if q <= 0:
-            q = 4
-            y -= 1
+            q, y = 4, y - 1
+
+
+def _recent_disclosed_quarters(n, today=None):
+    """从最近一个已披露完毕的报告期往前推 n 个，返回 [(year, quarter)]（近→远）。"""
+    y, q = _latest_disclosed_quarter(today)
+    out = []
+    for _ in range(n):
+        out.append((y, q))
+        q -= 1
+        if q <= 0:
+            q, y = 4, y - 1
     return out
+
+
+def _recent_report_quarters(n=8, today=None):
+    """候选季报代码：YYYY + 季度(1-4)，从最近已披露完毕的季度往前推（DAT-16）。"""
+    return [f'{y}{q}' for y, q in _recent_disclosed_quarters(n, today)]
 
 
 def _quarter_label(code):
@@ -145,18 +163,9 @@ def fetch_institution_shareholder_changes(limit=40, ttl=900):
     if cached is not None:
         return cached
 
-    # 用最近季报日
-    now = datetime.now()
-    y = now.year
-    # 候选报告期
-    candidates = []
-    for yy in (y, y - 1):
-        for md in ('0930', '0630', '0331', '1231'):
-            if yy == y and md == '1231':
-                continue
-            candidates.append(f'{yy}{md}')
-    # 按时间近→远
-    candidates = sorted(set(candidates), reverse=True)[:6]
+    # 候选报告期：只取披露截止日已过的季度，近→远（DAT-16；不再包含未来日期或
+    # 尚在披露中的季度）
+    candidates = [f'{y}{_QUARTER_END_MD[q]}' for y, q in _recent_disclosed_quarters(6)]
 
     df = None
     date_used = None
