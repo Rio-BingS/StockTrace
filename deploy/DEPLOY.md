@@ -6,41 +6,21 @@ VPS 上的 `/opt/stocktrace` 是本仓库的 git 工作副本，按发布标签�
 
 ---
 
-## 0. 相对 v1.01 / 线上旧版的变更
+## 目录
 
-### Bug
+| 节 | 内容 |
+|---|---|
+| 1 | 首次部署（Ubuntu 22.04） |
+| 2 | 升级与回滚 |
+| 3 | 运维命令与调度器 |
+| 4 | 低配建议 |
+| 5 | HTTPS 回源、限流、防火墙、systemd 沙箱 |
+| 6 | 数据库备份与恢复演练 |
+| 7 | 依赖锁定与升级 |
+| 8 | 日志与健康检查 |
+| 9 | 密钥管理 |
 
-- 看板「涨跌价」不再误加 `%`
-- 日 K 成交量柱（注册 ECharts `BarChart`）
-- 详情路由换 `id` 会重新加载
-- Gunicorn 下 APScheduler：文件锁单实例 + 不再只靠 `RUN_MAIN`
-
-### 功能
-
-- 拉取改为**后台线程**，接口立即返回；`GET /api/stocks/fetch-status/` 可轮询
-- 添加/恢复自选后**自动轻量拉行情**（补名称 + 增量日线 + 近 2 日分钟）
-- 前端 `utils/format.js` 统一格式化
-- **市场数据一级页「数据」** + 二级专题（需前端重新 build，Nginx 已配置 SPA `try_files`）：
-  - `/market` 首页（指数 + 北向/情绪摘要）
-  - `/market/trend` 全市场走势
-  - `/market/sectors` 板块资金轮动
-  - `/market/institutions` 机构持仓（季报/股东变动/北向；`?code=` 个股明细）
-  - `/market/national-etf` 国家队相关 ETF 观察（研究名单，非官方持仓）
-  - `/market/etf-radar` ETF 份额雷达
-  - API：`GET /api/market/`、`/api/market/trend|sectors|institutions|national-etf|etf-radar/`
-  - 单只 ETF：`GET /api/market/etfs/<code>/?range=1m|3m|6m|1y`
-- 市场外网：源冷却 + 多源 failover（主力资金历史可降级北向序列）
-
-### 1H2G 性能
-
-- Dashboard **2 次查询**拼最新行情（去掉 N+1）
-- 日线按「最近一根 bar + 重叠」增量；无历史才 bootstrap ~365 天
-- 添加后 / 手动刷新默认 **light**（少分钟）；`full=1` 才更全
-- 调度：**08:50** 增量日线 · **09–14 */5** 分钟 · **15:10** 收盘 · **15:30–21:00 */30** 晚到行情缓存预热（仅交易日，不写新的市场历史表）
-- 交易日日历 / A 股列表缓存；名称优先 BaoStock/新浪（避免东财全市场快照）
-- Gunicorn 默认 **1 worker × 2 threads**（`gunicorn_config.py`）
-- 看板轮询 **60s**；拉取状态轮询 3s
-- 详情页用 `GET /stocks/:id/` 不再拉整表
+历次变更见 `git log` 与发布标签说明，本文只描述当前版本的部署方式（OPS-09：原「相对 v1.01 的变更」一节已过时，已删除）。
 
 ---
 
@@ -250,13 +230,14 @@ sudo systemctl status stocktrace
 sudo systemctl restart stocktrace
 sudo journalctl -u stocktrace -f
 
-# 手动拉数（在 venv 内；先加载环境变量）
+# 手动拉数（root shell 里先加载环境变量，再以 www 运行；有失败时退出码非 0，REL-09）
 cd /opt/stocktrace/backend
 set -a; source /etc/stocktrace/env; set +a
-python manage.py fetch_stock_data --all
+sudo -u www -E venv/bin/python manage.py fetch_stock_data --all            # 轻量：分钟线近 2 个交易日
+sudo -u www -E venv/bin/python manage.py fetch_stock_data --all --days 5   # 分钟线回溯 5 个交易日（上限 5）
 
 # 只读校验 ETF/板块上游字段与单位；不写数据库、不修改缓存
-python manage.py validate_market_sources
+sudo -u www -E venv/bin/python manage.py validate_market_sources
 
 # 调度器（独立进程，REL-01）
 sudo systemctl status stocktrace-scheduler
@@ -273,8 +254,11 @@ sudo systemctl stop stocktrace-scheduler
 - 现在由 `python manage.py run_scheduler`（`stocktrace-scheduler.service`）前台运行；停止时 SIGTERM，
   等正在执行的任务结束再退出（`TimeoutStopSec=300`）。重启 Web（发版、改 nginx）不再影响调度。
 - 所有任务显式 `timezone=Asia/Shanghai`、`coalesce=True`、`max_instances=1`，并设置 misfire 宽限
-  （盘中 5 分钟任务 240s，08:50 预热 1800s，15:10 汇总 / 17:15 探测器 3600s，收盘后预热 900s）。
+  （盘中 5 分钟任务 240s，08:50 预热 1800s，15:10 汇总 3600s，探测器 1500s，收盘后预热 900s）。
   宽限内晚到的任务仍会执行（各任务自带交易日 / 收盘时间守卫）。
+- 任务链逐步容错（REL-08）：15:10 汇总里任一步（日线、提醒、AI 流水清理、快照清理）异常只记带堆栈的
+  日志，不影响后续步骤。探测器 17:15 先检查当日 `industry_ff`/`market_ff` 快照，缺失则在
+  17:45/18:15/18:45 重试，最后一次降级照跑；当日已有成功扫描记录时重试点直接跳过。
 - 锁文件与心跳文件在 `/run/stocktrace/`（`RuntimeDirectory=`，属主 www，开机清空，不会残留 root 属主的锁）。
   拿不到锁时 run_scheduler 每 60s 重试并记 WARNING。
 - 兼容旧部署：`STOCKTRACE_RUN_SCHEDULER_IN_WEB=1` 时仍在 Web 进程内启动（同一把锁，二者不会同时跑）。
