@@ -8,12 +8,6 @@ from rest_framework.decorators import action, api_view
 from rest_framework.response import Response
 
 from ..models import AiCallLog, AiProvider, Stock
-from ..ai_serializers import (
-    AiProviderSerializer,
-    ScreenerAiInputSerializer,
-    ScreenerCommentInputSerializer,
-    first_error_text,
-)
 from . import jobs as ai_jobs
 from .llm import (
     LlmClient, LlmError, can_fallback, enabled_providers, hold_ai_slot, provider_ordering,
@@ -25,6 +19,12 @@ from .prompts import (
     build_comment_messages,
 )
 from ..screener.engine import ConditionError, run_screener_with_meta
+from .serializers import (
+    AiProviderSerializer,
+    ScreenerAiInputSerializer,
+    ScreenerCommentInputSerializer,
+    first_error_text,
+)
 from .throttle import (
     PROVIDER_TEST_PURPOSE,
     cancel_call,
