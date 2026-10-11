@@ -55,11 +55,23 @@ _calendar_fail_until = {'sina': 0, 'baostock': 0}
 # 工具函数
 # ============================================================
 
+def _exchange(code):
+    """6位代码所属交易所（DAT-12）：'sh' / 'sz' / 'bj'
+
+    北交所 92/4/8 开头（先于 9 判断）；沪市 5（ETF/LOF）/6/9（B 股）开头；其余深市。
+    """
+    code = str(code).zfill(6)
+    if code.startswith(('92', '4', '8')):
+        return 'bj'
+    if code.startswith(('5', '6', '9')):
+        return 'sh'
+    return 'sz'
+
+
 def _to_shsz_prefix(code):
-    """6位代码转为 sh/sz 前缀格式: 600000→sh600000, 000001→sz000001"""
+    """6位代码转为交易所前缀格式: 600000→sh600000, 000001→sz000001, 830799→bj830799"""
     code = code.zfill(6)
-    prefix = 'sh' if code.startswith(('6', '9')) else 'sz'
-    return f'{prefix}{code}'
+    return f'{_exchange(code)}{code}'
 
 
 def _to_numeric_cols(df, cols=('开盘', '收盘', '最高', '最低', '成交量', '成交额')):
@@ -295,14 +307,19 @@ class BaoStockSource(DataSource):
 
     @staticmethod
     def _format_code(code):
-        """6位代码转 BaoStock 格式: sz.000001, sh.600000"""
+        """6位代码转 BaoStock 格式: sz.000001, sh.600000；北交所不支持返回 None"""
         code = code.zfill(6)
-        prefix = 'sh' if code.startswith(('6', '9')) else 'sz'
+        prefix = _exchange(code)
+        if prefix == 'bj':
+            return None
         return f'{prefix}.{code}'
 
     def fetch_daily(self, symbol, start_date, end_date):
         import baostock as bs
         bs_code = self._format_code(symbol)
+        if bs_code is None:
+            # BaoStock 不支持北交所，跳过该源（DAT-12）
+            return None
         # start_date/end_date 格式: YYYYMMDD → YYYY-MM-DD
         sd = f'{start_date[:4]}-{start_date[4:6]}-{start_date[6:8]}'
         ed = f'{end_date[:4]}-{end_date[4:6]}-{end_date[6:8]}'
@@ -339,6 +356,8 @@ class BaoStockSource(DataSource):
     def fetch_minute(self, symbol, start_dt, end_dt):
         import baostock as bs
         bs_code = self._format_code(symbol)
+        if bs_code is None:
+            return None
         # start_dt 格式: 'YYYY-MM-DD HH:MM:SS'，提取日期
         date_str = start_dt[:10] if ' ' in start_dt else start_dt
 
@@ -375,6 +394,8 @@ class BaoStockSource(DataSource):
     def fetch_stock_name(self, code):
         import baostock as bs
         bs_code = self._format_code(code)
+        if bs_code is None:
+            return None
         bs.login()
         try:
             rs = bs.query_stock_basic(code=bs_code)

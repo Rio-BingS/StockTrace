@@ -5,7 +5,7 @@ from decimal import Decimal
 from unittest.mock import patch
 
 import pandas as pd
-from django.test import TestCase
+from django.test import SimpleTestCase, TestCase
 from django.utils import timezone
 
 from . import services
@@ -79,3 +79,29 @@ class PricePrecisionTests(_NoSleep, TestCase):
         }).data
         self.assertEqual(data['close_price'], '1.235')
         self.assertEqual(data['change_diff'], '0.005')
+
+
+class ExchangeRouteTests(SimpleTestCase):
+    """DAT-12：沪市 ETF（5 开头）与北交所前缀路由。"""
+
+    def test_exchange(self):
+        cases = {
+            '600000': 'sh', '510300': 'sh', '588000': 'sh', '900901': 'sh',
+            '000001': 'sz', '300750': 'sz', '159915': 'sz', '200002': 'sz',
+            '920001': 'bj', '430047': 'bj', '830799': 'bj', '871981': 'bj',
+        }
+        for code, ex in cases.items():
+            self.assertEqual(services._exchange(code), ex, code)
+        self.assertEqual(services._to_shsz_prefix('510300'), 'sh510300')
+        self.assertEqual(services._to_shsz_prefix('830799'), 'bj830799')
+
+    def test_baostock_skips_bj(self):
+        src = services.BaoStockSource()
+        self.assertEqual(src._format_code('510300'), 'sh.510300')
+        self.assertIsNone(src._format_code('830799'))
+        with patch('baostock.login') as login:
+            self.assertIsNone(src.fetch_daily('830799', '20260901', '20260902'))
+            self.assertIsNone(src.fetch_minute('830799', '2026-09-02 09:30:00',
+                                               '2026-09-02 15:00:00'))
+            self.assertIsNone(src.fetch_stock_name('830799'))
+        login.assert_not_called()
