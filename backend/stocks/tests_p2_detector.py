@@ -896,3 +896,56 @@ class ScreenerCrossSectionTests(TestCase):
             ctxs, _ = _latest_contexts()
         self.assertEqual(len(ctxs), 7)
         self.assertEqual(len(ctxs[0][1]['bars']), 30)
+
+
+@patch('stocks.ai.valuation.fetch_valuation_map', new=lambda codes: {})
+class ScreenerIndicatorConventionTests(TestCase):
+    """ALG-12：MACD 预热 ≥120 根、BOLL 总体标准差、新高新低看最高/最低价且并列不算。"""
+
+    def setUp(self):
+        from datetime import date
+
+        from .models import Stock
+
+        self.start = date(2026, 1, 1)
+        self.stock = Stock.objects.create(code='600010', name='指标')
+
+    def _values(self):
+        from .ai.screener import FIELDS, _latest_contexts
+
+        ctxs, _ = _latest_contexts()
+        ctx = ctxs[0][1]
+        return {k: fn(ctx) for k, (_, fn, _) in FIELDS.items()}
+
+    def test_macd_needs_120_bars(self):
+        _screener_bars(self.stock, [10.0 + i * 0.01 for i in range(60)], self.start)
+        self.assertIsNone(self._values()['macd_dif'])
+        _screener_bars(self.stock, [10.6 + i * 0.01 for i in range(60)], self.start + timedelta(days=60))
+        self.assertIsNotNone(self._values()['macd_dif'])
+
+    def test_boll_uses_population_std(self):
+        from .ai import screener
+
+        # 取 x 使两种口径结论不同：总体口径（÷N）std 更小 → 上轨更低 → 触及；
+        # 样本口径（÷N-1）上轨更高 → 不触及
+        closes = [9.8, 10.2] * 9 + [10.0, 10.455]
+        _screener_bars(self.stock, closes, self.start)
+        mid = sum(closes) / 20
+        pop = (sum((c - mid) ** 2 for c in closes) / 20) ** 0.5
+        samp = (sum((c - mid) ** 2 for c in closes) / 19) ** 0.5
+        self.assertTrue(mid + 2 * pop <= closes[-1] < mid + 2 * samp)
+        self.assertEqual(screener._BOLL_DDOF, 0)
+        self.assertEqual(self._values()['above_boll_upper'], 1)
+
+    def test_new_high_uses_high_price_and_ties_are_not_new(self):
+        closes = [10.0] * 20
+        highs = [10.5] * 19 + [10.6]
+        _screener_bars(self.stock, closes, self.start, highs=highs)
+        values = self._values()
+        self.assertEqual(values['new_high_20d'], 1)  # 收盘持平，但最高价创新高
+
+    def test_tie_with_previous_high_is_not_new_high(self):
+        closes = [10.0] * 19 + [10.5]
+        highs = [10.5] * 20
+        _screener_bars(self.stock, closes, self.start, highs=highs)
+        self.assertEqual(self._values()['new_high_20d'], 0)

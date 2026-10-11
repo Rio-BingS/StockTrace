@@ -99,16 +99,22 @@ def _ma_gt(short, long):
 
 
 def _new_extreme(n, high):
-    """最新收盘创最近 n 根（含当日）收盘的新高/新低。"""
+    """当日最高价/最低价创最近 n 根（含当日）的新高/新低（ALG-12）。
+
+    行情软件的「创 N 日新高」看最高价而不是收盘价；并列不算新高（必须严格
+    高于此前 n-1 根的最高价，新低对称）。
+    """
     def getter(ctx):
-        closes = _closes(ctx, n)
-        if not closes:
+        bars = ctx['bars'][-n:]
+        if len(bars) < n:
             return None
-        last = closes[-1]
-        rest = closes[:-1]
+        vals = [_f(b.high_price if high else b.low_price) for b in bars]
+        if any(v is None for v in vals):
+            return None
+        last, rest = vals[-1], vals[:-1]
         if high:
-            return 1 if last >= max(rest) else 0
-        return 1 if last <= min(rest) else 0
+            return 1 if last > max(rest) else 0
+        return 1 if last < min(rest) else 0
     return getter
 
 
@@ -171,9 +177,15 @@ def _up_days(ctx):
 # 历史根数不足以稳定收敛时不给值（None），不硬算。
 # ============================================================
 
-_MACD_MIN_BARS = 35   # EMA26 + DEA9 的最低预热
+# MACD 预热（ALG-12）：EMA 以首值为种子，35 根时 EMA26 的种子残差仍约 7%，
+# 金叉/零轴判定可能与行情软件不一致；120 根时残差 < 0.01%
+_MACD_MIN_BARS = 120
 _KDJ_MIN_BARS = 12    # RSV9 + K/D 递推预热
 _BOLL_N = 20
+# BOLL 标准差口径（ALG-12）：ddof=0 即总体标准差（除以 N），按终审报告的建议
+# 与通达信 BOLL 一致；各软件口径不一（部分资料称通达信 STD 为样本标准差），
+# 改口径只需改这里
+_BOLL_DDOF = 0
 
 
 def _ema_series(values, n):
@@ -269,7 +281,7 @@ def _indicators(ctx):
     boll_closes = closes[-_BOLL_N:]
     if len(boll_closes) == _BOLL_N and None not in boll_closes:
         mid = sum(boll_closes) / _BOLL_N
-        std = (sum((c - mid) ** 2 for c in boll_closes) / _BOLL_N) ** 0.5
+        std = (sum((c - mid) ** 2 for c in boll_closes) / (_BOLL_N - _BOLL_DDOF)) ** 0.5
         last = closes[-1]
         ind['above_boll_mid'] = 1 if last >= mid else 0
         ind['above_boll_upper'] = 1 if last >= mid + 2 * std else 0
@@ -343,10 +355,10 @@ FIELDS = {
     'above_ma60': ('收盘站上60日线', _above_ma(60), '1是/0否'),
     'ma5_gt_ma10': ('5日线在10日线上方', _ma_gt(5, 10), '1是/0否'),
     'ma5_gt_ma20': ('5日线在20日线上方', _ma_gt(5, 20), '1是/0否'),
-    'new_high_20d': ('创20日新高', _new_extreme(20, high=True), '1是/0否'),
-    'new_low_20d': ('创20日新低', _new_extreme(20, high=False), '1是/0否'),
-    'new_high_60d': ('创60日新高', _new_extreme(60, high=True), '1是/0否'),
-    'new_low_60d': ('创60日新低', _new_extreme(60, high=False), '1是/0否'),
+    'new_high_20d': ('创20日新高', _new_extreme(20, high=True), '1是/0否，最高价严格高于前19日'),
+    'new_low_20d': ('创20日新低', _new_extreme(20, high=False), '1是/0否，最低价严格低于前19日'),
+    'new_high_60d': ('创60日新高', _new_extreme(60, high=True), '1是/0否，最高价严格高于前59日'),
+    'new_low_60d': ('创60日新低', _new_extreme(60, high=False), '1是/0否，最低价严格低于前59日'),
     'ma10_gt_ma20': ('10日线在20日线上方', _ma_gt(10, 20), '1是/0否'),
     # ---- 技术指标（由落库日线现算，国内常用口径） ----
     'macd_dif': ('MACD DIF', _macd('macd_dif'), '值'),

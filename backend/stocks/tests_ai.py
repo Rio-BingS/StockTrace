@@ -635,7 +635,7 @@ class ScreenerTechIndicatorTests(TestCase):
 
     def test_macd_bullish_uptrend(self):
         # 单调上行序列：DIF>0、DIF>DEA、金叉发生在早期（此处只验多头态）
-        _make_bars(self.stock, [10.0 + i * 0.1 for i in range(40)])
+        _make_bars(self.stock, [10.0 + i * 0.1 for i in range(130)])  # MACD 预热需 ≥120 根（ALG-12）
         rows = run_screener({'logic': 'all', 'conditions': [
             {'field': 'macd_dif_gt_zero', 'op': 'eq', 'value': 1},
             {'field': 'macd_dif_gt_dea', 'op': 'eq', 'value': 1},
