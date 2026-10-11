@@ -326,3 +326,220 @@ class DetectorSignalCleanMigrationTests(TransactionTestCase):
         self.assertEqual((fixed.score, fixed.cycles, fixed.severity, fixed.status), (100.0, 1, 'low', 'watching'))
         self.assertEqual(Sig.objects.get(id=neg.id).score, 0.0)
         self.assertIn('修正 2 行，删除 4 行', out.getvalue())
+
+
+_SINA_TEXT = (
+    "/*<script>location.href='//sina.com';</script>*/\n"
+    'var KKE_ShareAmount_sh600519=([{"date":"2015-07-20","amount":125619.78},'
+    '{"date":"2025-09-01","amount":125227.0215},{"date":"2025-09-01","amount":125300},'
+    '{"date":"2026-05-28","amount":125008.1601}]);'
+)
+
+
+class FloatShareSourceTests(SimpleTestCase):
+    """ALG-13：新浪流通股本历史的解析、对齐、缓存与熔断（上游全 mock）。"""
+
+    def test_parse_converts_wan_to_shares_and_dedups_dates(self):
+        from datetime import date
+
+        from .datasources.float_shares import parse_share_history
+
+        hist = parse_share_history(_SINA_TEXT)
+        self.assertEqual([d for d, _ in hist], [date(2015, 7, 20), date(2025, 9, 1), date(2026, 5, 28)])
+        self.assertAlmostEqual(hist[1][1], 125300 * 1e4)  # 同日多条取后一条
+        self.assertEqual(round(hist[-1][1]), 1250081601)  # 与腾讯第 72 字段一致
+
+    def test_parse_rejects_malformed(self):
+        from .datasources.float_shares import parse_share_history
+
+        for text in ('null', '<html>502</html>', 'var x=([{"date":"2026-01-01","amount":0}]);',
+                     'var x=([{"day":"2026-01-01"}]);'):
+            with self.subTest(text=text), self.assertRaises((ValueError, KeyError)):
+                parse_share_history(text)
+
+    def test_null_payload_means_no_data_not_failure(self):
+        from django.test import override_settings
+
+        from .datasources import float_shares
+
+        text = "/*<script>location.href='//sina.com';</script>*/\nvar KKE_ShareAmount_sh510300=(null);"
+        self.assertEqual(float_shares.parse_share_history(text), [])
+        with override_settings(STOCKTRACE_FLOAT_SHARES_ENABLED=True), \
+                patch('stocks.datasources.float_shares.requests.get', return_value=_resp(text)) as get:
+            for code in ('510300', '510500', '159915', '510300'):
+                self.assertIsNone(float_shares.fetch_float_share_history(code))
+        # 无数据不计入熔断：3 只 ETF 各请求一次，重复的那只走缓存
+        self.assertEqual(get.call_count, 3)
+        self.assertEqual(float_shares._fail_state['until'], 0.0)
+
+    def test_shares_on_dates_is_step_function(self):
+        from datetime import date
+
+        from .datasources.float_shares import shares_on_dates
+
+        hist = [(date(2026, 1, 5), 100.0), (date(2026, 1, 8), 200.0)]
+        got = shares_on_dates(hist, ['2026-01-02', '2026-01-05', '2026-01-07', '2026-01-08', '2026-02-01'])
+        self.assertEqual(got, [None, 100.0, 100.0, 200.0, 200.0])
+        self.assertEqual(shares_on_dates(None, ['2026-01-05']), [None])
+
+    def test_disabled_by_runner_makes_no_request(self):
+        from .datasources import float_shares
+
+        with patch('stocks.datasources.float_shares.requests.get') as get:
+            self.assertIsNone(float_shares.fetch_float_share_history('600519'))
+        get.assert_not_called()
+
+    def test_fetch_caches_and_uses_exchange_prefix(self):
+        from django.test import override_settings
+
+        from .datasources import float_shares
+
+        with override_settings(STOCKTRACE_FLOAT_SHARES_ENABLED=True), \
+                patch('stocks.datasources.float_shares.requests.get', return_value=_resp(_SINA_TEXT)) as get:
+            first = float_shares.fetch_float_share_history('600519')
+            second = float_shares.fetch_float_share_history('600519')
+        self.assertEqual(first, second)
+        self.assertEqual(get.call_count, 1)
+        self.assertIn('KKE_ShareAmount_sh600519', get.call_args.args[0])
+        self.assertEqual(get.call_args.kwargs['params']['symbol'], 'sh600519')
+
+    def test_failures_return_none_and_trip_breaker(self):
+        from django.test import override_settings
+
+        from .datasources import float_shares
+
+        with override_settings(STOCKTRACE_FLOAT_SHARES_ENABLED=True), \
+                patch('stocks.datasources.float_shares.requests.get', side_effect=OSError('down')) as get, \
+                self.assertLogs('stocks.datasources.float_shares', level='WARNING'):
+            for code in ('600000', '600001', '600002', '600003', '600000'):
+                self.assertIsNone(float_shares.fetch_float_share_history(code))
+        # 前 3 只各请求一次后熔断；第 4 只与重复的第 1 只都不再请求
+        self.assertEqual(get.call_count, 3)
+
+
+def _turnover_ctx(n=70, split_at=None, unlock_at=None, shares=True):
+    """合成个股序列。split_at：10 转 10（前复权价减半、量与股本翻倍）；
+    unlock_at：解禁（价格不变，流通股本翻倍，成交量跟着放大一倍）。"""
+    import random
+
+    from .tests_p2_detector import _price_ctx
+
+    rng = random.Random(7)
+    closes, vols, amounts, float_sh = [], [], [], []
+    for i in range(n):
+        price = 10.0 * (1 + rng.gauss(0, 0.01))
+        vol = 1e6 * (1 + rng.gauss(0, 0.1))
+        sh = 1e8
+        if split_at is not None:
+            if i < split_at:
+                amounts.append(price * vol)
+                price = price / 2
+            else:
+                price, vol, sh = price / 2, vol * 2, sh * 2
+                amounts.append(price * vol)
+        else:
+            if unlock_at is not None and i >= unlock_at:
+                vol, sh = vol * 2, sh * 2
+            amounts.append(price * vol)
+        closes.append(price)
+        vols.append(vol)
+        float_sh.append(sh)
+    ctx = _price_ctx(vols, closes)
+    ctx['amount'] = amounts
+    ctx['float_shares'] = float_sh if shares else None
+    return ctx
+
+
+class TurnoverFloatShareTests(SimpleTestCase):
+    """ALG-13：有流通股本时用真实换手率，缺失时如实标注。"""
+
+    def _eval(self, ctx):
+        from .detector.dimensions import eval_turnover_pct
+        from .detector.registry import DIMENSION_MAP
+
+        return eval_turnover_pct(ctx, dict(DIMENSION_MAP['turnover_pct']['defaults']))
+
+    def test_split_with_share_data_stays_available(self):
+        res = self._eval(_turnover_ctx(split_at=60))
+        self.assertTrue(res['available'], res)
+        self.assertNotIn('股本数据缺失', res['note'])
+        # 没有股本数据时仍按旧口径暂停
+        res = self._eval(_turnover_ctx(split_at=60, shares=False))
+        self.assertFalse(res['available'])
+        self.assertIn('送转', res['note'])
+
+    def test_unlock_uses_real_turnover(self):
+        # 解禁：价格不变、成交量翻倍。真实换手率口径下等价于没有放量
+        ctx = _turnover_ctx(unlock_at=62)
+        res = self._eval(ctx)
+        self.assertTrue(res['available'], res)
+        turnover = [v / s for v, s in zip(ctx['volume'], ctx['float_shares'])]
+        reference = self._eval({**ctx, 'kind': 'index', 'volume': turnover, 'float_shares': None})
+        self.assertEqual(res['series'], reference['series'])
+        self.assertEqual(res['value'], reference['value'])
+        # 成交量口径会把解禁误读成分位跳升：两条曲线不同
+        legacy = self._eval({**ctx, 'float_shares': None})
+        self.assertNotEqual(legacy['series'][-1]['value'], res['series'][-1]['value'])
+
+    def test_break_without_share_change_is_unavailable(self):
+        ctx = _turnover_ctx(split_at=60)
+        ctx['float_shares'] = [1e8] * len(ctx['float_shares'])
+        res = self._eval(ctx)
+        self.assertFalse(res['available'])
+        self.assertIn('流通股本未见变动', res['note'])
+
+    def test_missing_share_data_is_labelled(self):
+        from .detector.dimensions import SHARE_DATA_MISSING_NOTE
+
+        res = self._eval(_turnover_ctx(shares=False))
+        self.assertTrue(res['available'], res)
+        self.assertIn(SHARE_DATA_MISSING_NOTE, res['note'])
+        # 窗口内缺一天股本也按缺失处理，不混用两种口径
+        ctx = _turnover_ctx()
+        ctx['float_shares'][-3] = None
+        self.assertIn(SHARE_DATA_MISSING_NOTE, self._eval(ctx)['note'])
+
+    def test_index_has_no_share_note(self):
+        ctx = _turnover_ctx(shares=False)
+        ctx['kind'] = 'index'
+        self.assertNotIn('股本', self._eval(ctx)['note'])
+
+
+class StockContextFloatShareTests(TestCase):
+    """build_stock_context 挂上与日线对齐的流通股本；取不到时为 None。"""
+
+    def setUp(self):
+        from datetime import date, timedelta
+        from decimal import Decimal
+
+        from .models import DailyQuote, Stock
+
+        self.stock = Stock.objects.create(code='600519', name='贵州茅台')
+        day = date(2026, 5, 20)
+        for i in range(40):
+            DailyQuote.objects.create(
+                stock=self.stock, trade_date=day + timedelta(days=i), open_price=Decimal('10'),
+                high_price=Decimal('10.2'), low_price=Decimal('9.8'), close_price=Decimal('10'),
+                open_close_diff=Decimal('0'), open_close_pct=Decimal('0'), high_low_diff=Decimal('0.4'),
+                high_low_pct=Decimal('4'), volume=1000000, turnover=Decimal('10000000'), is_final=True,
+            )
+
+    def test_shares_aligned_to_dates(self):
+        from datetime import date
+
+        from .detector.dimensions import build_stock_context
+
+        hist = [(date(2026, 1, 1), 100.0), (date(2026, 6, 1), 200.0)]
+        with patch('stocks.datasources.float_shares.fetch_float_share_history', return_value=hist) as fetch:
+            ctx, err = build_stock_context(self.stock)
+        fetch.assert_called_once_with('600519')
+        self.assertEqual(err, '')
+        self.assertEqual(len(ctx['float_shares']), len(ctx['dates']))
+        self.assertEqual(ctx['float_shares'][0], 100.0)
+        self.assertEqual(ctx['float_shares'][ctx['dates'].index('2026-06-01')], 200.0)
+
+    def test_missing_shares_is_none(self):
+        from .detector.dimensions import build_stock_context
+
+        ctx, _err = build_stock_context(self.stock)  # runner 默认关闭取数
+        self.assertIsNone(ctx['float_shares'])

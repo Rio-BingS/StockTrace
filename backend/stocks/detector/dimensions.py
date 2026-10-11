@@ -244,7 +244,19 @@ def build_stock_context(stock):
     ctx = _price_ctx('stock', stock.code, stock.name, items)
     # 成交额（元）只用于识别量价基准断层（ALG-13），不参与其他维度
     ctx['amount'] = [it['amount'] for it in items]
+    # 逐日流通股本（股）：换手率维度用真实换手率；None 表示股本数据缺失（ALG-13）
+    ctx['float_shares'] = _float_shares_for(stock.code, ctx['dates'])
     return ctx, ''
+
+
+def _float_shares_for(code, dates):
+    """与 dates 对齐的流通股本序列；取不到（关闭/熔断/上游失败）返回 None。"""
+    from ..datasources import float_shares
+
+    history = float_shares.fetch_float_share_history(code)
+    if not history:
+        return None
+    return float_shares.shares_on_dates(history, dates)
 
 
 def _price_ctx(kind, code, name, items):
@@ -562,13 +574,52 @@ def _share_basis_break(ctx, lookback, ratio, k=3):
     return None
 
 
+# 流通股本缺失时附在换手率维度 note 上的标注（ALG-13）
+SHARE_DATA_MISSING_NOTE = '股本数据缺失：仅能识别送转类断层，定增/解禁等股本变动无法识别'
+# 断层附近流通股本变化超过该比例，才算股本数据「解释了」这次断层
+_SHARE_CHANGE_TOL = 0.02
+
+
+def _turnover_series(ctx, window):
+    """真实换手率序列 = 成交量 / 当日流通股本（ALG-13）。
+
+    末尾 window 根里有成交量却缺股本的，整体视为股本数据缺失返回 None：
+    一半换手率一半成交量混在一个分位窗口里没有意义。成交量与股本都是
+    未复权口径，送转前后各自一致，比值天然连续。
+    """
+    volumes, shares = ctx.get('volume'), ctx.get('float_shares')
+    if not volumes or not shares or len(shares) != len(volumes):
+        return None
+    out = [v / s if v is not None and s else None for v, s in zip(volumes, shares)]
+    tail = range(max(0, len(volumes) - window), len(volumes))
+    if any(volumes[i] is not None and out[i] is None for i in tail):
+        return None
+    return out
+
+
+def _share_changed_near(ctx, broke_date, k=3):
+    """断层日前后 k 根内流通股本是否有超过 _SHARE_CHANGE_TOL 的变化。"""
+    dates, shares = ctx['dates'], ctx['float_shares']
+    j = dates.index(broke_date)
+    near = [s for s in shares[max(0, j - k):j + k] if s]
+    return len(near) >= 2 and max(near) / min(near) - 1 > _SHARE_CHANGE_TOL
+
+
+def _join_note(note, extra):
+    if not extra:
+        return note
+    return f'{note}；{extra}' if note else extra
+
+
 def eval_turnover_pct(ctx, params):
     """换手率分位（指数/个股）：成交量自身 60 日分位的 5 日变化。
 
-    口径说明（已在文档中披露）：个股窗口内流通股本基本不变，换手率 =
-    量/股本 与成交量单调等价，分位排序完全一致，故用成交量分位实现，
-    零新增上游请求；指数无股本概念，为市场活跃度代理。窗口内检测到
-    送转/配股导致的量价基准断层时如实不可用（ALG-13）。
+    口径说明（ALG-13）：个股有流通股本数据时用真实换手率（成交量 / 当日
+    流通股本）的分位，送转、定增、解禁前后都连续；股本数据缺失时退回
+    成交量分位（窗口内股本不变时两者单调等价），检测到送转/配股导致的
+    量价基准断层就如实不可用，未检测到也在 note 标注「股本数据缺失」——
+    定增解禁这类不改价格的股本变动此时识别不了。指数无股本概念，用成交量
+    分位作为市场活跃度代理。
     方向语义：分位从低位缓慢抬升（仍不热）= 关注度悄然回升；从高位回落
     （仍不死）= 温和降温。分位本身过高/过低时不动（已是活跃/冰点状态）。
     """
@@ -580,13 +631,22 @@ def eval_turnover_pct(ctx, params):
     valid = [v for v in volumes if v is not None]
     if len(valid) < MIN_PRICE_BARS:
         return _unavailable('有效成交量样本不足')
-    # 「与换手率单调等价」的前提是窗口内股本不变（ALG-13）：窗口内出现送转/配股
-    # 时成交量整体抬升一个台阶，分位会把股本扩大误读成关注度回升，维度暂停
-    # 直到断层滚出 window 日窗口
+    share_note = ''
     if ctx.get('kind') == 'stock':
         broke = _share_basis_break(ctx, window, params.get('split_ratio', SPLIT_RATIO_DEFAULT))
-        if broke:
-            return _unavailable(f'{broke} 前后疑似送转/股本变动（量价基准断层），换手率分位暂停至滚出窗口')
+        turnover = _turnover_series(ctx, window)
+        if turnover is not None:
+            # 有股本数据：断层若能被股本变化解释（送转/配股），真实换手率照常可用；
+            # 断层附近股本却没变，说明两份数据对不上，宁可暂停也不按错的口径投票
+            if broke and not _share_changed_near(ctx, broke):
+                return _unavailable(f'{broke} 前后量价基准断层，但流通股本未见变动，数据不一致，换手率分位暂停')
+            volumes = turnover
+        else:
+            # 股本数据缺失：退回成交量分位。窗口内出现送转/配股时成交量整体抬升
+            # 一个台阶，分位会把股本扩大误读成关注度回升，维度暂停直到断层滚出窗口
+            if broke:
+                return _unavailable(f'{broke} 前后疑似送转/股本变动（量价基准断层），换手率分位暂停至滚出窗口')
+            share_note = SHARE_DATA_MISSING_NOTE
 
     def pct_at(i):
         end = i + 1
@@ -616,7 +676,7 @@ def eval_turnover_pct(ctx, params):
     elif direction == 'down' and last < params['pos_floor']:
         direction, note = None, f'分位已低至 {last:.0f}，超出温和区间'
     return _result(
-        value, direction, note,
+        value, direction, _join_note(note, share_note),
         _series_points(ctx['dates'], pct_series),
     )
 
