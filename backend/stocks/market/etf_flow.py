@@ -26,6 +26,7 @@ from django.utils import timezone
 
 from ._cache import _cache_get, _cache_meta, _cache_set, _to_float
 from .etf import NATIONAL_TEAM_ETFS
+from .periods import resolve_period
 
 logger = logging.getLogger(__name__)
 
@@ -45,6 +46,12 @@ _FLOW_PERIODS = {'1d': 1, '3d': 3, '5d': 5, '1w': 7, '1m': 30, '3m': 90, '6m': 1
 _FLOW_TRADING_DAY_PERIODS = ('1d', '3d', '5d')
 
 _NTF_CONSECUTIVE_FAIL_LIMIT = 3
+# 区间校验走 periods.resolve_period（ARC-04）；400 文案保持旧版，前端直接展示
+_FLOW_PERIOD_MESSAGES = {
+    'bad_period': 'period 必须是 1d、3d、5d、1w、1m、3m、6m 或 ytd',
+    'bad_date': 'start/end 必须是 YYYY-MM-DD',
+    'too_long': '自定义区间最长约 400 天',
+}
 
 
 def _flow_source():
@@ -128,26 +135,18 @@ def get_national_team_flow(period='3m', start=None, end=None, ttl=1800):
     也可传 start/end（YYYY-MM-DD）自定义区间。上游深度约 120 个交易日，
     起点早于覆盖范围时如实截断并在 note 标注。
     """
-    custom = bool(start or end)
+    window = resolve_period(
+        {'period': period, 'start': start, 'end': end}.get, list(_FLOW_PERIODS), default='3m',
+        max_days=400, allow_future_end=False, custom_default_days=90, messages=_FLOW_PERIOD_MESSAGES,
+    )
+    custom = window.preset == 'custom'
     if custom:
-        try:
-            start_d = date.fromisoformat(start) if start else None
-            end_d = date.fromisoformat(end) if end else None
-        except (TypeError, ValueError):
-            raise ValueError('start/end 必须是 YYYY-MM-DD')
-        if start_d and end_d and start_d > end_d:
-            raise ValueError('start 不能晚于 end')
-        if end_d and end_d > timezone.localdate():
-            raise ValueError('end 不能晚于今天')
-        if start_d and (end_d or timezone.localdate()) - start_d > timedelta(days=400):
-            raise ValueError('自定义区间最长约 400 天')
         cache_key = f'ntf_flow_{start or "begin"}_{end or "now"}'
-        window_start = (start_d or (end_d or timezone.localdate()) - timedelta(days=90)).isoformat()
-        window_end = (end_d or timezone.localdate()).isoformat()
+        window_start = window.start.isoformat()
+        window_end = window.end.isoformat()
         trading_tail = None
     else:
-        if period not in _FLOW_PERIODS:
-            raise ValueError('period 必须是 1d、3d、5d、1w、1m、3m、6m 或 ytd')
+        period = window.preset
         cache_key = f'ntf_flow_{period}'
         cached = _cache_get(cache_key, ttl)
         if cached is not None:

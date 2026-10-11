@@ -113,3 +113,37 @@ class ResolvePeriodYtdTests(SimpleTestCase):
             r = self.client.get('/api/market/market-flow/?period=ytd')
         self.assertEqual(r.status_code, 200)
         self.assertEqual(m.call_args.args[0].preset, 'ytd')
+
+
+class ResolvePeriodExtensionTests(SimpleTestCase):
+    """步骤 4b：resolve_period 新增 max_days / allow_future_end / ytd / 文案覆盖。"""
+
+    TODAY = date(2026, 9, 4)
+
+    def _resolve(self, params, allowed=('1w', '1m', 'ytd'), **kw):
+        from .market.periods import resolve_period
+
+        return resolve_period(lambda k: params.get(k), list(allowed), today=self.TODAY, **kw)
+
+    def test_max_days_overrides_legacy_span(self):
+        params = {'start': '2026-01-01', 'end': '2026-09-01'}
+        with self.assertRaisesMessage(ValueError, '自定义区间最长 100 天'):
+            self._resolve(params, max_days=100)
+        self.assertEqual(self._resolve(params, max_days=300).start, date(2026, 1, 1))
+        with self.assertRaisesMessage(ValueError, '自定义区间最长 50 天'):
+            self._resolve(params, max_span_days=50)  # 旧参数名仍可用
+
+    def test_future_end_opt_in(self):
+        params = {'start': '2026-09-01', 'end': '2026-09-05'}
+        self.assertEqual(self._resolve(params).end, date(2026, 9, 5))  # 缺省保持旧行为
+        with self.assertRaisesMessage(ValueError, 'end 不能晚于今天'):
+            self._resolve(params, allow_future_end=False)
+        self.assertEqual(self._resolve({'end': '2026-09-04'}, allow_future_end=False).end, self.TODAY)
+
+    def test_custom_default_days_and_messages(self):
+        w = self._resolve({'end': '2026-09-04'}, custom_default_days=90)
+        self.assertEqual(w.start, date(2026, 6, 6))
+        with self.assertRaisesMessage(ValueError, 'start/end 必须是 YYYY-MM-DD'):
+            self._resolve({'start': '2026/01/01'}, messages={'bad_date': 'start/end 必须是 YYYY-MM-DD'})
+        with self.assertRaisesMessage(ValueError, 'period 仅支持 1w/1m/ytd'):
+            self._resolve({'period': '5y'})

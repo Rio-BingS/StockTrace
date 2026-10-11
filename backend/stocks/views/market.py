@@ -2,9 +2,8 @@
 
 import logging
 import uuid
-from datetime import date, datetime, timedelta
+from datetime import date
 
-from django.utils import timezone
 from rest_framework import status
 from rest_framework.decorators import api_view
 from rest_framework.response import Response
@@ -84,37 +83,36 @@ def market_trend(request):
     ?days=30|60|120|250（兼容旧参数）、?start=&end=（自定义，YYYY-MM-DD）。
     """
     def load():
-        start = request.query_params.get('start')
-        end = request.query_params.get('end')
-        days_raw = request.query_params.get('days')
-        if start or end:
-            try:
-                start_d = datetime.strptime(start, '%Y-%m-%d').date() if start else None
-                end_d = datetime.strptime(end, '%Y-%m-%d').date() if end else timezone.localdate()
-            except (TypeError, ValueError):
-                raise ValueError('start/end 必须是 YYYY-MM-DD')
-            start_d = start_d or end_d - timedelta(days=90)
-            if start_d > end_d:
-                raise ValueError('start 不能晚于 end')
-            if (end_d - start_d).days > 1100:
-                raise ValueError('自定义区间最长约 3 年')
-            return get_market_trend(start=start_d.isoformat(), end=end_d.isoformat())
-        if days_raw:
+        params = request.query_params
+        # 优先级沿用旧实现：start/end 自定义 > days 旧参数 > period 档位
+        if params.get('days') and not (params.get('start') or params.get('end')):
             days = _positive_int(request, 'days', 120)
             if days not in (30, 60, 120, 250):
                 raise ValueError('days 仅支持 30、60、120、250')
             return get_market_trend(days=days)
-        period = request.query_params.get('period', '3m')
-        period_days = {'1w': 5, '1m': 22, '3m': 66, '6m': 130, '1y': 260}
-        if period == 'ytd':
-            today = timezone.localdate()
+        window = resolve_period(
+            params.get, list(_TREND_PERIOD_DAYS) + ['ytd'], default='3m',
+            max_days=1100, custom_default_days=90, messages=_TREND_PERIOD_MESSAGES,
+        )
+        if window.preset == 'custom':
+            return get_market_trend(start=window.start.isoformat(), end=window.end.isoformat())
+        if window.preset == 'ytd':
+            # 自然日折算交易日（×5/7），口径同旧实现
+            today = window.end
             days = max(5, int((today - date(today.year, 1, 1)).days * 5 / 7))
-        elif period in period_days:
-            days = period_days[period]
         else:
-            raise ValueError('period 必须是 1w、1m、3m、6m、1y 或 ytd')
+            days = _TREND_PERIOD_DAYS[window.preset]
         return get_market_trend(days=min(days, 300))
     return _market_bad_request(load, '全市场走势')
+
+
+# 走势档位按交易日计（与 periods 的自然日档位不同）；400 文案保持旧版，前端直接展示
+_TREND_PERIOD_DAYS = {'1w': 5, '1m': 22, '3m': 66, '6m': 130, '1y': 260}
+_TREND_PERIOD_MESSAGES = {
+    'bad_period': 'period 必须是 1w、1m、3m、6m、1y 或 ytd',
+    'bad_date': 'start/end 必须是 YYYY-MM-DD',
+    'too_long': '自定义区间最长约 3 年',
+}
 
 
 def _positive_int(request, key, default, maximum=None):
