@@ -1,6 +1,7 @@
 """探测器取数层（data-align）回归测试；各用例类注明对应条目编号。"""
 
 from datetime import date, datetime, time as dt_time, timedelta
+from decimal import Decimal
 from io import StringIO
 from unittest.mock import patch
 
@@ -10,6 +11,7 @@ from django.test import TestCase
 from django.utils import timezone
 
 from .detector import dimensions
+from .detector.constants import CONTEXT_BARS
 from .models import MarketDailySnapshot
 
 _TODAY = timezone.localdate()
@@ -210,6 +212,39 @@ class DetectorSchedulerDependencyTests(TestCase):
     def test_waits_for_concept_ff(self):
         with self.assertLogs('stocks.scheduler', level='WARNING'):
             self.assertEqual(self._ready(('industry_ff', 'market_ff')), (False, 'waiting'))
+
+
+class ContextLengthTests(TestCase):
+    """#10：个股/指数日线上下文拉长到 CONTEXT_BARS 根（本地有多少用多少）。"""
+
+    def test_stock_context_uses_up_to_context_bars(self):
+        from .models import DailyQuote, Stock
+
+        stock = Stock.objects.create(code='600000', name='浦发银行')
+        start = date(2025, 1, 1)
+        DailyQuote.objects.bulk_create([
+            DailyQuote(
+                stock=stock, trade_date=start + timedelta(days=i), open_price=Decimal('10'),
+                high_price=Decimal('10.2'), low_price=Decimal('9.8'), close_price=Decimal('10'),
+                open_close_diff=Decimal('0'), open_close_pct=Decimal('0'),
+                high_low_diff=Decimal('0.4'), high_low_pct=Decimal('4'),
+                volume=1000000, turnover=Decimal('10000000'), is_final=True,
+            )
+            for i in range(CONTEXT_BARS + 20)
+        ])
+        ctx, err = dimensions.build_stock_context(stock)
+        self.assertEqual(err, '')
+        self.assertEqual(len(ctx['dates']), CONTEXT_BARS)
+        self.assertEqual(ctx['dates'][-1], (start + timedelta(days=CONTEXT_BARS + 19)).isoformat())
+
+    def test_index_context_requests_context_bars(self):
+        items = [{'date': (date(2025, 1, 1) + timedelta(days=i)).isoformat(), 'open': 1.0,
+                  'high': 1.0, 'low': 1.0, 'close': 1.0, 'volume': 1.0} for i in range(40)]
+        with patch('stocks.market.indices.fetch_index_daily_series',
+                   return_value={'available': True, 'items': items}) as fetch:
+            ctx, _ = dimensions.build_index_context('sh000001', '上证指数')
+        fetch.assert_called_once_with('sh000001', days=CONTEXT_BARS)
+        self.assertEqual(len(ctx['dates']), 40)
 
 
 class SectorSnapshotPayloadTests(TestCase):

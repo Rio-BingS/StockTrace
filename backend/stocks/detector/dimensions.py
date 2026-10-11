@@ -22,13 +22,15 @@ from .constants import (
     AXIS_CALENDAR_BUFFER,
     AXIS_CALENDAR_MULTIPLIER,
     COMPRESS_PCT_DEFAULT,
+    CONTEXT_BARS,
     MARGIN_CONTEXT_DAYS,
     MARGIN_VALUE_KEY,
     MARGIN_VOTE_CODES,
     MIN_PRICE_BARS,
     MIN_SECTOR_POINTS,
     NOISE_DEFAULTS,
-    SECTOR_LOOKBACK_DAYS,
+    SECTOR_CONTEXT_DAYS,
+    SECTOR_LOOKBACK_DAYS,  # noqa: F401  旧路径 dimensions.SECTOR_LOOKBACK_DAYS 保留
     SPLIT_RATIO_DEFAULT,
 )
 
@@ -307,10 +309,13 @@ def load_margin_series(index_as_of, n=MARGIN_CONTEXT_DAYS):
 
 
 def build_index_context(code, name):
-    """指数上下文：新浪日线 OHLCV（同一上游接口，见 market.indices）+ 融资余额快照序列。"""
+    """指数上下文：新浪日线 OHLCV（同一上游接口，见 market.indices）+ 融资余额快照序列。
+
+    日线取 CONTEXT_BARS 根（#10）：上游一次返回全史，取多长不增加请求。
+    """
     from ..market import indices
 
-    data = indices.fetch_index_daily_series(code, days=70)
+    data = indices.fetch_index_daily_series(code, days=CONTEXT_BARS)
     if not data.get('available'):
         return None, data.get('message') or '指数日线不可用'
     items = data['items']
@@ -332,7 +337,8 @@ def build_stock_context(stock):
     """自选股上下文：DailyQuote（本站已拉取的日线），零新增上游请求。
 
     只用已收盘的日线（DAT-13）：盘中拉到的当日 bar 量价不完整，混进序列会
-    让振幅/量比/均线距离按半天数据投票。
+    让振幅/量比/均线距离按半天数据投票。取最近 CONTEXT_BARS 根（#10），
+    本地不足就用现有的，不为补历史额外联网。
     """
     rows = list(
         DailyQuote.objects.filter(stock=stock, is_final=True)
@@ -340,7 +346,7 @@ def build_stock_context(stock):
         .values_list(
             'trade_date', 'open_price', 'high_price', 'low_price',
             'close_price', 'volume', 'turnover',
-        )[:70]
+        )[:CONTEXT_BARS]
     )[::-1]
     if len(rows) < MIN_PRICE_BARS:
         return None, f'日线仅 {len(rows)} 根，历史不足'
@@ -398,7 +404,7 @@ def _sector_kind_db(kind):
     )
 
 
-def load_sector_snapshots(kind, lookback_days=SECTOR_LOOKBACK_DAYS, end_date=None):
+def load_sector_snapshots(kind, lookback_days=SECTOR_CONTEXT_DAYS, end_date=None):
     """一次读出某类板块最近 lookback_days 个交易日的快照并按名字建索引（PERF-04）。
 
     返回 [(trade_date, {name: row})]，日期升序。扫描时每类只读一次、全部板块
@@ -414,7 +420,7 @@ def load_sector_snapshots(kind, lookback_days=SECTOR_LOOKBACK_DAYS, end_date=Non
     return out
 
 
-def build_sector_context(kind, name, lookback_days=SECTOR_LOOKBACK_DAYS, snapshots=None):
+def build_sector_context(kind, name, lookback_days=SECTOR_CONTEXT_DAYS, snapshots=None):
     """板块上下文：本站日度快照透视出的逐日 net / change_pct 序列。
 
     「某板块某天缺行就 None」：回填可能只补到部分板块，绝不能拿旧值或 0
