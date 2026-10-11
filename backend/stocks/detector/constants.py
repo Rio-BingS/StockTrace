@@ -127,3 +127,10 @@ MARGIN_VALUE_KEY = 'rz'
 # 日期轴往回走的自然日上限 = 交易日数 × 倍数 + 缓冲（覆盖春节/国庆长假）
 AXIS_CALENDAR_MULTIPLIER = 2
 AXIS_CALENDAR_BUFFER = 30
+
+# 板块资金净额去价格化（#6）：同花顺板块净额按指数涨跌划分流入/流出，与当日
+# change_pct 机械同向。逐板块用「截至当日」的滚动窗口做 net ~ a + b·change_pct
+# 的最小二乘，取当日残差作为维度输入（只用 ≤ 当日的数据，无前视）。
+FLOW_RESID_WINDOW = 60
+# 拟合所需最少有效点数：不足时该点残差为 None（如实不可用，不退回原始净额）
+FLOW_RESID_MIN_OBS = 20

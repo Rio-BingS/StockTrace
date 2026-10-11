@@ -1,5 +1,6 @@
 """探测器取数层（data-align）回归测试；各用例类注明对应条目编号。"""
 
+import random
 from datetime import date, datetime, time as dt_time, timedelta
 from decimal import Decimal
 from io import StringIO
@@ -24,6 +25,17 @@ def _weekday(day=None):
 
 def _always(day=None):
     return True
+
+
+def _corr(xs, ys):
+    pts = [(x, y) for x, y in zip(xs, ys) if x is not None and y is not None]
+    n = len(pts)
+    mx = sum(x for x, _ in pts) / n
+    my = sum(y for _, y in pts) / n
+    sxy = sum((x - mx) * (y - my) for x, y in pts)
+    sxx = sum((x - mx) ** 2 for x, _ in pts)
+    syy = sum((y - my) ** 2 for _, y in pts)
+    return sxy / (sxx * syy) ** 0.5
 
 
 class TradingDayAxisTests(TestCase):
@@ -192,6 +204,64 @@ class BackfillMarginCommandTests(TestCase):
     def test_rejects_inverted_range(self):
         with self.assertRaises(CommandError):
             call_command('backfill_margin', '--start', '2026-10-02', '--end', '2026-09-28')
+
+
+class SectorFlowResidualTests(TestCase):
+    """#6：板块资金净额对当日涨跌回归取残差，去掉与价格的机械相关。"""
+
+    def _synthetic(self, n=200, seed=7):
+        rng = random.Random(seed)
+        pcts = [rng.gauss(0, 1.2) for _ in range(n)]
+        # 同花顺口径：净额 ≈ 涨跌幅驱动的主成分 + 与价格无关的资金
+        nets = [3e8 * p + rng.gauss(0, 1e8) for p in pcts]
+        return nets, pcts
+
+    def test_residual_decorrelates_from_change_pct(self):
+        nets, pcts = self._synthetic()
+        resid = dimensions.sector_flow_residuals(nets, pcts)
+        self.assertGreater(_corr(nets, pcts), 0.9)
+        self.assertLess(abs(_corr(resid, pcts)), 0.1)
+
+    def test_residual_has_no_lookahead(self):
+        nets, pcts = self._synthetic()
+        full = dimensions.sector_flow_residuals(nets, pcts)
+        cut = dimensions.sector_flow_residuals(nets[:120], pcts[:120])
+        self.assertEqual(full[:120], cut)
+
+    def test_insufficient_points_are_none(self):
+        nets, pcts = self._synthetic(n=30)
+        pcts[25] = None
+        resid = dimensions.sector_flow_residuals(nets, pcts, min_obs=20)
+        self.assertTrue(all(v is None for v in resid[:19]))
+        self.assertIsNone(resid[25])
+        self.assertIsNotNone(resid[29])
+
+    def test_dimension_ignores_purely_price_driven_flow(self):
+        from .detector.registry import DIMENSION_MAP
+
+        params = {**DIMENSION_MAP['big_order_net']['defaults'], 'noise_pct': 0}
+        rng = random.Random(1)
+        n = 90
+        pcts = [rng.gauss(0, 0.3) for _ in range(n - 8)] + [0.6] * 8  # 末段温和上涨
+        nets = [3e8 * p for p in pcts]  # 净额完全由涨跌决定
+        ctx = {'kind': 'industry', 'dates': [str(i) for i in range(n)], 'net': nets,
+               'change_pct': pcts}
+        raw = dimensions.eval_big_order_net(ctx, params)
+        self.assertEqual(raw['direction'], 'up')  # 原始净额：把「涨了」再数一遍
+        ctx['flow_resid'] = dimensions.sector_flow_residuals(nets, pcts)
+        res = dimensions.eval_big_order_net(ctx, params)
+        self.assertIsNone(res['direction'], res)
+
+    def test_sector_context_carries_residual(self):
+        for i in range(30):
+            MarketDailySnapshot.objects.create(
+                kind=MarketDailySnapshot.KIND_CONCEPT_FF, trade_date=_TODAY - timedelta(days=29 - i),
+                payload=[{'name': '乙', 'net': 1e8 * ((i * 7) % 5 - 2), 'change_pct': 0.1 * (i % 4)}],
+            )
+        with patch('stocks.trading_calendar.is_trading_day', _always):
+            ctx, _ = dimensions.build_sector_context('concept', '乙')
+        self.assertEqual(len(ctx['flow_resid']), len(ctx['net']))
+        self.assertIsNotNone(ctx['flow_resid'][-1])
 
 
 class DetectorSchedulerDependencyTests(TestCase):

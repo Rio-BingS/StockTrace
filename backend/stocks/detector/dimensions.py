@@ -23,6 +23,8 @@ from .constants import (
     AXIS_CALENDAR_MULTIPLIER,
     COMPRESS_PCT_DEFAULT,
     CONTEXT_BARS,
+    FLOW_RESID_MIN_OBS,
+    FLOW_RESID_WINDOW,
     MARGIN_CONTEXT_DAYS,
     MARGIN_VALUE_KEY,
     MARGIN_VOTE_CODES,
@@ -420,6 +422,38 @@ def load_sector_snapshots(kind, lookback_days=SECTOR_CONTEXT_DAYS, end_date=None
     return out
 
 
+def sector_flow_residuals(nets, pcts, window=FLOW_RESID_WINDOW, min_obs=FLOW_RESID_MIN_OBS):
+    """板块资金净额对当日涨跌幅的滚动回归残差（#6），与 nets 等长。
+
+    同花顺板块「净额」按板块指数涨跌划分流入/流出（全单口径），与当日
+    change_pct 机械同向，直接投票等于把「涨了」再数一遍。第 i 点用截至 i 的
+    最近 window 个有效点 (pct, net) 拟合 net = a + b·pct，残差 e_i = net_i −
+    (a + b·pct_i) 才是「涨跌解释不了的资金」。只用 ≤ i 的数据，无前视；有效点
+    不足 min_obs、或当日 net/pct 缺失时该点为 None（如实不可用，不退回原始净额）。
+    窗口内 pct 无变化（方差 0）时退化为 net − 均值。
+    """
+    out = [None] * len(nets)
+    for i in range(len(nets)):
+        if nets[i] is None or pcts[i] is None:
+            continue
+        pts = [
+            (pcts[j], nets[j])
+            for j in range(max(0, i + 1 - window), i + 1)
+            if nets[j] is not None and pcts[j] is not None
+        ]
+        if len(pts) < min_obs:
+            continue
+        mx = sum(p for p, _ in pts) / len(pts)
+        my = sum(v for _, v in pts) / len(pts)
+        sxx = sum((p - mx) ** 2 for p, _ in pts)
+        b = sum((p - mx) * (v - my) for p, v in pts) / sxx if sxx else 0.0
+        e = nets[i] - (my + b * (pcts[i] - mx))
+        # 浮点舍入残留（净额完全由涨跌决定时 ~1e-8 元）按 0 计，免得被归一化放大成假漂移
+        tol = 1e-9 * max(abs(v) for _, v in pts)
+        out[i] = 0.0 if abs(e) <= tol else e
+    return out
+
+
 def build_sector_context(kind, name, lookback_days=SECTOR_CONTEXT_DAYS, snapshots=None):
     """板块上下文：本站日度快照透视出的逐日 net / change_pct 序列。
 
@@ -428,6 +462,8 @@ def build_sector_context(kind, name, lookback_days=SECTOR_CONTEXT_DAYS, snapshot
     自行如实不可用。日期轴是交易日历（#8），整天缺快照同样是 None。
     snapshots：load_sector_snapshots 的结果（扫描时预加载、各板块共用）；
     缺省时自行读库（信号详情页等单板块场景）。
+    ctx['flow_resid']：净额对当日涨跌幅的滚动回归残差（#6），板块资金净额
+    维度的输入；ctx['net'] 保持原始净额（平静闸门的资金面条件仍用它）。
     """
     if snapshots is None:
         snapshots = load_sector_snapshots(kind, lookback_days)
@@ -458,6 +494,7 @@ def build_sector_context(kind, name, lookback_days=SECTOR_CONTEXT_DAYS, snapshot
         'name': name,
         'dates': dates,
         'net': nets,
+        'flow_resid': sector_flow_residuals(nets, pcts),
         'change_pct': pcts,
         'as_of': as_of,
     }
@@ -528,15 +565,20 @@ def _rolling_mean_series(vals, k, strict=False):
 
 
 def eval_big_order_net(ctx, params):
-    """大单净流入（指数/板块）：近 6 日均净额对比前 6 日的相对漂移。
+    """板块资金净额（仅板块）：近 6 日均值对比前 6 日的相对漂移。
 
-    指数用本站大盘快照的「超大单+大单」合计，板块用快照的主力净额——
-    都是收盘后落库的真实上游数据。为什么窗口取偶数长度（6 日）：
-    资金流在平静期常出现逐日正负交替，奇数窗口（如 5 日）的均值会残留
-    ±1 天的相位噪声、制造假漂移；偶数窗口把交替完全抵消，趋势才浮现。
-    分母取窗口内平均绝对净额，把大盘/板块的量级差异归一，阈值才能跨对象通用。
+    输入口径（#6）：同花顺板块「净额」是全单主动买卖口径、按板块指数涨跌
+    划分流入/流出，并非「大单/主力」，且与当日 change_pct 机械同向。ctx 带
+    flow_resid（净额对当日涨跌幅的滚动回归残差，build_sector_context 生成）
+    时用残差，只看「涨跌解释不了的资金」；没有时（旧调用方/单测）退回原始
+    净额。指数不参与（ALG-09，见 registry）。
+    为什么窗口取偶数长度（6 日）：资金流在平静期常出现逐日正负交替，偶数
+    窗口能抵消严格的 ±交替（一般噪声下不必然）。分母取窗口内平均绝对值，
+    把各板块的量级差异归一，阈值才能跨对象通用。
     """
-    nets = ctx.get('net')
+    nets = ctx.get('flow_resid')
+    if nets is None:
+        nets = ctx.get('net')
     window = params['window']
     mean_days = params['mean_days']
     need = window + mean_days * 2
