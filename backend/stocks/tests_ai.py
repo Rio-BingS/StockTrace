@@ -17,6 +17,11 @@ from .ai.screener import ConditionError, run_screener
 from .ai.throttle import DAILY_LIMIT, check_throttle, log_call
 
 
+def _no_valuation(codes):
+    """估值快照（腾讯）是独立上游：选股用例按「估值不可用」口径运行，避免触网（OPS-03）"""
+    return {}
+
+
 class CryptoTests(TestCase):
     def test_roundtrip(self):
         token = encrypt_api_key('sk-test-1234')
@@ -33,6 +38,7 @@ def _mock_chat_json(spec):
     return lambda messages, **kwargs: (spec, {})
 
 
+@patch('stocks.ai.valuation.fetch_valuation_map', new=_no_valuation)
 class ScreenerEngineTests(TestCase):
     def setUp(self):
         self.stock = Stock.objects.create(code='000001', name='测试银行')
@@ -280,6 +286,7 @@ class AiProviderApiTests(TestCase):
         self.assertIn('****2222', body)
 
 
+@patch('stocks.ai.valuation.fetch_valuation_map', new=_no_valuation)
 class AiEndpointTests(TestCase):
     def setUp(self):
         self.stock = Stock.objects.create(code='000001', name='测试')
@@ -537,6 +544,7 @@ def _make_bars(stock, closes, volumes=None, start=date(2026, 6, 1)):
         )
 
 
+@patch('stocks.ai.valuation.fetch_valuation_map', new=_no_valuation)
 class ScreenerDerivedFieldsTests(TestCase):
     """多日衍生字段：区间涨跌/均线/量比/新高新低/连涨天数。"""
 
@@ -607,6 +615,7 @@ class ScreenerDerivedFieldsTests(TestCase):
             ]})
 
 
+@patch('stocks.ai.valuation.fetch_valuation_map', new=_no_valuation)
 class ScreenerTechIndicatorTests(TestCase):
     """技术指标字段：MACD/KDJ/RSI/BOLL 的口径与边界。"""
 

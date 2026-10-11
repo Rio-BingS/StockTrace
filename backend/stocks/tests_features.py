@@ -8,7 +8,7 @@ import json
 import pandas as pd
 from datetime import date, datetime, time as dt_time, timedelta
 from decimal import Decimal
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 from django.test import SimpleTestCase, TestCase
 from django.utils import timezone
@@ -32,6 +32,11 @@ def _trading_true(day=None):
     return True
 
 
+def _no_holders(code, **kwargs):
+    """持有人结构是独立上游（东财基金档案），ETF 详情用例不关心：固定为不可用，避免触网（OPS-03）"""
+    return {'available': False, 'items': [], 'message': '测试桩：不拉持有人结构', 'meta': {}}
+
+
 def _make_sector_snapshots(kind, days, names_by_day):
     """days: 相对 _BASE 往前的天数列表；names_by_day: offset -> {name: net}"""
     for offset, nets in names_by_day.items():
@@ -42,6 +47,8 @@ def _make_sector_snapshots(kind, days, names_by_day):
         )
 
 
+@patch('stocks.services.is_trading_day', _trading_true)
+@patch('stocks.market.etf_flow.fetch_flow_klines', new=Mock(side_effect=RuntimeError('offline')))
 class SnapshotSaveTests(TestCase):
     def test_save_writes_industry_and_etf_but_skips_empty_concept(self):
         with patch(
@@ -356,6 +363,8 @@ class SseShareBackfillTests(TestCase):
         self.assertEqual([i['share'] for i in series], [101.0, 100.0])  # 升序，仅该代码
         self.assertEqual(snapshots.share_history_series('999999', _BASE - timedelta(days=1), _BASE), [])
 
+    @patch('stocks.services.is_trading_day', _trading_true)
+    @patch('stocks.market.etf.fetch_holder_structure', new=_no_holders)
     def test_detail_includes_share_history(self):
         for offset in (2, 1):
             MarketDailySnapshot.objects.create(
@@ -657,6 +666,7 @@ class SectorSnapshotFirstTests(TestCase):
         self.assertTrue(result['available'])
 
 
+@patch('stocks.market.etf.fetch_holder_structure', new=_no_holders)
 class EtfHistSourceRoutingTests(SimpleTestCase):
     """ETF 历史多源路由：东财优先，失败切新浪；meta 如实标注实际来源。"""
 
@@ -734,6 +744,7 @@ class EtfHistSourceRoutingTests(SimpleTestCase):
         self.assertIsNone(data['price_performance']['return_5d'])
 
 
+@patch('stocks.market.etf.fetch_holder_structure', new=_no_holders)
 class EtfCustomRangeTests(SimpleTestCase):
     """ETF 详情自定义起止区间：参数校验 + 区间统计。"""
 
@@ -858,6 +869,8 @@ class StockGroupApiTests(TestCase):
         self.assertEqual(response.status_code, 400)
 
 
+@patch('stocks.services.is_trading_day', _trading_true)
+@patch('akshare.fund_etf_scale_sse', new=Mock(return_value=pd.DataFrame()))
 class MarketFundFlowSnapshotTests(TestCase):
     """大盘主力资金流快照：收盘落库 + 窗口接口在上游挂掉时用快照兜底。"""
 

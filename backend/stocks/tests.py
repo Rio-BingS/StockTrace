@@ -12,6 +12,11 @@ from . import tasks
 from .market._cache import _cache_get, _cache_set
 
 
+def _no_holders(code, **kwargs):
+    """持有人结构是独立上游（东财基金档案），ETF 详情用例不关心：固定为不可用，避免触网（OPS-03）"""
+    return {'available': False, 'items': [], 'message': '测试桩：不拉持有人结构', 'meta': {}}
+
+
 class MarketParsingTests(SimpleTestCase):
     def setUp(self):
         market._cache.clear()
@@ -167,6 +172,7 @@ class MarketParsingTests(SimpleTestCase):
         for item in data['items']:
             self.assertTrue(forbidden.isdisjoint(item))
 
+    @patch('stocks.market.etf.fetch_holder_structure', new=_no_holders)
     @patch('stocks.market.etf._etf_history')
     @patch('stocks.market.etf._normalized_etf_items')
     def test_etf_detail_returns_price_history_only(self, normalized, history):
@@ -187,6 +193,7 @@ class MarketParsingTests(SimpleTestCase):
         self.assertEqual(data['history']['start_date'], '2026-01-01')
         self.assertEqual(data['history']['end_date'], '2026-01-21')
 
+    @patch('stocks.market.etf.fetch_holder_structure', new=_no_holders)
     @patch('stocks.market.etf._etf_history', return_value=[])
     @patch('stocks.market.etf._normalized_etf_items')
     def test_etf_detail_keeps_quote_when_history_is_unavailable(self, normalized, history):

@@ -153,6 +153,7 @@ def _vote_config(key, direction_values):
     }
 
 
+@patch('stocks.services.is_trading_day', _trading_true)
 class VoteTests(TestCase):
     def _ctx(self, code='600000'):
         return {'kind': 'stock', 'code': code, 'name': code, 'as_of': _TODAY.isoformat()}
@@ -497,6 +498,7 @@ class DegradedScanTests(TestCase):
         self.assertEqual(DetectorRun.objects.count(), 0)
 
 
+@patch('stocks.services.is_trading_day', _trading_true)
 class DetectorApiTests(TestCase):
     def setUp(self):
         self.run_row = DetectorRun.objects.create(
