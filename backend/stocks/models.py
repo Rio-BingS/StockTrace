@@ -240,6 +240,9 @@ class DailyQuote(models.Model):
     )
     # 实际数据来源（eastmoney/sina/baostock/tencent）；空串为 0009 迁移前的存量行，来源未知
     source = models.CharField('数据来源', max_length=16, blank=True, default='')
+    # 是否为收盘后的最终日 K（DAT-13）：盘中拉到的当日 bar 为 False，收盘汇总后置 True；
+    # 存量行默认 True。探测器/选股/回看等需要完整日 K 的读方应过滤 is_final=True
+    is_final = models.BooleanField('已收盘', default=True)
 
     class Meta:
         verbose_name = '每日行情'

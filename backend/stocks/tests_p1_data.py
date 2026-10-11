@@ -163,3 +163,45 @@ class BaoStockSessionTests(SimpleTestCase):
                 services.BaoStockSource().fetch_stock_name('600000')
         logout.assert_called_once()
         self.assertFalse(services._bs_lock.locked())
+
+
+class DailyIsFinalTests(_NoSleep, TestCase):
+    """DAT-13：盘中拉到的当日日 K 标记为非最终，收盘后重拉置为最终。"""
+
+    def setUp(self):
+        super().setUp()
+        self.stock = Stock.objects.create(code='600000', name='浦发银行')
+        self.df = pd.DataFrame([
+            {'日期': '2026-09-01', '开盘': 9.5, '收盘': 9.9, '最高': 10, '最低': 9.4,
+             '成交量': 100, '成交额': 1000},
+            {'日期': '2026-09-02', '开盘': 9.9, '收盘': 10.0, '最高': 10.2, '最低': 9.8,
+             '成交量': 200, '成交额': 2000},
+        ])
+
+    def _fetch(self, now_str):
+        now = _aware(now_str)
+        with patch('stocks.services._try_sources',
+                   return_value=(services.SinaSource(), self.df)), \
+                patch('stocks.services.timezone.now', return_value=now), \
+                patch('stocks.services.timezone.localdate', return_value=now.date()):
+            services.fetch_daily_data(self.stock, start_date='20260901', end_date='20260902')
+
+    def _final(self, d):
+        return DailyQuote.objects.get(stock=self.stock, trade_date=d).is_final
+
+    def test_intraday_today_not_final(self):
+        self._fetch('2026-09-02 10:30:00')
+        self.assertTrue(self._final(date(2026, 9, 1)))
+        self.assertFalse(self._final(date(2026, 9, 2)))
+        # 15:00 刚收盘、汇总尚未完成仍视为非最终
+        self._fetch('2026-09-02 15:05:00')
+        self.assertFalse(self._final(date(2026, 9, 2)))
+
+    def test_after_close_refetch_marks_final(self):
+        self._fetch('2026-09-02 10:30:00')
+        self._fetch('2026-09-02 15:10:00')
+        self.assertTrue(self._final(date(2026, 9, 2)))
+
+    def test_next_day_fetch_final(self):
+        self._fetch('2026-09-03 09:00:00')
+        self.assertTrue(self._final(date(2026, 9, 2)))

@@ -609,8 +609,20 @@ def _daily_start_date(stock, bootstrap_days=365, overlap_days=5):
 _DAILY_UPDATE_FIELDS = [
     'open_price', 'close_price', 'high_price', 'low_price',
     'open_close_diff', 'open_close_pct', 'high_low_diff', 'high_low_pct',
-    'prev_close', 'change_diff', 'change_pct', 'volume', 'turnover', 'source',
+    'prev_close', 'change_diff', 'change_pct', 'volume', 'turnover', 'source', 'is_final',
 ]
+
+# 日 K 视为最终（收盘）的时刻：15:00 收盘，留 10 分钟给数据源完成汇总（DAT-13）
+_DAILY_FINAL_TIME = dt_time(15, 10)
+
+
+def _is_final_bar(trade_date, now=None):
+    """交易日早于今天，或今天已过 15:10，才算收盘后的最终日 K"""
+    local = timezone.localtime(now or timezone.now())
+    today = local.date()
+    if trade_date < today:
+        return True
+    return trade_date == today and local.time() >= _DAILY_FINAL_TIME
 
 
 # 复权基准变化判定容差（DAT-02）：相对 0.2%，绝对 0.006 元兜住库内 2 位小数的舍入误差
@@ -711,6 +723,7 @@ def fetch_daily_data(stock, start_date=None, end_date=None, full=False, sources=
             db_prev_close = prev_q.close_price
 
     prev_close_val = db_prev_close
+    now = timezone.now()
     objs = {}
     for _, row in df.iterrows():
         try:
@@ -759,6 +772,7 @@ def fetch_daily_data(stock, start_date=None, end_date=None, full=False, sources=
                 volume=volume,
                 turnover=turnover,
                 source=source.name,
+                is_final=_is_final_bar(trade_date, now),
             )
             # 当前条目的收盘价作为下一条的昨收
             prev_close_val = close_price
