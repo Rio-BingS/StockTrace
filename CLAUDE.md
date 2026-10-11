@@ -16,7 +16,7 @@ StockTrace：个人 A 股自选监控 + 行情中心。Django REST + SQLite（`b
 | `PROJECT_PROGRESS.md` | 当前状态、**待办与已知问题**、极简历史 | 接手任务前 |
 | `README.md` | 面向人的功能介绍 | 向用户解释项目时 |
 | `deploy/DEPLOY.md` | VPS 部署步骤与模板 | 部署/换机时 |
-| `handoff_cn.md` | v1.01 时代交接（陈旧，仅考古） | 一般不用 |
+| `docs/archive/handoff*.md` | v1.01 时代交接（已过时，仅考古） | 一般不用 |
 
 ## 命令
 
@@ -29,7 +29,7 @@ DJANGO_DEBUG=true python manage.py runserver 8001  # 本地 8000 常被占用；
 DJANGO_DEBUG=true python manage.py test stocks     # 全部测试（调度器自动跳过）
 DJANGO_DEBUG=true python manage.py validate_market_sources  # 只读上游字段/数据源审计，不写库
 python -m ruff check .                  # lint（ruff.toml：仅 E4/E7/E9/F）
-DJANGO_DEBUG=true python manage.py fetch_stock_data --all # 手动拉自选行情（默认 light，full=1 更全）
+DJANGO_DEBUG=true python manage.py fetch_stock_data --all # 手动拉自选行情（默认轻量；--days N 分钟线回溯 N 个交易日，上限 5；失败时非零退出）
 DJANGO_DEBUG=true python manage.py run_detector_scan     # 手动触发探测器扫描（幂等；非交易日/收盘前如实跳过）
 
 cd frontend
@@ -81,7 +81,7 @@ npm run lint && npm run build   # eslint（vue essential 档）+ 产物到 dist/
 1. **数据诚信**：外部源失败→报 unavailable/stale 并降级下一源，**绝不合成数值；未知= `null`，不是 0**；没有历史数据的功能明确标"待积累"，不做伪造。
 2. **安全模型**：DRF AllowAny + 无 CSRF，访问控制全靠 Nginx Basic Auth（settings.py 有红线注释）。8000/8001 绝不对公网暴露；systemd `User=www` 下 **Gunicorn 禁止设 user=**。
 3. **1H2G 红线**：Gunicorn 1 worker 2 线程；不要加 worker；自选 ≤ ~20 只；前端 60s 轮询。
-4. **发版 = git 标签**：验证通过后 `git tag -a vX.Y.Z`（SemVer，当前 v1.2.1）+ `git push --follow-tags`；不再维护目录快照。
+4. **发版 = git 标签**：验证通过后 `git tag -a vX.Y.Z`（SemVer；当前版本以 `git describe --tags` 为准，文档不写死版本号）+ `git push --follow-tags`；不再维护目录快照。
 5. **密钥绝不入库**：`.env`、`地址.md`、db、scheduler.lock 已 gitignore；推送前扫描。
 6. **本地环境坑**：本机代理对 `push2his.eastmoney.com` 的 TLS 间歇性干扰——资金流抓取已内置 https 退避重试 + http 兜底（故意不走 akshare 的同源封装）；2026-09-07 诊断确认 VPS（境外）对该域名同样整体不可达，fflow 已加 push2delay 镜像兜底（仅当日一根）。akshare 版本已在 requirements.txt 钉死，勿随手升级；8000 端口被用户其他服务占用，后端用 8001。
 7. **选源原则：交易所官方优先**：披露类数据（ETF 份额、两融、收盘行情口径等）交易所官方接口可用时优先于商业聚合源（东财/乐咕），聚合源兜底；衍生类数据（主力资金流、涨停池、概念归类、估值分位）交易所无对应披露，只能用商业源。两源同用时如实标注口径与披露时点（如两融 T+1、深市晚于沪市），不混用不同日期的数据硬凑合计。

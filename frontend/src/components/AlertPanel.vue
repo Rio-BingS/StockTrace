@@ -1,7 +1,10 @@
 <script setup>
-import { onMounted, onUnmounted, ref } from 'vue'
+import { ref } from 'vue'
 import { alertApi } from '../api/stocks.js'
 import { formatDateTime } from '../utils/format.js'
+import { errorMessage } from '../utils/errorMessage.js'
+import { usePolling } from '../composables/usePolling.js'
+import { confirmDialog } from '../stores/feedback.js'
 
 // stocks：看板数据（用于添加规则的股票下拉）
 defineProps({
@@ -24,8 +27,6 @@ const RULE_OPTIONS = [
   { value: 'daily_pct_below', label: '日跌幅达到 %（填正数）' },
 ]
 
-let refreshTimer = null
-
 async function load() {
   try {
     const [rulesRes, eventsRes] = await Promise.all([
@@ -36,8 +37,8 @@ async function load() {
     unreadCount.value = rulesRes.data.unread_count
     events.value = eventsRes.data
     errorMsg.value = ''
-  } catch {
-    errorMsg.value = '加载提醒数据失败'
+  } catch (e) {
+    errorMsg.value = errorMessage(e, '加载提醒数据失败')
   }
 }
 
@@ -58,7 +59,7 @@ async function addRule() {
     form.value = { stock_id: '', rule_type: f.rule_type, threshold: '', note: '' }
     await load()
   } catch (err) {
-    errorMsg.value = err.response?.data?.detail || '创建提醒失败'
+    errorMsg.value = errorMessage(err, '创建提醒失败')
   } finally {
     loading.value = false
   }
@@ -68,18 +69,24 @@ async function toggleRule(rule) {
   try {
     await alertApi.update(rule.id, { is_active: !rule.is_active })
     await load()
-  } catch {
-    errorMsg.value = '更新提醒失败'
+  } catch (e) {
+    errorMsg.value = errorMessage(e, '更新提醒失败')
   }
 }
 
 async function removeRule(rule) {
-  if (!confirm(`删除「${rule.code} ${rule.rule_display} ${rule.threshold}」提醒？`)) return
+  const ok = await confirmDialog({
+    title: '删除提醒',
+    message: `删除「${rule.code} ${rule.rule_display} ${rule.threshold}」提醒？`,
+    confirmText: '删除',
+    danger: true,
+  })
+  if (!ok) return
   try {
     await alertApi.remove(rule.id)
     await load()
-  } catch {
-    errorMsg.value = '删除提醒失败'
+  } catch (e) {
+    errorMsg.value = errorMessage(e, '删除提醒失败')
   }
 }
 
@@ -87,8 +94,8 @@ async function markAllRead() {
   try {
     await alertApi.markRead()
     await load()
-  } catch {
-    errorMsg.value = '标记已读失败'
+  } catch (e) {
+    errorMsg.value = errorMessage(e, '标记已读失败')
   }
 }
 
@@ -97,15 +104,8 @@ function toggleEvents() {
   load()
 }
 
-onMounted(() => {
-  load()
-  // 与看板轮询节奏一致：60s 刷新未读数与规则状态
-  refreshTimer = setInterval(load, 60000)
-})
-
-onUnmounted(() => {
-  if (refreshTimer) clearInterval(refreshTimer)
-})
+// 与看板轮询节奏一致：交易时段 60s 刷新未读数与规则状态，非交易时段 10 分钟（FEF-04）
+usePolling(load, { interval: 60000 })
 </script>
 
 <template>
@@ -116,7 +116,9 @@ onUnmounted(() => {
         <span v-if="unreadCount" class="badge">{{ unreadCount }}</span>
       </h2>
       <div class="head-actions">
-        <button class="btn small" @click="toggleEvents">{{ expanded ? '只看未读' : '查看全部记录' }}</button>
+        <button class="btn small" @click="toggleEvents">
+          {{ expanded ? '只看未读' : '查看全部记录' }}
+        </button>
         <button v-if="unreadCount" class="btn small" @click="markAllRead">全部已读</button>
       </div>
     </div>
@@ -132,32 +134,60 @@ onUnmounted(() => {
       <select v-model="form.rule_type" aria-label="规则类型">
         <option v-for="o in RULE_OPTIONS" :key="o.value" :value="o.value">{{ o.label }}</option>
       </select>
-      <input v-model="form.threshold" type="number" step="any" placeholder="阈值" aria-label="阈值" />
-      <input v-model="form.note" maxlength="100" placeholder="备注（可选）" aria-label="备注" class="note" />
+      <input
+        v-model="form.threshold"
+        type="number"
+        step="any"
+        placeholder="阈值"
+        aria-label="阈值"
+      />
+      <input
+        v-model="form.note"
+        maxlength="100"
+        placeholder="备注（可选）"
+        aria-label="备注"
+        class="note"
+      />
       <button class="btn primary" type="submit" :disabled="loading">+ 添加</button>
     </form>
 
     <!-- 规则列表 -->
-    <table v-if="rules.length" class="rule-table">
-      <thead>
-        <tr><th>股票</th><th>规则</th><th>阈值</th><th>备注</th><th>状态</th><th>操作</th></tr>
-      </thead>
-      <tbody>
-        <tr v-for="r in rules" :key="r.id">
-          <td>{{ r.code }} {{ r.name }}</td>
-          <td>{{ r.rule_display }}</td>
-          <td>{{ r.threshold }}</td>
-          <td class="note-cell">{{ r.note || '-' }}</td>
-          <td>
-            <button class="btn small" :class="r.is_active ? 'on' : 'off'" @click="toggleRule(r)">
-              {{ r.is_active ? '监控中' : '已停用' }}
-            </button>
-          </td>
-          <td><button class="btn small danger" @click="removeRule(r)">删除</button></td>
-        </tr>
-      </tbody>
-    </table>
-    <p v-else class="empty-hint">还没有提醒规则。添加后，盘中每 5 分钟和收盘汇总会自动评估，触发记录会显示在这里。</p>
+    <div v-if="rules.length" class="table-scroll">
+      <table class="rule-table">
+        <thead>
+          <tr>
+            <th>股票</th>
+            <th>规则</th>
+            <th>阈值</th>
+            <th>备注</th>
+            <th>状态</th>
+            <th>操作</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr v-for="r in rules" :key="r.id">
+            <td>{{ r.code }} {{ r.name }}</td>
+            <td>{{ r.rule_display }}</td>
+            <td>{{ r.threshold }}</td>
+            <td class="note-cell">{{ r.note || '-' }}</td>
+            <td>
+              <button
+                class="btn small"
+                :class="r.is_active ? 'on' : 'off'"
+                :aria-pressed="r.is_active ? 'true' : 'false'"
+                @click="toggleRule(r)"
+              >
+                {{ r.is_active ? '监控中' : '已停用' }}
+              </button>
+            </td>
+            <td><button class="btn small danger" @click="removeRule(r)">删除</button></td>
+          </tr>
+        </tbody>
+      </table>
+    </div>
+    <p v-else class="empty-hint">
+      还没有提醒规则。添加后，盘中每 5 分钟和收盘汇总会自动评估，触发记录会显示在这里。
+    </p>
 
     <!-- 触发记录 -->
     <div v-if="events.length" class="events">
@@ -197,7 +227,7 @@ onUnmounted(() => {
 }
 
 .badge {
-  background: #e94560;
+  background: var(--accent-strong);
   color: #fff;
   border-radius: 10px;
   padding: 1px 8px;
@@ -210,7 +240,7 @@ onUnmounted(() => {
 }
 
 .error-msg {
-  color: #ff8a96;
+  color: var(--danger);
   background: #3a1a1f;
   padding: 8px 12px;
   border-radius: 6px;
@@ -255,8 +285,8 @@ onUnmounted(() => {
 }
 
 .btn.primary {
-  background: #e94560;
-  border-color: #e94560;
+  background: var(--accent-strong);
+  border-color: var(--accent);
   color: #fff;
 }
 
@@ -271,11 +301,11 @@ onUnmounted(() => {
 }
 
 .btn.off {
-  color: #888;
+  color: #909090;
 }
 
 .btn.danger {
-  color: #ff8a96;
+  color: var(--danger);
   border-color: #5a2a33;
 }
 
@@ -287,7 +317,7 @@ onUnmounted(() => {
 
 .rule-table th {
   text-align: left;
-  color: #888;
+  color: #909090;
   font-weight: normal;
   padding: 6px 8px;
   border-bottom: 1px solid #2a2a44;
@@ -300,7 +330,7 @@ onUnmounted(() => {
 }
 
 .note-cell {
-  color: #888;
+  color: #909090;
   max-width: 200px;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -308,7 +338,7 @@ onUnmounted(() => {
 }
 
 .empty-hint {
-  color: #888;
+  color: #909090;
   font-size: 13px;
 }
 
@@ -344,7 +374,7 @@ onUnmounted(() => {
 }
 
 .events .time {
-  color: #777;
+  color: #919191;
   white-space: nowrap;
 }
 </style>

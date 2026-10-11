@@ -8,7 +8,7 @@ import akshare as ak
 import pandas as pd
 
 from ._cache import _cache_get, _cache_meta, _cache_set, _stale_or, _to_float
-from ._sources import _safe_df_call, _source_is_cool, _source_mark_fail, _source_mark_ok
+from ._sources import SourceChain, _safe_df_call
 from .periods import period_cache_key
 
 logger = logging.getLogger(__name__)
@@ -197,39 +197,26 @@ def fetch_market_fund_flow_hist(days=30, ttl=300, force=False):
     def load_north_hist():
         return ak.stock_hsgt_hist_em(symbol='北向资金')
 
-    # 手工轮询以便 normalize
-    candidates = [
-        (MARKET_FUND_SOURCE_EM, load_em_main),
-        (MARKET_FUND_SOURCE_NORTH, load_north_hist),
-    ]
-    cool = [c for c in candidates if _source_is_cool(c[0])]
-    hot = [c for c in candidates if not _source_is_cool(c[0])]
-    ordered = hot + cool
-
-    data = None
-    for name, fn in ordered:
-        if _source_is_cool(name) and name != ordered[-1][0]:
-            continue
-        try:
-            raw = fn()
+    def normalized(name, load):
+        # 上游原始表 → 统一结构；解析为空视为该源失败（换下一个源并计入冷却）
+        def call():
+            raw = load()
             if raw is None or (isinstance(raw, pd.DataFrame) and raw.empty):
-                _source_mark_fail(name, 'empty')
-                continue
-            parsed = _normalize_market_fund_hist(raw, days, name)
-            if not parsed:
-                _source_mark_fail(name, 'normalize_empty')
-                continue
-            _source_mark_ok(name)
-            # 北向兜底时提示口径
-            if name == MARKET_FUND_SOURCE_NORTH:
-                parsed['message'] = (
-                    '东财大盘主力暂不可用；北向资金净买额口径不同，'
-                    '已单列为 north_net_buy（元），不作为主力净流入展示'
-                )
-            data = parsed
-            break
-        except Exception as e:
-            _source_mark_fail(name, e)
+                return None
+            return _normalize_market_fund_hist(raw, days, name) or None
+        return call, name
+
+    # 统一 failover（ARC-03）：未冷却的源优先，全部失败时仍兜底尝试最后一个冷却源
+    data, source = SourceChain(last_resort=True).run([
+        normalized(MARKET_FUND_SOURCE_EM, load_em_main),
+        normalized(MARKET_FUND_SOURCE_NORTH, load_north_hist),
+    ])
+    if source == MARKET_FUND_SOURCE_NORTH:
+        # 北向兜底时提示口径
+        data['message'] = (
+            '东财大盘主力暂不可用；北向资金净买额口径不同，'
+            '已单列为 north_net_buy（元），不作为主力净流入展示'
+        )
 
     if data is None:
         data = _stale_or(
@@ -270,6 +257,7 @@ def get_market_fund_flow_window(window, ttl=300):
         upstream_rows = [merged[d] for d in sorted(merged)]
         if not upstream_rows and errors:
             upstream_error = '；'.join(errors)
+            logger.warning('大盘资金流窗口上游无数据: %s', upstream_error)
     except Exception as e:  # noqa: BLE001  线路降级
         upstream_error = str(e)
         logger.warning('大盘资金流窗口获取失败: %s', e)
@@ -299,7 +287,8 @@ def get_market_fund_flow_window(window, ttl=300):
             '（每个收盘后自动积累，上游恢复后自动回补历史）'
         )
     elif upstream_error:
-        message = f'大盘资金流获取失败（{upstream_error}），稍后可重试'
+        # 上游错误原文已写日志，对外不回显（SEC-07）
+        message = '大盘资金流获取失败，稍后可重试'
     else:
         message = '区间内暂无数据'
 

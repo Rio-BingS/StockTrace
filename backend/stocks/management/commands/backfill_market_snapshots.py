@@ -24,6 +24,7 @@ from django.core.management.base import BaseCommand
 from django.db import transaction
 from django.utils import timezone
 
+from stocks import trading_calendar
 from stocks.market import snapshots
 from stocks.models import MarketDailySnapshot
 
@@ -74,7 +75,7 @@ class Command(BaseCommand):
             )
             return
 
-        latest = snapshots._expected_latest_date()
+        latest = trading_calendar.expected_latest_date()
         # 日历不可用时保守只写到昨天，避免把盘中未收盘数值落库
         cutoff = latest or (timezone.localdate() - timedelta(days=1))
         written = skipped_existing = skipped_invalid = 0

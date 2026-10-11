@@ -1,19 +1,29 @@
 <script setup>
-import { ref, computed, onMounted } from 'vue'
+import { ref, computed, onMounted, onUnmounted } from 'vue'
 import VChart from 'vue-echarts'
 import { use } from 'echarts/core'
 import { BarChart, LineChart } from 'echarts/charts'
-import {
-  TooltipComponent,
-  GridComponent,
-  LegendComponent,
-} from 'echarts/components'
+import { TooltipComponent, GridComponent, LegendComponent } from 'echarts/components'
 import { CanvasRenderer } from 'echarts/renderers'
 import MarketSubNav from '../components/MarketSubNav.vue'
 import PeriodPicker from '../components/PeriodPicker.vue'
 import { marketApi } from '../api/stocks.js'
-import { formatPct, pctClass } from '../utils/format.js'
-import { formatAmount } from '../utils/marketFormat.js'
+import { formatNum, formatPct, pctClass } from '../utils/format.js'
+import { formatAmount, formatVolume } from '../utils/marketFormat.js'
+import { errorMessage, isCanceled } from '../utils/errorMessage.js'
+import { createRequestGuard } from '../utils/requestGuard.js'
+import { trendColor } from '../constants/colors.js'
+import { NORTH_PERIODS } from '../constants/periods.js'
+// 图表 tooltip / 坐标轴配色统一取自 charts/theme.js（ARC-06）
+import {
+  TOOLTIP_STYLE,
+  AXIS_LABEL_COLOR,
+  AXIS_LINE_COLOR,
+  SPLIT_LINE_COLOR,
+} from '../charts/theme.js'
+
+// 显式组件名：App.vue 的 KeepAlive include 按它匹配，不依赖文件名推断（FEF-15）
+defineOptions({ name: 'MarketInstitutions' })
 
 use([BarChart, LineChart, TooltipComponent, GridComponent, LegendComponent, CanvasRenderer])
 
@@ -33,10 +43,6 @@ const stockItems = computed(() => byStock.value.items || [])
 const orgItems = computed(() => byOrg.value.items || [])
 
 // ── 北向资金区间（/market/northbound/，未加载时回退 institutions 内嵌 30 日视图） ──
-const NORTH_PERIODS = [
-  ['1d', '当日'], ['3d', '3日'], ['5d', '5日'], ['1w', '近1周'],
-  ['1m', '近1月'], ['3m', '近3月'], ['6m', '近半年'], ['1y', '近1年'], ['ytd', '今年以来'],
-]
 const northPeriod = ref('1m')
 const northLoading = ref(false)
 const northError = ref('')
@@ -44,16 +50,23 @@ const northData = ref(null)
 const north = computed(() => northData.value || data.value?.northbound || {})
 const northSummary = computed(() => northData.value?.summary || {})
 
+// 切换区间/查询代码时取消旧请求、丢弃晚到的旧响应（FEF-06）
+const northGuard = createRequestGuard()
+const detailGuard = createRequestGuard()
+
 async function loadNorth() {
+  const req = northGuard.next()
   northLoading.value = true
   northError.value = ''
   try {
-    northData.value = (await marketApi.getNorthbound({ period: northPeriod.value })).data
+    const res = await marketApi.getNorthbound({ period: northPeriod.value }, { signal: req.signal })
+    if (req.isLatest()) northData.value = res.data
   } catch (e) {
+    if (!req.isLatest() || isCanceled(e)) return
     console.error(e)
-    northError.value = e.response?.data?.detail || '加载北向区间数据失败'
+    northError.value = errorMessage(e, '加载北向区间数据失败')
   } finally {
-    northLoading.value = false
+    if (req.isLatest()) northLoading.value = false
   }
 }
 function setNorthPeriod(p) {
@@ -65,38 +78,38 @@ function setNorthPeriod(p) {
 const northChart = computed(() => {
   const items = north.value.items || []
   if (!items.length) return {}
-  const dates = items.map(i => i.date)
-  const nets = items.map(i => i.net_buy)
+  const dates = items.map((i) => i.date)
+  const nets = items.map((i) => i.net_buy)
   return {
     backgroundColor: 'transparent',
     tooltip: {
       trigger: 'axis',
-      backgroundColor: '#1a1a2e',
-      borderColor: '#333',
-      textStyle: { color: '#ddd', fontSize: 12 },
+      ...TOOLTIP_STYLE,
     },
     grid: { left: '8%', right: '4%', top: '14%', bottom: '18%' },
     xAxis: {
       type: 'category',
       data: dates,
-      axisLabel: { color: '#888', fontSize: 11, rotate: 30 },
-      axisLine: { lineStyle: { color: '#444' } },
+      axisLabel: { color: AXIS_LABEL_COLOR, fontSize: 11, rotate: 30 },
+      axisLine: { lineStyle: { color: AXIS_LINE_COLOR } },
     },
     yAxis: {
       type: 'value',
       name: '亿',
-      nameTextStyle: { color: '#888' },
-      axisLabel: { color: '#888', fontSize: 11 },
-      splitLine: { lineStyle: { color: '#1a2744' } },
+      nameTextStyle: { color: AXIS_LABEL_COLOR },
+      axisLabel: { color: AXIS_LABEL_COLOR, fontSize: 11 },
+      splitLine: { lineStyle: { color: SPLIT_LINE_COLOR } },
     },
-    series: [{
-      name: '北向净买额',
-      type: 'bar',
-      data: nets,
-      itemStyle: {
-        color: (p) => (p.value != null && p.value >= 0 ? '#e94560' : '#00c853'),
+    series: [
+      {
+        name: '北向净买额',
+        type: 'bar',
+        data: nets,
+        itemStyle: {
+          color: (p) => trendColor(p.value),
+        },
       },
-    }],
+    ],
   }
 })
 
@@ -118,10 +131,16 @@ async function load(code = null) {
     }
   } catch (e) {
     console.error(e)
-    error.value = e.response?.data?.detail || '加载机构持仓失败'
+    error.value = errorMessage(e, '加载机构持仓失败')
   } finally {
     loading.value = false
   }
+}
+
+// 内联多语句处理器在 Prettier（semi: false）格式化后会变成无分号多行，Vue 模板编译失败，改为函数（OPS-10）
+function showDetail(code) {
+  stockCode.value = code
+  loadDetail()
 }
 
 async function loadDetail() {
@@ -130,24 +149,34 @@ async function loadDetail() {
     detailError.value = '请输入 6 位股票代码'
     return
   }
+  const req = detailGuard.next()
   detailLoading.value = true
   detailError.value = ''
   try {
-    const res = await marketApi.getInstitutions(code)
+    const res = await marketApi.getInstitutions(code, { signal: req.signal })
+    if (!req.isLatest()) return
     stockDetail.value = res.data?.stock_detail || null
     if (!stockDetail.value?.available) {
       detailError.value = stockDetail.value?.message || '未查到该股机构数据'
     }
   } catch (e) {
+    if (!req.isLatest() || isCanceled(e)) return
     console.error(e)
-    detailError.value = e.response?.data?.detail || '查询失败'
+    detailError.value = errorMessage(e, '查询失败')
     stockDetail.value = null
   } finally {
-    detailLoading.value = false
+    if (req.isLatest()) detailLoading.value = false
   }
 }
 
-onMounted(() => { load(); loadNorth() })
+onMounted(() => {
+  load()
+  loadNorth()
+})
+onUnmounted(() => {
+  northGuard.abort()
+  detailGuard.abort()
+})
 </script>
 
 <template>
@@ -184,12 +213,21 @@ onMounted(() => { load(); loadNorth() })
       <p class="hint" v-if="!north.available">{{ north.message || '暂无北向序列' }}</p>
       <template v-else>
         <div class="north-summary" v-if="northSummary.days != null">
-          <span>区间交易日 <b>{{ northSummary.days }}</b></span>
-          <span>合计净买额 <b :class="pctClass(northSummary.total_net_buy)">
-            {{ northSummary.total_net_buy != null ? `${northSummary.total_net_buy} 亿` : '-' }}
-          </b></span>
-          <span>净流入 <b class="up">{{ northSummary.inflow_days ?? '-' }} 天</b></span>
-          <span>净流出 <b class="down">{{ northSummary.outflow_days ?? '-' }} 天</b></span>
+          <span
+            >区间交易日 <b>{{ northSummary.days }}</b></span
+          >
+          <span
+            >合计净买额
+            <b :class="pctClass(northSummary.total_net_buy)">
+              {{ northSummary.total_net_buy != null ? `${northSummary.total_net_buy} 亿` : '-' }}
+            </b></span
+          >
+          <span
+            >净流入 <b class="up">{{ northSummary.inflow_days ?? '-' }} 天</b></span
+          >
+          <span
+            >净流出 <b class="down">{{ northSummary.outflow_days ?? '-' }} 天</b></span
+          >
           <span v-if="northData?.window?.label" class="muted">{{ northData.window.label }}</span>
         </div>
         <v-chart
@@ -220,7 +258,9 @@ onMounted(() => { load(); loadNorth() })
       <template v-if="stockDetail?.available">
         <p class="hint">
           {{ stockDetail.code }}
-          <span v-if="stockDetail.quarter_label"> · 机构明细季报 {{ stockDetail.quarter_label }}</span>
+          <span v-if="stockDetail.quarter_label">
+            · 机构明细季报 {{ stockDetail.quarter_label }}</span
+          >
         </p>
         <div class="detail-grid">
           <div class="table-wrap">
@@ -240,9 +280,9 @@ onMounted(() => { load(); loadNorth() })
                 <tr v-for="(r, i) in stockDetail.institutions" :key="i">
                   <td>{{ r.type || '-' }}</td>
                   <td class="name">{{ r.inst_name || r.inst_code || '-' }}</td>
-                  <td>{{ r.shares != null ? formatAmount(r.shares) : '-' }}</td>
-                  <td>{{ r.ratio != null ? Number(r.ratio).toFixed(2) : '-' }}</td>
-                  <td>{{ r.float_ratio != null ? Number(r.float_ratio).toFixed(2) : '-' }}</td>
+                  <td>{{ formatVolume(r.shares) }}</td>
+                  <td>{{ formatNum(r.ratio) }}</td>
+                  <td>{{ formatNum(r.float_ratio) }}</td>
                   <td :class="pctClass(r.ratio_chg)">{{ formatPct(r.ratio_chg) }}</td>
                 </tr>
               </tbody>
@@ -265,8 +305,8 @@ onMounted(() => { load(); loadNorth() })
                 <tr v-for="(r, i) in stockDetail.top_holders" :key="i">
                   <td>{{ r.rank ?? i + 1 }}</td>
                   <td class="name">{{ r.name }}</td>
-                  <td>{{ r.shares != null ? formatAmount(r.shares) : '-' }}</td>
-                  <td>{{ r.ratio != null ? Number(r.ratio).toFixed(2) : '-' }}</td>
+                  <td>{{ formatVolume(r.shares) }}</td>
+                  <td>{{ formatNum(r.ratio) }}</td>
                   <td>{{ r.nature || '-' }}</td>
                 </tr>
               </tbody>
@@ -278,11 +318,19 @@ onMounted(() => { load(); loadNorth() })
     </section>
 
     <div class="seg">
-      <button :class="{ active: tab === 'stock' }" @click="tab = 'stock'">
+      <button
+        :class="{ active: tab === 'stock' }"
+        :aria-pressed="tab === 'stock' ? 'true' : 'false'"
+        @click="tab = 'stock'"
+      >
         按股票
         <span v-if="byStock.quarter_label" class="tag">{{ byStock.quarter_label }}</span>
       </button>
-      <button :class="{ active: tab === 'org' }" @click="tab = 'org'">
+      <button
+        :class="{ active: tab === 'org' }"
+        :aria-pressed="tab === 'org' ? 'true' : 'false'"
+        @click="tab = 'org'"
+      >
         按机构
         <span v-if="byOrg.report_date" class="tag">{{ byOrg.report_date }}</span>
       </button>
@@ -309,16 +357,16 @@ onMounted(() => { load(); loadNorth() })
           <tbody>
             <tr v-for="row in stockItems" :key="row.code">
               <td>
-                <button class="link-btn" @click="stockCode = row.code; loadDetail()">
+                <button class="link-btn" @click="showDetail(row.code)">
                   {{ row.code }}
                 </button>
               </td>
               <td class="name">{{ row.name }}</td>
               <td>{{ row.inst_count ?? '-' }}</td>
               <td :class="pctClass(row.inst_count_chg)">{{ formatChg(row.inst_count_chg) }}</td>
-              <td>{{ row.hold_ratio != null ? Number(row.hold_ratio).toFixed(2) : '-' }}</td>
+              <td>{{ formatNum(row.hold_ratio) }}</td>
               <td :class="pctClass(row.hold_ratio_chg)">{{ formatPct(row.hold_ratio_chg) }}</td>
-              <td>{{ row.float_ratio != null ? Number(row.float_ratio).toFixed(2) : '-' }}</td>
+              <td>{{ formatNum(row.float_ratio) }}</td>
               <td :class="pctClass(row.float_ratio_chg)">{{ formatPct(row.float_ratio_chg) }}</td>
             </tr>
           </tbody>
@@ -359,7 +407,8 @@ onMounted(() => { load(); loadNorth() })
                   v-for="(s, j) in (row.sample_stocks || []).slice(0, 3)"
                   :key="j"
                   class="sample"
-                >{{ s.name || s.code }}</span>
+                  >{{ s.name || s.code }}</span
+                >
               </td>
             </tr>
           </tbody>
@@ -393,7 +442,7 @@ onMounted(() => { load(); loadNorth() })
 
 .sub {
   margin: 6px 0 0;
-  color: #888;
+  color: #909090;
   font-size: 13px;
 }
 
@@ -417,7 +466,7 @@ onMounted(() => { load(); loadNorth() })
 }
 
 .error-box {
-  background: #3a1520;
+  background: var(--danger-bg);
   color: #ff8a9a;
   padding: 10px 14px;
   border-radius: 8px;
@@ -460,7 +509,7 @@ onMounted(() => { load(); loadNorth() })
 }
 
 .hint {
-  color: #888;
+  color: #909090;
   font-size: 12px;
   margin: 0 0 10px;
 }
@@ -534,7 +583,7 @@ onMounted(() => { load(); loadNorth() })
 }
 
 .data-table th {
-  color: #888;
+  color: #909090;
   font-weight: 500;
 }
 
@@ -544,8 +593,12 @@ onMounted(() => { load(); loadNorth() })
   word-break: break-all;
 }
 
-.data-table .up { color: #e94560; }
-.data-table .down { color: #00c853; }
+.data-table .up {
+  color: var(--up);
+}
+.data-table .down {
+  color: var(--down);
+}
 
 .link-btn {
   background: none;
@@ -579,7 +632,8 @@ onMounted(() => { load(); loadNorth() })
   .detail-grid {
     grid-template-columns: 1fr;
   }
-}.section-head {
+}
+.section-head {
   display: flex;
   justify-content: space-between;
   align-items: center;
@@ -602,7 +656,11 @@ onMounted(() => { load(); loadNorth() })
   margin-bottom: 10px;
 }
 
-.north-summary b { color: #eee; font-size: 13px; }
-.north-summary .muted { color: #667; }
-
+.north-summary b {
+  color: #eee;
+  font-size: 13px;
+}
+.north-summary .muted {
+  color: #8f8f9c;
+}
 </style>

@@ -8,7 +8,7 @@ import json
 import pandas as pd
 from datetime import date, datetime, time as dt_time, timedelta
 from decimal import Decimal
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 from django.test import SimpleTestCase, TestCase
 from django.utils import timezone
@@ -32,6 +32,11 @@ def _trading_true(day=None):
     return True
 
 
+def _no_holders(code, **kwargs):
+    """持有人结构是独立上游（东财基金档案），ETF 详情用例不关心：固定为不可用，避免触网（OPS-03）"""
+    return {'available': False, 'items': [], 'message': '测试桩：不拉持有人结构', 'meta': {}}
+
+
 def _make_sector_snapshots(kind, days, names_by_day):
     """days: 相对 _BASE 往前的天数列表；names_by_day: offset -> {name: net}"""
     for offset, nets in names_by_day.items():
@@ -42,6 +47,8 @@ def _make_sector_snapshots(kind, days, names_by_day):
         )
 
 
+@patch('stocks.trading_calendar.is_trading_day', _trading_true)
+@patch('stocks.market.etf_flow.fetch_flow_klines', new=Mock(side_effect=RuntimeError('offline')))
 class SnapshotSaveTests(TestCase):
     def test_save_writes_industry_and_etf_but_skips_empty_concept(self):
         with patch(
@@ -53,7 +60,8 @@ class SnapshotSaveTests(TestCase):
         ), patch(
             'stocks.market.etf._normalized_etf_items',
             return_value=[{'code': '510300', 'name': '300ETF', 'share': 100.0, 'market_cap': 400.0}],
-        ), patch('akshare.fund_etf_scale_sse', return_value=pd.DataFrame()):
+        ), patch('stocks.market.snapshots._etf_spot_fresh_for', return_value=True), \
+                patch('akshare.fund_etf_scale_sse', return_value=pd.DataFrame()):
             saved = snapshots.save_daily_snapshots(trade_date=_BASE)
 
         self.assertEqual(saved[MarketDailySnapshot.KIND_INDUSTRY_FF], 1)
@@ -72,7 +80,7 @@ class SnapshotSaveTests(TestCase):
             'stocks.market.sectors.fetch_concept_fund_flow', return_value=[],
         ), patch(
             'stocks.market.etf._normalized_etf_items', return_value=[],
-        ), patch('akshare.fund_etf_scale_sse', return_value=pd.DataFrame()):
+        ), patch('stocks.market.snapshots._etf_spot_fresh_for', return_value=True), patch('akshare.fund_etf_scale_sse', return_value=pd.DataFrame()):
             snapshots.save_daily_snapshots(trade_date=_BASE)
             items[0]['net'] = 2e8
             snapshots.save_daily_snapshots(trade_date=_BASE)
@@ -85,7 +93,7 @@ class SnapshotSaveTests(TestCase):
 
 class SectorMultidayTests(TestCase):
     def _with_window(self):
-        with patch('stocks.services.is_trading_day', _trading_true), patch(
+        with patch('stocks.trading_calendar.is_trading_day', _trading_true), patch(
             'stocks.market.snapshots._expected_latest_date', return_value=_BASE,
         ):
             return snapshots.sector_multiday_nets(
@@ -124,7 +132,7 @@ class SectorRotation20dTests(TestCase):
         _make_sector_snapshots(MarketDailySnapshot.KIND_INDUSTRY_FF, 20, {
             offset: {'半导体': 10.0} for offset in range(20)
         })
-        with patch('stocks.services.is_trading_day', _trading_true), patch(
+        with patch('stocks.trading_calendar.is_trading_day', _trading_true), patch(
             'stocks.market.snapshots._expected_latest_date', return_value=_BASE,
         ):
             result = market.get_sector_rotation(
@@ -141,7 +149,7 @@ class SectorRotation20dTests(TestCase):
 
 class EtfShareChangeTests(TestCase):
     def _map(self, n):
-        with patch('stocks.services.is_trading_day', _trading_true), patch(
+        with patch('stocks.trading_calendar.is_trading_day', _trading_true), patch(
             'stocks.market.snapshots._expected_latest_date', return_value=_BASE,
         ):
             return snapshots.share_change_map(n)
@@ -181,7 +189,7 @@ class EtfShareChangeTests(TestCase):
             return_value=pd.DataFrame([
                 {'代码': '510300', '名称': '300ETF', '最新份额': 110, '成交额': 1000},
             ]),
-        ), patch('stocks.services.is_trading_day', _trading_true), patch(
+        ), patch('stocks.trading_calendar.is_trading_day', _trading_true), patch(
             'stocks.market.snapshots._expected_latest_date', return_value=_BASE,
         ):
             result = market.get_etf_share_radar()
@@ -206,7 +214,7 @@ class EtfShareSignalTests(TestCase):
             )
 
     def _with_calendar(self):
-        return patch('stocks.services.is_trading_day', _trading_true), patch(
+        return patch('stocks.trading_calendar.is_trading_day', _trading_true), patch(
             'stocks.market.snapshots._expected_latest_date', return_value=_BASE,
         )
 
@@ -298,7 +306,7 @@ class EtfShareSignalTests(TestCase):
             return_value=pd.DataFrame([
                 {'代码': '510300', '名称': '沪深300ETF', '最新价': 4.2, '最新份额': 103e8, '数据日期': '2026-09-04'},
             ]),
-        ), patch('stocks.services.is_trading_day', _trading_true), patch(
+        ), patch('stocks.trading_calendar.is_trading_day', _trading_true), patch(
             'stocks.market.snapshots._expected_latest_date', return_value=_BASE,
         ):
             data = market.get_national_team_etfs(force=True)
@@ -356,6 +364,8 @@ class SseShareBackfillTests(TestCase):
         self.assertEqual([i['share'] for i in series], [101.0, 100.0])  # 升序，仅该代码
         self.assertEqual(snapshots.share_history_series('999999', _BASE - timedelta(days=1), _BASE), [])
 
+    @patch('stocks.trading_calendar.is_trading_day', _trading_true)
+    @patch('stocks.market.etf.fetch_holder_structure', new=_no_holders)
     def test_detail_includes_share_history(self):
         for offset in (2, 1):
             MarketDailySnapshot.objects.create(
@@ -410,7 +420,7 @@ class AlertEvaluationTests(TestCase):
         PriceAlert.objects.create(
             stock=self.stock, rule_type=PriceAlert.PRICE_ABOVE, threshold=Decimal('9.5'),
         )
-        with patch('stocks.services.is_trading_day', _trading_true):
+        with patch('stocks.trading_calendar.is_trading_day', _trading_true):
             events = alerts.evaluate_alerts(now=_ALERT_NOW)
             self.assertEqual(len(events), 1)
             self.assertIn('上穿', events[0].message)
@@ -422,7 +432,7 @@ class AlertEvaluationTests(TestCase):
         PriceAlert.objects.create(
             stock=self.stock, rule_type=PriceAlert.DAILY_PCT_BELOW, threshold=Decimal('5'),
         )
-        with patch('stocks.services.is_trading_day', _trading_true):
+        with patch('stocks.trading_calendar.is_trading_day', _trading_true):
             events = alerts.evaluate_alerts(now=_ALERT_NOW)
         self.assertEqual(len(events), 1)
         self.assertIn('跌幅', events[0].message)
@@ -434,7 +444,7 @@ class AlertEvaluationTests(TestCase):
         PriceAlert.objects.create(
             stock=self.stock, rule_type=PriceAlert.DAILY_PCT_ABOVE, threshold=Decimal('3'),
         )
-        with patch('stocks.services.is_trading_day', _trading_true):
+        with patch('stocks.trading_calendar.is_trading_day', _trading_true):
             events = alerts.evaluate_alerts(now=_ALERT_NOW)
         self.assertEqual(events, [])  # 无行情就不触发，绝不拿 0 凑数
 
@@ -600,7 +610,7 @@ class MultiSourceRouterTests(SimpleTestCase):
 
 
 class SectorSnapshotFirstTests(TestCase):
-    """5d/10d 快照优先：窗口齐全不碰东财；不足时退回东财原生排行。"""
+    """5d/10d 只由快照供数：窗口齐全才可用，不足时如实不可用（DAT-15）。"""
 
     def test_5d_prefers_snapshot_when_window_complete(self):
         for offset in range(5):
@@ -609,7 +619,7 @@ class SectorSnapshotFirstTests(TestCase):
                 trade_date=_BASE - timedelta(days=offset),
                 payload=[{'name': '半导体', 'net': 10.0, 'change_pct': None}],
             )
-        with patch('stocks.services.is_trading_day', _trading_true), patch(
+        with patch('stocks.trading_calendar.is_trading_day', _trading_true), patch(
             'stocks.market.snapshots._expected_latest_date', return_value=_BASE,
         ), patch(
             'stocks.market.sectors.fetch_industry_fund_flow',
@@ -621,42 +631,31 @@ class SectorSnapshotFirstTests(TestCase):
         self.assertEqual(result['items'][0]['net'], 50.0)
         self.assertIn('MarketDailySnapshot', result['meta']['source'])
 
-    def test_5d_falls_back_to_upstream_when_snapshot_insufficient(self):
-        upstream = [
-            {'name': '半导体', 'net': 100.0, 'inflow': None, 'outflow': None,
-             'change_pct': 1.0, 'leader': None, 'leader_pct': None},
-        ]
-        with patch('stocks.services.is_trading_day', _trading_true), patch(
+    def test_5d_unavailable_when_snapshot_insufficient(self):
+        """快照不足时如实不可用，不再退回东财原生排行（DAT-15：口径固定）。"""
+        with patch('stocks.trading_calendar.is_trading_day', _trading_true), patch(
             'stocks.market.snapshots._expected_latest_date', return_value=_BASE,
         ), patch(
             'stocks.market.sectors.fetch_industry_fund_flow',
-            return_value=upstream,
         ) as fetch_flow:
             result = market.get_sector_rotation(board='industry', period='5d')
 
-        fetch_flow.assert_called_once_with(period='5d')
-        self.assertTrue(result['available'])
-        self.assertIn('stock_sector_fund_flow_rank', result['meta']['source'])
+        fetch_flow.assert_not_called()
+        self.assertFalse(result['available'])
+        self.assertEqual(result['basis'], 'ths_snapshot')
+        self.assertIn('快照积累不足', result['message'])
 
-    def test_5d_upstream_used_for_non_net_sort(self):
-        upstream = [
-            {'name': '半导体', 'net': 100.0, 'inflow': None, 'outflow': None,
-             'change_pct': 1.0, 'leader': None, 'leader_pct': None},
-        ]
-        with patch('stocks.services.is_trading_day', _trading_true), patch(
-            'stocks.market.snapshots._expected_latest_date', return_value=_BASE,
-        ), patch(
+    def test_5d_rejects_non_net_sort(self):
+        with patch(
             'stocks.market.sectors.fetch_industry_fund_flow',
-            return_value=upstream,
-        ) as fetch_flow:
-            result = market.get_sector_rotation(
+        ) as fetch_flow, self.assertRaisesMessage(ValueError, '仅支持按净额排序'):
+            market.get_sector_rotation(
                 board='industry', period='5d', sort='change_pct', order='desc',
             )
-
-        fetch_flow.assert_called_once_with(period='5d')
-        self.assertTrue(result['available'])
+        fetch_flow.assert_not_called()
 
 
+@patch('stocks.market.etf.fetch_holder_structure', new=_no_holders)
 class EtfHistSourceRoutingTests(SimpleTestCase):
     """ETF 历史多源路由：东财优先，失败切新浪；meta 如实标注实际来源。"""
 
@@ -734,6 +733,7 @@ class EtfHistSourceRoutingTests(SimpleTestCase):
         self.assertIsNone(data['price_performance']['return_5d'])
 
 
+@patch('stocks.market.etf.fetch_holder_structure', new=_no_holders)
 class EtfCustomRangeTests(SimpleTestCase):
     """ETF 详情自定义起止区间：参数校验 + 区间统计。"""
 
@@ -858,6 +858,8 @@ class StockGroupApiTests(TestCase):
         self.assertEqual(response.status_code, 400)
 
 
+@patch('stocks.trading_calendar.is_trading_day', _trading_true)
+@patch('akshare.fund_etf_scale_sse', new=Mock(return_value=pd.DataFrame()))
 class MarketFundFlowSnapshotTests(TestCase):
     """大盘主力资金流快照：收盘落库 + 窗口接口在上游挂掉时用快照兜底。"""
 
@@ -883,7 +885,7 @@ class MarketFundFlowSnapshotTests(TestCase):
             'stocks.market.sectors.fetch_concept_fund_flow', return_value=[],
         ), patch(
             'stocks.market.etf._normalized_etf_items', return_value=[],
-        ):
+        ), patch('stocks.market.snapshots._etf_spot_fresh_for', return_value=True):
             saved = snapshots.save_daily_snapshots(trade_date=_BASE)
 
         self.assertEqual(saved[MarketDailySnapshot.KIND_MARKET_FF], 1)
@@ -906,7 +908,7 @@ class MarketFundFlowSnapshotTests(TestCase):
             'stocks.market.sectors.fetch_concept_fund_flow', return_value=[],
         ), patch(
             'stocks.market.etf._normalized_etf_items', return_value=[],
-        ):
+        ), patch('stocks.market.snapshots._etf_spot_fresh_for', return_value=True):
             saved = snapshots.save_daily_snapshots(trade_date=_BASE)
         self.assertNotIn(MarketDailySnapshot.KIND_MARKET_FF, saved)
         self.assertFalse(
@@ -1034,8 +1036,9 @@ class ZtSentimentTests(SimpleTestCase):
         })
 
     def test_metrics_top_and_seal_rate(self):
-        with patch('stocks.market.sentiment.is_trading_day', return_value=True), \
+        with patch('stocks.trading_calendar.is_trading_day', return_value=True), \
              patch('stocks.market.sentiment._date', _FakeDate), \
+             patch('stocks.trading_calendar._date', _FakeDate), \
              patch('akshare.stock_zt_pool_em', return_value=self._zt_df()), \
              patch('akshare.stock_zt_pool_dtgc_em', return_value=pd.DataFrame({'x': [1]})), \
              patch('akshare.stock_zt_pool_zbgc_em', return_value=pd.DataFrame({'x': [1, 2, 3]})):
@@ -1054,8 +1057,9 @@ class ZtSentimentTests(SimpleTestCase):
     def test_fallback_to_recent_day_when_today_empty(self):
         seq = iter([pd.DataFrame(), self._zt_df()])
 
-        with patch('stocks.market.sentiment.is_trading_day', return_value=True), \
+        with patch('stocks.trading_calendar.is_trading_day', return_value=True), \
              patch('stocks.market.sentiment._date', _FakeDate), \
+             patch('stocks.trading_calendar._date', _FakeDate), \
              patch('akshare.stock_zt_pool_em', side_effect=lambda date: next(seq)), \
              patch('akshare.stock_zt_pool_dtgc_em', return_value=pd.DataFrame()), \
              patch('akshare.stock_zt_pool_zbgc_em', return_value=pd.DataFrame()):
@@ -1066,8 +1070,9 @@ class ZtSentimentTests(SimpleTestCase):
         self.assertIn('收盘口径', d['message'])
 
     def test_all_fail_degrades_honestly(self):
-        with patch('stocks.market.sentiment.is_trading_day', return_value=True), \
+        with patch('stocks.trading_calendar.is_trading_day', return_value=True), \
              patch('stocks.market.sentiment._date', _FakeDate), \
+             patch('stocks.trading_calendar._date', _FakeDate), \
              patch('akshare.stock_zt_pool_em', side_effect=RuntimeError('boom')):
             d = market.sentiment.fetch_zt_sentiment(force=True)
         self.assertFalse(d['available'])
@@ -1107,8 +1112,9 @@ class MarginBalanceTests(SimpleTestCase):
                 return self._sz_df(12900.00, 12780.00)
             raise ValueError('该日未披露')  # 深交所对未披露日期直接抛错
 
-        with patch('stocks.market.sentiment.is_trading_day', return_value=True), \
+        with patch('stocks.trading_calendar.is_trading_day', return_value=True), \
              patch('stocks.market.sentiment._date', _FakeDate), \
+             patch('stocks.trading_calendar._date', _FakeDate), \
              patch('akshare.stock_margin_sse', return_value=self._sse_df()), \
              patch('akshare.stock_margin_szse', side_effect=fake_sz):
             d = market.sentiment.fetch_margin_balance(force=True)
@@ -1122,8 +1128,9 @@ class MarginBalanceTests(SimpleTestCase):
         self.assertFalse(d.get('message'))
 
     def test_sz_unpublished_degrades_to_sh_only(self):
-        with patch('stocks.market.sentiment.is_trading_day', return_value=True), \
+        with patch('stocks.trading_calendar.is_trading_day', return_value=True), \
              patch('stocks.market.sentiment._date', _FakeDate), \
+             patch('stocks.trading_calendar._date', _FakeDate), \
              patch('akshare.stock_margin_sse', return_value=self._sse_df()), \
              patch('akshare.stock_margin_szse', side_effect=ValueError('未披露')):
             d = market.sentiment.fetch_margin_balance(force=True)
@@ -1135,8 +1142,9 @@ class MarginBalanceTests(SimpleTestCase):
         self.assertIn('沪市口径', d['message'])
 
     def test_all_fail_degrades_honestly(self):
-        with patch('stocks.market.sentiment.is_trading_day', return_value=True), \
+        with patch('stocks.trading_calendar.is_trading_day', return_value=True), \
              patch('stocks.market.sentiment._date', _FakeDate), \
+             patch('stocks.trading_calendar._date', _FakeDate), \
              patch('akshare.stock_margin_sse', side_effect=RuntimeError('boom')), \
              patch('akshare.stock_margin_szse', side_effect=RuntimeError('boom')):
             d = market.sentiment.fetch_margin_balance(force=True)
@@ -1162,7 +1170,7 @@ class SnapshotSseSharePreferenceTests(TestCase):
         sse_kwargs = (
             {'side_effect': sse} if isinstance(sse, Exception) else {'return_value': sse}
         )
-        with patch('stocks.services.is_trading_day', _trading_true), patch(
+        with patch('stocks.trading_calendar.is_trading_day', _trading_true), patch(
             'stocks.market.sectors.fetch_industry_fund_flow', return_value=[],
         ), patch(
             'stocks.market.sectors.fetch_concept_fund_flow', return_value=[],
@@ -1170,7 +1178,8 @@ class SnapshotSseSharePreferenceTests(TestCase):
             'stocks.market.etf_flow.fetch_flow_klines', side_effect=RuntimeError('down'),
         ), patch(
             'stocks.market.etf._normalized_etf_items', return_value=em_items,
-        ), patch('akshare.fund_etf_scale_sse', **sse_kwargs):
+        ), patch('stocks.market.snapshots._etf_spot_fresh_for', return_value=True), \
+                patch('akshare.fund_etf_scale_sse', **sse_kwargs):
             return snapshots.save_daily_snapshots(trade_date=_BASE)
 
     def _saved_etf_rows(self):
@@ -1320,7 +1329,7 @@ class SnapshotCloseGuardTests(TestCase):
     def _save_with(self, fake_now, trade_date=None):
         aware = timezone.make_aware(fake_now)
         with patch('stocks.market.snapshots.timezone') as tz, \
-             patch('stocks.services.is_trading_day', _trading_true), \
+             patch('stocks.trading_calendar.is_trading_day', _trading_true), \
              patch(
                  'stocks.market.sectors._ths_fund_flow_df',
                  return_value=pd.DataFrame([{'行业': 'A', '净额': 1.0}]),
@@ -1330,7 +1339,8 @@ class SnapshotCloseGuardTests(TestCase):
                  'stocks.market.etf._normalized_etf_items', return_value=[],
              ), patch(
                  'stocks.market.etf_flow.fetch_flow_klines', side_effect=RuntimeError('down'),
-             ), patch('akshare.fund_etf_scale_sse', return_value=pd.DataFrame()):
+             ), patch('stocks.market.snapshots._etf_spot_fresh_for', return_value=True), \
+                patch('akshare.fund_etf_scale_sse', return_value=pd.DataFrame()):
             tz.localtime.return_value = aware
             return snapshots.save_daily_snapshots(trade_date=trade_date or aware.date())
 
@@ -1372,7 +1382,7 @@ class SnapshotSelfCheckTests(TestCase):
 
     def test_all_present_returns_empty(self):
         self._patch_now()
-        with patch('stocks.services.is_trading_day', _trading_true):
+        with patch('stocks.trading_calendar.is_trading_day', _trading_true):
             self._write(MarketDailySnapshot.KIND_INDUSTRY_FF, [{'name': 'A', 'net': 1.0}])
             self._write(MarketDailySnapshot.KIND_CONCEPT_FF, [{'name': 'B', 'net': 2.0}])
             self._write(MarketDailySnapshot.KIND_MARKET_FF, [{'date': '2026-09-07', 'main_net': 1.0}])
@@ -1382,7 +1392,7 @@ class SnapshotSelfCheckTests(TestCase):
 
     def test_missing_and_thin_kinds_listed(self):
         self._patch_now()
-        with patch('stocks.services.is_trading_day', _trading_true):
+        with patch('stocks.trading_calendar.is_trading_day', _trading_true):
             self._write(MarketDailySnapshot.KIND_INDUSTRY_FF, [{'name': 'A', 'net': 1.0}])
             self._write(MarketDailySnapshot.KIND_ETF_SHARE, [{'code': '510300'}] * 3)  # 行数骤减
             missing = snapshots.verify_daily_snapshots()
@@ -1395,10 +1405,10 @@ class SnapshotSelfCheckTests(TestCase):
     def test_before_close_or_weekend_returns_none(self):
         mock = self._patch_now()
         mock.localtime.return_value = timezone.make_aware(datetime(2026, 9, 7, 10, 0))
-        with patch('stocks.services.is_trading_day', _trading_true):
+        with patch('stocks.trading_calendar.is_trading_day', _trading_true):
             self.assertIsNone(snapshots.verify_daily_snapshots())
         mock.localtime.return_value = timezone.make_aware(datetime(2026, 9, 7, 16, 0))
-        with patch('stocks.services.is_trading_day', return_value=False):
+        with patch('stocks.trading_calendar.is_trading_day', return_value=False):
             self.assertIsNone(snapshots.verify_daily_snapshots())
 
 
@@ -1525,7 +1535,7 @@ class HolderStructureTests(SimpleTestCase):
         self.assertTrue(d['available'])
         self.assertEqual(len(d['items']), 2)
         self.assertEqual(d['items'][0]['institution_pct'], 61.65)  # % 已清洗
-        self.assertEqual(d['items'][0]['total_shares'], 189.15)
+        self.assertAlmostEqual(d['items'][0]['total_shares'], 189.15e8)  # 亿份→份（DAT-20）
         self.assertIn('间接观察', d['meta']['disclaimer'])
 
     def test_upstream_fail_degrades(self):

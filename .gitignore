@@ -10,15 +10,23 @@ db.sqlite3-shm
 db.sqlite3-journal
 *.sqlite3.bak*
 backend/scheduler.lock
+backend/task-*.lock
 backend/scheduler_heartbeat.json
 backend/logs/
+*.log
+backend/staticfiles/
 
 # 数据库备份目录（本地演练/误放在仓库内时）
 backups/
 *.sqlite3.gz
 
-# 环境变量与密钥
+# 环境变量与密钥（SEC-06）
 .env
+.env.*
+*.pem
+*.key
+.htpasswd*
+!deploy/env.example
 地址.md
 
 # VPS 备份（可能含密钥/证书/数据库，绝不入库）

@@ -46,3 +46,42 @@ class AiProviderSerializer(serializers.ModelSerializer):
         elif self.instance is None and not attrs.get('api_key_encrypted'):
             raise serializers.ValidationError({'api_key': '创建时必须提供 API Key'})
         return attrs
+
+
+# ---- AI 选股入参校验（AIX-01）：限制长度与结构，畸形输入返回 400 而不是 500 ----
+
+class ScreenerAiInputSerializer(serializers.Serializer):
+    query = serializers.CharField(max_length=200)
+
+
+class CommentRowSerializer(serializers.Serializer):
+    # 只认股票代码；名称与行情由服务端按代码从库里取，不信任客户端传来的数值
+    code = serializers.RegexField(r'^\d{6}$', error_messages={'invalid': '股票代码必须是 6 位数字'})
+
+
+class ScreenerCommentInputSerializer(serializers.Serializer):
+    query = serializers.CharField(max_length=200, allow_blank=True, required=False, default='')
+    results = serializers.ListField(
+        child=CommentRowSerializer(), min_length=1, max_length=50,
+        error_messages={
+            'min_length': 'results 必须是非空数组',
+            'max_length': 'results 最多 50 行',
+        },
+    )
+
+
+def first_error_text(errors):
+    """把 DRF 嵌套错误压平成一句可直接展示的文字（前端只展示字符串 detail）。"""
+    if isinstance(errors, dict):
+        for field, value in errors.items():
+            text = first_error_text(value)
+            if text:
+                return text if field == 'non_field_errors' else f'{field}：{text}'
+    elif isinstance(errors, (list, tuple)):
+        for value in errors:
+            text = first_error_text(value)
+            if text:
+                return text
+    elif errors:
+        return str(errors)
+    return ''

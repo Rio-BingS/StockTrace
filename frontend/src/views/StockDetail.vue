@@ -2,7 +2,17 @@
 import { ref, onMounted, computed, watch } from 'vue'
 import { useRoute } from 'vue-router'
 import { stockApi, marketApi } from '../api/stocks.js'
-import { formatPct, formatNum, formatSigned, formatDateTime, pctClass } from '../utils/format.js'
+import {
+  formatPct,
+  formatNum,
+  formatRate,
+  formatSigned,
+  formatDateTime,
+  pctClass,
+} from '../utils/format.js'
+import { formatAmount } from '../utils/marketFormat.js'
+import { quoteForDate } from '../utils/intraday.js'
+import { pageTitle } from '../utils/routerHelpers.js'
 import KlineChart from '../components/KlineChart.vue'
 import IntradayChart from '../components/IntradayChart.vue'
 import AiAnalysisPanel from '../components/AiAnalysisPanel.vue'
@@ -36,23 +46,38 @@ async function loadMargin() {
   }
 }
 
+function listOf(res) {
+  return res.data.results || res.data
+}
+
+// 每次整页加载递增；切换股票后旧请求晚到时丢弃
+let loadSeq = 0
+
 async function loadData() {
+  const seq = ++loadSeq
+  const id = stockId.value
   loading.value = true
   try {
-    if (!stockInfo.value) {
-      try {
-        const infoRes = await stockApi.get(stockId.value)
-        stockInfo.value = infoRes.data
-        if (stockInfo.value) code.value = stockInfo.value.code
-      } catch (e) {
-        console.error('加载股票信息失败', e)
-      }
-    }
+    // 股票信息、日线、最新行情互不依赖，并行请求；单个失败不拖垮其它区块（FEF-14）
+    const [infoRes, dailyRes, latestRes] = await Promise.allSettled([
+      stockInfo.value ? Promise.resolve(null) : stockApi.get(id),
+      stockApi.getDaily(id, { days: days.value }),
+      stockApi.getDailyLatest(id),
+    ])
+    if (seq !== loadSeq) return
 
-    const dailyRes = await stockApi.getDaily(stockId.value, { days: days.value })
-    dailyData.value = dailyRes.data.results || dailyRes.data
-    const latestRes = await stockApi.getDailyLatest(stockId.value)
-    latestQuote.value = latestRes.data
+    if (infoRes.status === 'fulfilled') {
+      if (infoRes.value) {
+        stockInfo.value = infoRes.value.data
+        if (stockInfo.value) code.value = stockInfo.value.code
+      }
+    } else {
+      console.error('加载股票信息失败', infoRes.reason)
+    }
+    if (dailyRes.status === 'fulfilled') dailyData.value = listOf(dailyRes.value)
+    else console.error('加载日线数据失败', dailyRes.reason)
+    if (latestRes.status === 'fulfilled') latestQuote.value = latestRes.value.data
+    else console.error('加载最新行情失败', latestRes.reason)
 
     // 默认加载当日走势
     if (latestQuote.value?.trade_date) {
@@ -62,25 +87,41 @@ async function loadData() {
       intradayDate.value = ''
       intradayQuote.value = null
     }
-  } catch (e) {
-    console.error('加载股票数据失败', e)
   } finally {
-    loading.value = false
+    if (seq === loadSeq) loading.value = false
+  }
+}
+
+// 切换显示天数只重拉日线，保留用户在 K 线上选中的分时日期（FEF-14）
+async function loadDaily() {
+  const id = stockId.value
+  const seq = loadSeq
+  try {
+    const res = await stockApi.getDaily(id, { days: days.value })
+    if (seq !== loadSeq || id !== stockId.value) return
+    dailyData.value = listOf(res)
+    if (intradayDate.value) {
+      intradayQuote.value = quoteForDate(dailyData.value, latestQuote.value, intradayDate.value)
+    }
+  } catch (e) {
+    console.error('加载日线数据失败', e)
   }
 }
 
 async function showIntraday(date) {
   intradayDate.value = date
-  // 从 dailyData 中找该日的行情数据
-  const dayQuote = dailyData.value.find(d => d.trade_date === date)
-  intradayQuote.value = dayQuote || latestQuote.value
+  // 只用同一交易日的行情做分时基准，找不到时不借用别的交易日的昨收（FEF-13）
+  intradayQuote.value = quoteForDate(dailyData.value, latestQuote.value, date)
   await loadMinuteData(date)
 }
 
 async function loadMinuteData(date) {
   try {
-    const res = await stockApi.getMinutes(stockId.value, { date })
-    minuteData.value = res.data.results || res.data
+    const id = stockId.value
+    const res = await stockApi.getMinutes(id, { date })
+    // 连续点击不同日期 / 切换股票时，只保留最后一次请求的结果
+    if (id !== stockId.value || date !== intradayDate.value) return
+    minuteData.value = listOf(res)
   } catch (e) {
     console.error('加载分钟数据失败', e)
     minuteData.value = []
@@ -119,15 +160,18 @@ watch(code, (c) => {
   if (c) loadMargin()
   else margin.value = null
 })
+
+// 标题带上股票代码与名称，多标签页时便于区分（FEF-16）
+watch(latestQuote, (q) => {
+  if (q?.code) document.title = pageTitle(`${q.code} ${q.name || ''}`.trim())
+})
 </script>
 
 <template>
   <div class="stock-detail" v-if="!loading || latestQuote">
     <div class="detail-header">
       <router-link to="/" class="back-link">← 返回面板</router-link>
-      <h1 v-if="latestQuote">
-        {{ latestQuote.code }} {{ latestQuote.name }}
-      </h1>
+      <h1 v-if="latestQuote">{{ latestQuote.code }} {{ latestQuote.name }}</h1>
       <h1 v-else>{{ code }}</h1>
     </div>
 
@@ -170,7 +214,7 @@ watch(code, (c) => {
         </div>
         <div class="summary-item">
           <span class="label">振幅</span>
-          <span class="value">{{ formatPct(latestQuote.high_low_pct) }}</span>
+          <span class="value">{{ formatRate(latestQuote.high_low_pct) }}</span>
         </div>
         <div class="summary-item highlight">
           <span class="label">最高价</span>
@@ -195,11 +239,7 @@ watch(code, (c) => {
 
     <!-- 当日走势图 -->
     <div class="intraday-section">
-      <IntradayChart
-        :minuteData="minuteData"
-        :dailyQuote="intradayQuote"
-        :date="intradayDate"
-      />
+      <IntradayChart :minuteData="minuteData" :dailyQuote="intradayQuote" :date="intradayDate" />
     </div>
 
     <!-- K线图 -->
@@ -207,7 +247,7 @@ watch(code, (c) => {
       <h2>日K线图</h2>
       <div class="days-select">
         <label>显示天数：</label>
-        <select v-model="days" @change="loadData">
+        <select v-model="days" @change="loadDaily">
           <option :value="7">7天</option>
           <option :value="30">30天</option>
           <option :value="90">90天</option>
@@ -215,11 +255,7 @@ watch(code, (c) => {
           <option :value="365">1年</option>
         </select>
       </div>
-      <KlineChart
-        :data="dailyData"
-        :code="code || stockId"
-        @date-click="onKlineDateClick"
-      />
+      <KlineChart :data="dailyData" @date-click="onKlineDateClick" />
     </div>
 
     <!-- 两融余额（交易所官方披露） -->
@@ -229,25 +265,27 @@ watch(code, (c) => {
         <div class="margin-grid">
           <div class="margin-item">
             <span class="label">融资余额</span>
-            <span class="value">{{ margin.rz != null ? margin.rz.toLocaleString() + ' 亿' : '-' }}</span>
+            <span class="value">{{ formatAmount(margin.rz, { unit: '亿' }) }}</span>
           </div>
           <div class="margin-item" v-if="margin.rq != null">
             <span class="label">融券余额</span>
-            <span class="value">{{ margin.rq.toLocaleString() }} 亿</span>
+            <span class="value">{{ formatAmount(margin.rq, { unit: '亿' }) }}</span>
           </div>
           <div class="margin-item">
             <span class="label">两融余额</span>
-            <span class="value">{{ margin.total != null ? margin.total.toLocaleString() + ' 亿' : '-' }}</span>
+            <span class="value">{{ formatAmount(margin.total, { unit: '亿' }) }}</span>
           </div>
           <div class="margin-item">
             <span class="label">融资余额日变化</span>
             <span class="value" :class="pctClass(margin.chg_1d)">
-              {{ margin.chg_1d != null ? (margin.chg_1d > 0 ? '+' : '') + margin.chg_1d + ' 亿' : '-' }}
+              {{ formatAmount(margin.chg_1d, { unit: '亿', signed: true }) }}
             </span>
           </div>
         </div>
         <div class="margin-note">
-          截至 {{ margin.date }} · 交易所 T+1 披露<span v-if="margin.message"> · {{ margin.message }}</span>
+          截至 {{ margin.date }} · 交易所 T+1 披露<span v-if="margin.message">
+            · {{ margin.message }}</span
+          >
         </div>
       </template>
       <div v-else class="margin-note">{{ margin.message || '暂不可用' }}</div>
@@ -266,7 +304,7 @@ watch(code, (c) => {
 }
 
 .back-link {
-  color: #e94560;
+  color: var(--accent);
   text-decoration: none;
   font-size: 14px;
 }
@@ -307,7 +345,7 @@ watch(code, (c) => {
 }
 
 .summary-item .label {
-  color: #888;
+  color: #909090;
   font-size: 12px;
 }
 
@@ -318,16 +356,16 @@ watch(code, (c) => {
 }
 
 .up {
-  color: #e94560;
+  color: var(--up);
 }
 
 .down {
-  color: #00c853;
+  color: var(--down);
 }
 
 .no-data {
   text-align: center;
-  color: #666;
+  color: #919191;
   padding: 60px;
   background: #16213e;
   border-radius: 8px;
@@ -367,7 +405,7 @@ watch(code, (c) => {
 .loading {
   text-align: center;
   padding: 60px;
-  color: #888;
+  color: #909090;
 }
 
 @media (max-width: 768px) {
@@ -379,7 +417,9 @@ watch(code, (c) => {
     font-size: 22px;
   }
 }
-.margin-section { margin-top: 16px; }
+.margin-section {
+  margin-top: 16px;
+}
 .margin-grid {
   display: grid;
   grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
@@ -390,7 +430,20 @@ watch(code, (c) => {
   border-radius: 8px;
   padding: 10px 12px;
 }
-.margin-item .label { display: block; color: #888; font-size: 12px; margin-bottom: 4px; }
-.margin-item .value { font-size: 16px; font-weight: bold; color: #eee; }
-.margin-note { margin-top: 8px; font-size: 12px; color: #888; }
+.margin-item .label {
+  display: block;
+  color: #909090;
+  font-size: 12px;
+  margin-bottom: 4px;
+}
+.margin-item .value {
+  font-size: 16px;
+  font-weight: bold;
+  color: #eee;
+}
+.margin-note {
+  margin-top: 8px;
+  font-size: 12px;
+  color: #909090;
+}
 </style>

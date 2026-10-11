@@ -22,6 +22,7 @@ import time
 from datetime import date, timedelta
 
 import requests
+from django.utils import timezone
 
 from ._cache import _cache_get, _cache_meta, _cache_set, _to_float
 from .etf import NATIONAL_TEAM_ETFS
@@ -136,13 +137,13 @@ def get_national_team_flow(period='3m', start=None, end=None, ttl=1800):
             raise ValueError('start/end 必须是 YYYY-MM-DD')
         if start_d and end_d and start_d > end_d:
             raise ValueError('start 不能晚于 end')
-        if end_d and end_d > date.today():
+        if end_d and end_d > timezone.localdate():
             raise ValueError('end 不能晚于今天')
-        if start_d and (end_d or date.today()) - start_d > timedelta(days=400):
+        if start_d and (end_d or timezone.localdate()) - start_d > timedelta(days=400):
             raise ValueError('自定义区间最长约 400 天')
         cache_key = f'ntf_flow_{start or "begin"}_{end or "now"}'
-        window_start = (start_d or (end_d or date.today()) - timedelta(days=90)).isoformat()
-        window_end = (end_d or date.today()).isoformat()
+        window_start = (start_d or (end_d or timezone.localdate()) - timedelta(days=90)).isoformat()
+        window_end = (end_d or timezone.localdate()).isoformat()
         trading_tail = None
     else:
         if period not in _FLOW_PERIODS:
@@ -152,7 +153,7 @@ def get_national_team_flow(period='3m', start=None, end=None, ttl=1800):
         if cached is not None:
             return cached
         days = _FLOW_PERIODS[period]
-        end_d = date.today()
+        end_d = timezone.localdate()
         start_d = (end_d - timedelta(days=days)) if days else date(end_d.year, 1, 1)
         window_start = start_d.isoformat()
         window_end = end_d.isoformat()
@@ -282,7 +283,8 @@ def _unavailable_payload(cache_key, ttl, period, start, reason):
             'outflow_count': 0,
         },
         'failed_codes': [],
-        'message': f'东财资金流线路当前不可达（{reason}），稍后可重试',
+        # reason 只进日志（调用方已记录），不回显上游异常原文（SEC-07）
+        'message': '东财资金流线路当前不可达，稍后可重试',
         'meta': _cache_meta(
             cache_key, ttl, _flow_source(), False,
             disclaimer='历史主力净流入来自东方财富，上游仅提供最近约 120 个交易日。',

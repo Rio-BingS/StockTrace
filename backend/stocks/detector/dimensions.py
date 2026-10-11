@@ -70,14 +70,75 @@ def _sign_value(raw, params):
     - |raw| > max：变化过猛，疑似已进入突变/趋势展开阶段，不是早期迹象，
       如实标注不投票（这是「识别早期而非追认突变」的关键闸门）；
     - value = raw/mild × 50，让 ±mild（温和带边界）对应 ±50 分。
+
+    边界（ALG-15）：raw == 0 没有方向，不投票（旧实现 min=0 时会判成 down）；
+    参数可在库里手改，mild ≤ 0 或不满足 0 ≤ min < max 视为配置错误，如实
+    不投票、value 为 None（旧实现 mild=0 时热力图显示 0 却照常投票）。
     """
-    mild = params['mild']
-    value = _clamp(raw / mild * 50, -100, 100) if mild else 0.0
-    if abs(raw) < params['min']:
+    mild, lo, hi = params.get('mild'), params.get('min'), params.get('max')
+    if not _params_valid(mild, lo, hi):
+        return None, None, '维度参数非法（需 mild > 0 且 0 ≤ min < max），不投票'
+    value = _clamp(raw / mild * 50, -100, 100)
+    if raw == 0 or abs(raw) < lo:
         return value, None, ''
-    if abs(raw) > params['max']:
+    if abs(raw) > hi:
         return value, None, '幅度超出温和区间，疑似突变而非早期迹象'
     return value, ('up' if raw > 0 else 'down'), ''
+
+
+def _params_valid(mild, lo, hi):
+    """温和带参数合法性：mild > 0 且 0 ≤ min < max（数值类型）。"""
+    try:
+        return float(mild) > 0 and 0 <= float(lo) < float(hi)
+    except (TypeError, ValueError):
+        return False
+
+
+def _noise_gate(raw, history, params):
+    """噪声闸门（ALG-04）：|raw| 必须超过自身历史 |raw| 分布的 noise_pct 分位才投票。
+
+    为什么需要：min 是跨品种的绝对常数，远低于单日量比/分位/均线距离的自然
+    噪声——随机游走模拟下平静样本约三成会出「≥2 维同向」信号。把投票门槛
+    换成「相对自己的历史是否异常」，阈值随品种自身噪声缩放。
+    history 是当前点之前的 raw 序列（不含当前点，含 None 时跳过）；
+    noise_pct 为 0/缺省时关闭闸门（向前兼容）。返回不投票原因，通过返回 ''。
+    """
+    q = params.get('noise_pct')
+    if not q:
+        return ''
+    window = int(params.get('noise_window', 60))
+    need = int(params.get('noise_min', 15))
+    sample = [abs(v) for v in history if v is not None][-window:]
+    if len(sample) < need:
+        return f'噪声基线样本不足（{len(sample)}/{need}），不投票'
+    thr = _percentile(sample, q)
+    if abs(raw) <= thr:
+        return f'漂移未超出自身历史 {q:.0%} 分位（噪声带 ±{thr:.3g}），不投票'
+    return ''
+
+
+def _gated(raw, history, params):
+    """_sign_value + 噪声闸门：温和带内且超出自身噪声带才投票。"""
+    value, direction, note = _sign_value(raw, params)
+    if direction is not None:
+        gate = _noise_gate(raw, history, params)
+        if gate:
+            direction, note = None, gate
+    return value, direction, note
+
+
+def _ols_slope(ys):
+    """等间距序列的最小二乘斜率（x = 0..n-1）；含 None 或不足 2 点返回 None。
+
+    比两端点差分稳健：单日量比的噪声只按 1/n 权重进入斜率，而不是全额。
+    """
+    if not ys or len(ys) < 2 or any(v is None for v in ys):
+        return None
+    n = len(ys)
+    mx = (n - 1) / 2
+    my = sum(ys) / n
+    sxx = sum((i - mx) ** 2 for i in range(n))
+    return sum((i - mx) * (y - my) for i, y in enumerate(ys)) / sxx
 
 
 def _unavailable(note):
@@ -111,6 +172,10 @@ def _series_points(dates, values, count=20):
 MIN_PRICE_BARS = 30
 # sector 目标（快照派生序列）的最低有效天数：覆盖 ma20/波动窗口的底线。
 MIN_SECTOR_POINTS = 12
+# 融资余额只在这些指数上投票（ALG-09）：两融是沪深合计的全市场口径，对 5 个
+# 指数完全相同，逐个投票等于同一事实计 5 票、信号高度相关并在回看里被当成独立
+# 样本；沪深300 横跨沪深两市，作为全市场的代表。
+MARGIN_VOTE_CODES = ('sh000300',)
 
 
 def build_index_context(code, name):
@@ -125,6 +190,9 @@ def build_index_context(code, name):
         return None, f'指数日线仅 {len(items)} 根，历史不足'
 
     ctx = _price_ctx('index', code, name, items)
+    ctx['margin'] = []
+    if code not in MARGIN_VOTE_CODES:
+        return ctx, ''  # 只有沪深300用融资余额（ALG-09），其余指数不必读快照
     # 融资余额序列：本站日度快照积累（T+1 披露），给 margin_north 维度用；
     # 积累不足时维度自行 available=False，不影响其他维度。
     rows = (
@@ -143,13 +211,17 @@ def build_index_context(code, name):
 
 
 def build_stock_context(stock):
-    """自选股上下文：DailyQuote（本站已拉取的日线），零新增上游请求。"""
+    """自选股上下文：DailyQuote（本站已拉取的日线），零新增上游请求。
+
+    只用已收盘的日线（DAT-13）：盘中拉到的当日 bar 量价不完整，混进序列会
+    让振幅/量比/均线距离按半天数据投票。
+    """
     rows = list(
-        DailyQuote.objects.filter(stock=stock)
+        DailyQuote.objects.filter(stock=stock, is_final=True)
         .order_by('-trade_date')
         .values_list(
             'trade_date', 'open_price', 'high_price', 'low_price',
-            'close_price', 'volume',
+            'close_price', 'volume', 'turnover',
         )[:70]
     )[::-1]
     if len(rows) < MIN_PRICE_BARS:
@@ -162,10 +234,14 @@ def build_stock_context(stock):
             'low': float(r[3]) if r[3] is not None else None,
             'close': float(r[4]) if r[4] is not None else None,
             'volume': float(r[5]) if r[5] is not None else None,
+            'amount': float(r[6]) if r[6] is not None else None,
         }
         for r in rows
     ]
-    return _price_ctx('stock', stock.code, stock.name, items), ''
+    ctx = _price_ctx('stock', stock.code, stock.name, items)
+    # 成交额（元）只用于识别量价基准断层（ALG-13），不参与其他维度
+    ctx['amount'] = [it['amount'] for it in items]
+    return ctx, ''
 
 
 def _price_ctx(kind, code, name, items):
@@ -184,30 +260,50 @@ def _price_ctx(kind, code, name, items):
     }
 
 
-def build_sector_context(kind, name, lookback_days=45):
+SECTOR_LOOKBACK_DAYS = 45
+
+
+def _sector_kind_db(kind):
+    return (
+        MarketDailySnapshot.KIND_INDUSTRY_FF
+        if kind == 'industry'
+        else MarketDailySnapshot.KIND_CONCEPT_FF
+    )
+
+
+def load_sector_snapshots(kind, lookback_days=SECTOR_LOOKBACK_DAYS):
+    """一次读出某类板块最近 lookback_days 个快照日并按名字建索引（PERF-04）。
+
+    返回 [(trade_date, {name: row})]，日期升序。扫描时每类只读一次、全部板块
+    共用；旧实现每个板块各自重读 45 天全量 JSON，一次扫描约 2 万次大 JSON
+    反序列化。
+    """
+    rows = (
+        MarketDailySnapshot.objects.filter(kind=_sector_kind_db(kind))
+        .order_by('-trade_date')
+        .values_list('trade_date', 'payload')[:lookback_days]
+    )
+    out = []
+    for trade_date, payload in reversed(list(rows)):
+        out.append((trade_date, {r.get('name'): r for r in (payload or []) if r.get('name')}))
+    return out
+
+
+def build_sector_context(kind, name, lookback_days=SECTOR_LOOKBACK_DAYS, snapshots=None):
     """板块上下文：本站日度快照透视出的逐日 net / change_pct 序列。
 
     「某板块某天缺行就 None」：回填可能只补到部分板块，绝不能拿旧值或 0
     补天（与快照模块「窗口齐全才算数」同一纪律）；各维度在取窗时遇 None
     自行如实不可用。
+    snapshots：load_sector_snapshots 的结果（扫描时预加载、各板块共用）；
+    缺省时自行读库（信号详情页等单板块场景）。
     """
-    kind_db = (
-        MarketDailySnapshot.KIND_INDUSTRY_FF
-        if kind == 'industry'
-        else MarketDailySnapshot.KIND_CONCEPT_FF
-    )
-    rows = (
-        MarketDailySnapshot.objects.filter(kind=kind_db)
-        .order_by('-trade_date')
-        .values_list('trade_date', 'payload')[:lookback_days]
-    )
-    rows = list(rows)[::-1]  # 升序
+    if snapshots is None:
+        snapshots = load_sector_snapshots(kind, lookback_days)
     dates, nets, pcts = [], [], []
     valid = 0
-    for trade_date, payload in rows:
-        row = next(
-            (r for r in (payload or []) if r.get('name') == name), None
-        )
+    for trade_date, by_name in snapshots:
+        row = by_name.get(name)
         dates.append(trade_date.isoformat())
         net = row.get('net') if row else None
         pct = row.get('change_pct') if row else None
@@ -243,11 +339,13 @@ def build_sector_context(kind, name, lookback_days=45):
 
 
 def eval_vol_ratio_slope(ctx, params):
-    """量比斜率（指数/个股）：RVOL 的近几日日均漂移。
+    """量比斜率（指数/个股）：RVOL 近几日的最小二乘斜率（日均漂移）。
 
     为什么看斜率而不是当日 RVOL：平静判定已要求当日 RVOL ∈ [0.7, 1.5]，
     「平静中的微变」体现在量比的缓慢趋势上——资金悄悄回流的最早形态
     就是量比温和抬升，而不是放量本身。
+    噪声校准（ALG-04）：斜率用 slope_days+1 个点的 OLS 而不是两端点差分，
+    且 |斜率| 须超出自身历史斜率的 noise_pct 分位才投票。
     """
     volumes = ctx.get('volume')
     window, slope_days = params['window'], params['slope_days']
@@ -255,38 +353,46 @@ def eval_vol_ratio_slope(ctx, params):
     if not volumes or len(volumes) < need:
         return _unavailable('成交量历史不足')
 
-    # 逐点 RVOL（末尾 slope_days+1 个即可），任一窗口缺量则如实不可用
-    rvol = []
-    for i in range(len(volumes) - slope_days - 1, len(volumes)):
-        base = _mean(volumes[i - window:i])
-        rvol.append(volumes[i] / base if base and volumes[i] is not None else None)
-    if any(v is None for v in rvol):
+    # 逐点 RVOL：基期窗口要求齐全（窗口不齐不算）
+    full = [None] * len(volumes)
+    for i in range(window, len(volumes)):
+        win = volumes[i - window:i]
+        if volumes[i] is None or any(v is None for v in win):
+            continue
+        base = _mean(win)
+        full[i] = volumes[i] / base if base else None
+    pts = slope_days + 1
+    slopes = [
+        _ols_slope(full[i + 1 - pts:i + 1]) if i + 1 >= pts else None
+        for i in range(len(full))
+    ]
+    raw = slopes[-1]
+    if raw is None:
         return _unavailable('量比窗口存在缺失数据')
 
-    raw = (rvol[-1] - rvol[0]) / slope_days
-    value, direction, note = _sign_value(raw, params)
+    value, direction, note = _gated(raw, slopes[:-1], params)
     # 详情曲线：全序列 RVOL（滚动窗口逐点）
-    full = []
-    for i in range(window, len(volumes)):
-        base = _mean(volumes[i - window:i])
-        full.append(
-            round(volumes[i] / base, 3)
-            if base and volumes[i] is not None else None
-        )
+    shown = [round(v, 3) if v is not None else None for v in full[window:]]
     return _result(
         value, direction, note,
-        _series_points(ctx['dates'][window:], full),
+        _series_points(ctx['dates'][window:], shown),
     )
 
 
-def _rolling_mean_series(vals, k):
+def _rolling_mean_series(vals, k, strict=False):
+    """滚动均值；strict=True 时窗口内任一值为 None 该点即为 None（窗口不齐不算）。"""
     out = []
     for i in range(len(vals)):
         if i + 1 < k:
             out.append(None)
             continue
-        m = _mean(vals[i + 1 - k:i + 1])
-        out.append(round(m, 2) if m is not None else None)
+        window = vals[i + 1 - k:i + 1]
+        if strict and any(v is None for v in window):
+            out.append(None)
+            continue
+        # 不在计算层舍入（DAT-11/DET-09）：价格已是 3 位小数，round(m, 2) 会让
+        # 低价 ETF 的均线距离产生系统误差；展示层（_series_points/_result）再舍入
+        out.append(_mean(window))
     return out
 
 
@@ -308,28 +414,29 @@ def eval_big_order_net(ctx, params):
     if any(v is None for v in nets[-need:]):
         return _unavailable('净额窗口存在缺失快照')
 
-    m_avg = _rolling_mean_series(nets, mean_days)
+    m_avg = _rolling_mean_series(nets, mean_days, strict=True)
     scale = _mean([abs(v) for v in nets[-window:]]) or 0.0
     if scale <= 0:
         return _unavailable('净额量级异常')
-    raw = (m_avg[-1] - m_avg[-1 - mean_days]) / scale
-    value, direction, note = _sign_value(raw, params)
+
+    def raw_at(i):
+        if i - mean_days < 0 or i + 1 < window:
+            return None
+        win = nets[i + 1 - window:i + 1]
+        if any(v is None for v in win) or m_avg[i] is None or m_avg[i - mean_days] is None:
+            return None
+        sc = _mean([abs(v) for v in win])
+        return (m_avg[i] - m_avg[i - mean_days]) / sc if sc else None
+
+    raws = [raw_at(i) for i in range(len(nets))]
+    raw = raws[-1]
+    if raw is None:
+        return _unavailable('净额窗口存在缺失快照')
+    value, direction, note = _gated(raw, raws[:-1], params)
     return _result(
         value, direction, note,
         _series_points(ctx['dates'], m_avg),
     )
-
-
-def _amplitude_series(ctx):
-    """逐日振幅（%）：(high-low)/prev_close；板块无 OHLC 时返回 None。"""
-    highs, lows, closes = ctx.get('high'), ctx.get('low'), ctx.get('close')
-    if not (highs and lows and closes):
-        return None
-    amps = [None]  # 首日无昨收
-    for i in range(1, len(closes)):
-        h, low, pc = highs[i], lows[i], closes[i - 1]
-        amps.append((h - low) / pc * 100 if h is not None and low is not None and pc else None)
-    return amps
 
 
 def _chain_return(pcts, k):
@@ -354,57 +461,105 @@ def _std_strict(vals):
     return _std(vals)
 
 
+def _return_series(ctx):
+    """逐日涨跌幅（%）：板块直接用快照 change_pct，指数/个股由收盘价现算。"""
+    if ctx.get('change_pct') is not None:
+        return list(ctx['change_pct'])
+    closes = ctx.get('close')
+    if not closes:
+        return None
+    out = [None]
+    for i in range(1, len(closes)):
+        c, pc = closes[i], closes[i - 1]
+        out.append((c / pc - 1) * 100 if c is not None and pc else None)
+    return out
+
+
 def eval_vol_compress(ctx, params):
-    """波动率压缩（全部对象）：近 5 日振幅/涨跌幅标准差收窄 + coil 内缓慢漂移。
+    """波动率压缩（全部对象）：近 k 日涨跌幅标准差处于自身历史低分位 + 压缩期内显著漂移。
 
     波动率压缩本身不指方向；投票方向取压缩区间内的价格漂移方向——
     「缩而价稳且缓慢抬升」是吸筹蓄势的典型形态，反之亦然。未压缩时
     如实显示「波动未压缩」且不投票。
+
+    口径（ALG-04/DET-18）：
+    - 旧实现只比较两个重叠 5 日窗口的单点（widths[-1] < widths[-4]），噪声下
+      近一半时间成立；现改为当前宽度 ≤ 自身历史宽度的 compress_pct 分位；
+    - 宽度统一用「逐日涨跌幅」的标准差（板块与指数/个股同口径），不再用振幅——
+      平静闸门已经要求振幅低位，两边都用振幅会让压缩条件与闸门高度相关；
+    - 漂移须相对窗口内自身波动显著：t = 均值 / (标准差/√k) 的绝对值 ≥ drift_z，
+      否则视为压缩期内的随机游走，不投票。
     """
     k = params['window']
-    if ctx.get('change_pct') is not None:
-        # 板块：快照涨跌幅的滚动标准差
-        pcts = ctx['change_pct']
-        if len(pcts) < k + 5:
-            return _unavailable('板块涨跌幅序列不足')
-        widths = [
-            _std_strict(pcts[i - k + 1:i + 1]) for i in range(k - 1, len(pcts))
-        ]
-        drift = _chain_return(pcts, 5)
-        drift_series = [
-            _chain_return(pcts[: i + 1], 5) for i in range(len(pcts))
-        ]
-    else:
-        amps = _amplitude_series(ctx)
-        if amps is None:
-            return _unavailable('缺少 OHLC 数据')
-        if len(amps) < k + 5:
-            return _unavailable('振幅序列不足')
-        widths = [
-            _std_strict(amps[i - k + 1:i + 1]) for i in range(k - 1, len(amps))
-        ]
-        closes = ctx['close']
-        drift = None if _tail(closes, 6) is None else (closes[-1] / closes[-6] - 1) * 100
-        drift_series = [
-            None if _tail(closes[: i + 1], 6) is None else (closes[i] / closes[i - 5] - 1) * 100
-            for i in range(len(closes))
-        ]
-
-    if None in (widths[-1], widths[-4]) or drift is None:
+    rets = _return_series(ctx)
+    if rets is None:
+        return _unavailable('缺少价格/涨跌幅数据')
+    if len(rets) < k + 5:
+        return _unavailable('涨跌幅序列不足')
+    widths = [
+        _std_strict(rets[i - k + 1:i + 1]) if i + 1 >= k else None
+        for i in range(len(rets))
+    ]
+    drift_series = [_chain_return(rets[: i + 1], k) for i in range(len(rets))]
+    drift = drift_series[-1]
+    cur = _tail(rets, k)
+    if widths[-1] is None or drift is None or cur is None:
         return _unavailable('波动窗口存在缺失数据')
 
-    # 详情曲线：5 日滚动漂移（带方向的量），压缩状态用 note 表达
+    # 详情曲线：k 日滚动漂移（带方向的量），压缩状态用 note 表达
     series = _series_points(ctx['dates'], drift_series)
 
-    if widths[-1] >= widths[-4]:
+    base = [w for w in widths[:-1] if w is not None][-int(params.get('noise_window', 60)):]
+    need = int(params.get('noise_min', 15))
+    if len(base) < need:
+        return _unavailable(f'波动基线样本不足（{len(base)}/{need}）')
+    thr = _percentile(base, params.get('compress_pct', 0.25))
+    if widths[-1] > thr:
         return _result(0.0, None, '波动未压缩，不构成蓄势形态', series)
 
-    raw = drift
+    value, direction, note = _sign_value(drift, params)
+    if direction is not None:
+        mean_r = sum(cur) / k
+        w = widths[-1]
+        tstat = float('inf') if w == 0 else abs(mean_r) / (w / k ** 0.5)
+        if tstat < params.get('drift_z', 0.0):
+            direction, note = None, f'压缩期内漂移不显著（t={tstat:.2f}），不投票'
     # 温和带：|漂移| 在 (min, max] 内才投票；压缩但漂移过小=完全静止
-    value, direction, note = _sign_value(raw, params)
     if direction is None and not note:
         note = '压缩期内无有效漂移'
     return _result(value, direction, note, series)
+
+
+def _share_basis_break(ctx, lookback, ratio, k=3):
+    """量价基准断层（送转/配股等股本变动）检测：返回断层所在日期或 None（ALG-13）。
+
+    原理：日线是前复权价，成交量不复权。r = 成交额 / (成交量 × 收盘价) 在正常
+    交易日约等于「均价/收盘价」，常年在 1 附近小幅波动；送转（如 10 转 10）
+    之前的前复权价被整体压低、成交量仍是旧股本口径，r 会在除权日前后出现
+    台阶（10 转 10 约 2 倍）。比较每个点前后各 k 日 r 的中位数，台阶超过 ratio
+    倍即判为断层。只覆盖送转/配股这类改变复权因子的事件；定增解禁等不改价格
+    的流通股本变动需要真实流通股本数据，本站暂无（见 P2 说明）。
+    成交额缺失太多时无法判断，返回 None（不因缺数据而停用维度）。
+    """
+    amounts, volumes, closes = ctx.get('amount'), ctx.get('volume'), ctx.get('close')
+    if not (amounts and volumes and closes):
+        return None
+    n = len(closes)
+    start = max(0, n - lookback)
+    r = []
+    for i in range(start, n):
+        a, v, c = amounts[i], volumes[i], closes[i]
+        r.append(a / (v * c) if a and v and c else None)
+
+    def med(vals):
+        vals = sorted(x for x in vals if x is not None)
+        return vals[len(vals) // 2] if len(vals) >= 2 else None
+
+    for j in range(k, len(r) - k + 1):
+        before, after = med(r[j - k:j]), med(r[j:j + k])
+        if before and after and max(before, after) / min(before, after) >= ratio:
+            return ctx['dates'][start + j]
+    return None
 
 
 def eval_turnover_pct(ctx, params):
@@ -412,7 +567,8 @@ def eval_turnover_pct(ctx, params):
 
     口径说明（已在文档中披露）：个股窗口内流通股本基本不变，换手率 =
     量/股本 与成交量单调等价，分位排序完全一致，故用成交量分位实现，
-    零新增上游请求；指数无股本概念，为市场活跃度代理。
+    零新增上游请求；指数无股本概念，为市场活跃度代理。窗口内检测到
+    送转/配股导致的量价基准断层时如实不可用（ALG-13）。
     方向语义：分位从低位缓慢抬升（仍不热）= 关注度悄然回升；从高位回落
     （仍不死）= 温和降温。分位本身过高/过低时不动（已是活跃/冰点状态）。
     """
@@ -424,6 +580,13 @@ def eval_turnover_pct(ctx, params):
     valid = [v for v in volumes if v is not None]
     if len(valid) < MIN_PRICE_BARS:
         return _unavailable('有效成交量样本不足')
+    # 「与换手率单调等价」的前提是窗口内股本不变（ALG-13）：窗口内出现送转/配股
+    # 时成交量整体抬升一个台阶，分位会把股本扩大误读成关注度回升，维度暂停
+    # 直到断层滚出 window 日窗口
+    if ctx.get('kind') == 'stock':
+        broke = _share_basis_break(ctx, window, params.get('split_ratio', 1.2))
+        if broke:
+            return _unavailable(f'{broke} 前后疑似送转/股本变动（量价基准断层），换手率分位暂停至滚出窗口')
 
     def pct_at(i):
         end = i + 1
@@ -438,9 +601,15 @@ def eval_turnover_pct(ctx, params):
     if pct_series[-1] is None or pct_series[-1 - delta_days] is None:
         return _unavailable('分位窗口存在缺失数据')
 
-    raw = pct_series[-1] - pct_series[-1 - delta_days]
+    raws = [
+        pct_series[i] - pct_series[i - delta_days]
+        if i >= delta_days and pct_series[i] is not None and pct_series[i - delta_days] is not None
+        else None
+        for i in range(len(pct_series))
+    ]
+    raw = raws[-1]
     last = pct_series[-1]
-    value, direction, note = _sign_value(raw, params)
+    value, direction, note = _gated(raw, raws[:-1], params)
     # 位置闸门：分位 >70 时再抬升就是「热」而非「微变」；<30 时再降温即冰点
     if direction == 'up' and last > params['pos_cap']:
         direction, note = None, f'分位已达 {last:.0f}，超出温和区间'
@@ -459,6 +628,8 @@ def eval_margin_north(ctx, params):
     null），本维度仅融资余额口径；数据来自交易所官方披露、经本站日度
     快照积累，窗口不足 6 行时如实不可用（上线初期约需一周积累）。
     """
+    if ctx.get('kind') == 'index' and ctx.get('code') not in MARGIN_VOTE_CODES:
+        return _unavailable('融资余额为沪深合计口径，仅在沪深300上投票（避免各指数重复计票）')
     margin = ctx.get('margin') or []
     if len(margin) < 6:
         return _unavailable('融资余额快照积累不足（T+1 披露，逐日积累中）')
@@ -466,8 +637,12 @@ def eval_margin_north(ctx, params):
     m3 = _rolling_mean_series(totals, 3)
     if m3[-1] is None or m3[-4] is None or not m3[-4]:
         return _unavailable('融资余额均值窗口不齐')
-    raw = (m3[-1] / m3[-4] - 1) * 100
-    value, direction, note = _sign_value(raw, params)
+    raws = [
+        (m3[i] / m3[i - 3] - 1) * 100 if i >= 3 and m3[i] is not None and m3[i - 3] else None
+        for i in range(len(m3))
+    ]
+    raw = raws[-1]
+    value, direction, note = _gated(raw, raws[:-1], params)
     if direction is not None:
         note = '仅融资余额口径（北向已停止逐日披露）'
     return _result(
@@ -481,10 +656,19 @@ def _sector_price_series(ctx):
 
     这不是伪造价格——是对真实涨跌幅的可加变换（与计算 MA 同类），用于
     让板块也有「价格与均线关系」维度；基期任意，只影响水平不影响形态。
+
+    缺口处理（ALG-06）：某天涨跌幅缺失时该点输出 None，level 保持上一个
+    值继续链乘，而不是把 level 清成 None（旧实现下一天会 None * float
+    抛异常，整个 45 日窗口内该维度都不可用）。缺口前后的水平因少乘一天
+    而不可比，所以 eval_ma_relation 要求均线窗口内无缺失点——窗口全部
+    落在缺口之后时，链条连续，结果与无缺口时一致。
     """
     level, out = 100.0, []
     for p in ctx.get('change_pct') or []:
-        level = level * (1 + p / 100) if p is not None else None
+        if p is None:
+            out.append(None)
+            continue
+        level = level * (1 + p / 100)
         out.append(level)
     return out
 
@@ -507,15 +691,22 @@ def eval_ma_relation(ctx, params):
     if any(v is None for v in closes[-(ma_days + slope_days + 1):]):
         return _unavailable('均线窗口存在缺失数据')
 
-    ma = _rolling_mean_series(closes, ma_days)
+    # 严格窗口：板块伪价格缺口前后水平不可比，跨缺口的均线不能算（ALG-06）
+    ma = _rolling_mean_series(closes, ma_days, strict=True)
     dist = [
         (closes[i] / ma[i] - 1) * 100 if ma[i] and closes[i] is not None else None
         for i in range(len(closes))
     ]
     if dist[-1] is None or dist[-1 - slope_days] is None:
         return _unavailable('均线距离序列不齐')
-    raw = dist[-1] - dist[-1 - slope_days]
-    value, direction, note = _sign_value(raw, params)
+    raws = [
+        dist[i] - dist[i - slope_days]
+        if i >= slope_days and dist[i] is not None and dist[i - slope_days] is not None
+        else None
+        for i in range(len(dist))
+    ]
+    raw = raws[-1]
+    value, direction, note = _gated(raw, raws[:-1], params)
     if abs(dist[-1]) > params['max_dist'] and direction is not None:
         direction, note = None, f'距均线 {dist[-1]:.1f}%，趋势已展开，非早期迹象'
     return _result(

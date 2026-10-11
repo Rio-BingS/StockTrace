@@ -13,7 +13,7 @@
 | 统一区间体系（periods.py + 各端点 + 前端周期 UI） | ✅ 已验收（39 测试） |
 | 交易日历感知缓存 + 数据日期标注 | ✅ 已验收 |
 | 探测器（平静盘面渐进微变监测，一级模块） | ✅ 代码落地（2026-09-29，33 测试），等待快照积累与部署验证 |
-| 版本控制/发版流程/git 标签（v1.3.0）/lint | ✅ 已建立，已推 GitHub（gui123a1/StockTrace，public） |
+| 版本控制/发版流程/git 标签（版本以 `git describe --tags` 为准）/lint | ✅ 已建立，已推 GitHub（gui123a1/StockTrace，public） |
 
 ## 待办与已知问题（接手从这里开始）
 
@@ -21,7 +21,7 @@
 2. ~~日度快照积累（二期）~~ ✅ 代码已完成（2026-09-05）：`MarketDailySnapshot` 表 + 收盘预热任务末尾落库（幂等）+ 板块 20 日轮动（`/market/sectors/?period=20d`）+ ETF 份额 1/5/20 日变化（雷达/详情）；「窗口内快照齐全才算数，缺天不补」。行业资金流历史可用 `python manage.py backfill_market_snapshots --days 60` 回填（VPS 执行），概念/ETF 份额只能向前积累，约 1 个月凑齐首个 20 日窗口。
 3. **已知环境问题（非代码）**：本机代理（Clash 7890）对 `push2his.eastmoney.com` 的 TLS 干扰已从「间歇性」加重到「基本不可用」（https/http 均被断连，绕过代理直连同样被干扰）——本地开发时大盘资金流、国家队 ETF 资金流、板块 5d/10d、ETF 价格历史这几类端点会如实报「暂不可用」，点重试偶发收敛；逻辑正确性由单测锁定（parse/聚合/取窗/缓存）。（注：VPS 境外线路自 2026-09-05 起同样受影响，诊断见第 6 条。）8000 端口被用户另一 uvicorn 服务占用，本地后端约定用 8001。
 4. ~~HTTPS 回源 + 限流的 VPS 收尾~~ ✅ 已完成（2026-09-05）：Origin 证书装好、conf 替换、CF 已切 Full (strict)，外测 401 + 日志确认 HTTP/2 回源与真实 IP 限流生效。可选后续：防火墙 443 只放行 CF 网段。
-5. 小项：~~前端主包分包~~（核查确认路由已全懒加载、构建产物本就分包，无需动作）；~~快照保留策略~~ ✅（`_cleanup_market_snapshots` 默认保留 600 天，随每日汇总任务清理）；~~VPS gai.conf IPv4 优先~~ ✅（2026-09-07 已设，push2his 解析转 v4 优先）；`handoff_cn.md`/`handoff.md` 为 v1.01 时代文档，仅考古。
+5. 小项：~~前端主包分包~~（核查确认路由已全懒加载、构建产物本就分包，无需动作）；~~快照保留策略~~ ✅（`_cleanup_market_snapshots` 默认保留 600 天，随每日汇总任务清理）；~~VPS gai.conf IPv4 优先~~ ✅（2026-09-07 已设，push2his 解析转 v4 优先）；`handoff_cn.md`/`handoff.md` 为 v1.01 时代文档，已移至 `docs/archive/`，仅考古。
 6. **东财 push2his 上游持续不可用（2026-09-05 起，VPS 亦然）**：大盘主力资金流历史/板块历史/ETF 东财历史均受影响。已有缓解：大盘资金流已纳入日度快照（market_ff，收盘自动积累 + 窗口快照兜底），上游恢复后跑一次 `backfill_market_snapshots --days 130` 即回补 130 日历史；ETF 历史已切新浪备源。页面在上游不可用期间如实显示降级提示，不伪造数据。**2026-09-07 诊断定论**：push2his 仅经中国大陆节点服务（CNAME→push2hisipv6.trafficmanager.cn，节点为腾讯云/上海移动/电信 v4+v6，无海外 CDN；对照 datacenter-web 走全球 CDN 从 VPS 一直正常），且 2026-09-05 前从 VPS 尚可用，推断 EM 前后调整了该域名 CDN 策略。从美国 VPS 实测：IPv6 解析在先但 VPS 无 v6 路由（应用报 Errno 101 的直接来源）；IPv4 TCP 可建立（ping 通，RTT 约 250ms）但 TLS 会话被无差别掐断——curl（h2/http1.1）、python ssl（默认与 urllib3 指纹）、curl_cffi 浏览器指纹（chrome/safari）全部「Connection closed abruptly」，80 口明文丢包；非反爬指纹拦截。本地国内网络直连 200/0.36s 正常（同日稍后复核转为间歇不稳定：次日无论解析到哪个节点/走不走代理均 000 快速失败，昨日尚有 200——国内访问也非稳定可用，仅时点差异；对照 datacenter-web 本地与 VPS 全程正常）。结论：EM 侧不再服务境外来源，客户端无修复路径（唯一根治是给 VPS 配大陆出口，不值当）；「上游恢复后回补」仅适用于 EM 重新放开境外访问。可选小优化：VPS /etc/gai.conf 设 v4 优先，减少无 v6 路由机器上解析到 v6 时的无效尝试与 E101 日志噪音。
 
 **2026-09-07 后续查明（快照断供，比降级显示更严重）**：VPS 上 industry_ff/concept_ff/market_ff 快照为 **0 行**（仅 etf_share 在积累，130 日）——行业/概念当日 rank 的 EM 源（push2 clist 板块路径）对境外 502（ETF clist 却正常，1601 行可拉），第一优先源同花顺则被 akshare 版本 bug 卡死：VPS 实装 1.18.64（requirements 只写 >=1.14 造成漂移）按 8 列解析 THS 现为 11 列的页面报 Length mismatch，本地 1.16.96 实测 90 行解析正常。**修复建议**：VPS 固定 akshare==1.16.96（与本地验证版本一致）并回归关键接口（涨停池/两融/份额/估值），行业/概念当日与快照积累即恢复，20 个交易日后 20 日轮动自动复活。替代源实测：push2delay fflow daykline 可达但仅当日一根且更新时点未确认（16:10 仍显示前一日），无历史深度；THS 有 3/5/10/20 日排行 tab 可解析；乐咕/新浪无等效主力资金流；交易所无此类衍生数据。大盘主力资金流逐日历史在 push2his 恢复前无替代源。

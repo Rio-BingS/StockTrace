@@ -5,6 +5,7 @@ from __future__ import annotations
 from datetime import datetime, timedelta
 
 import akshare as ak
+from django.utils import timezone
 
 from ._cache import _cache_get, _cache_meta, _cache_set, _now_str, _stale_or, _to_float
 from .holders import fetch_holder_structure
@@ -254,6 +255,11 @@ def _parse_sina_etf_hist(df):
     return items
 
 
+# 各历史源的复权口径（DAT-14）：东财请求前复权；新浪 ETF 日线接口无复权参数
+_ETF_HIST_ADJUST = {'em_etf_hist': 'qfq', 'sina_etf_hist': 'none'}
+_ADJUST_LABELS = {'qfq': '前复权', 'none': '不复权'}
+
+
 def _history_cache_key(code, range_name, start_date=None, end_date=None):
     """自定义区间带起止日期入 key；与 _etf_history 内部保持一致（meta 来源标注依赖）。"""
     if start_date:
@@ -266,25 +272,27 @@ def _etf_history(code, range_name='3m', start_date=None, end_date=None, ttl=1200
     cache_key = _history_cache_key(code, range_name, start_date, end_date)
     cached = _cache_get(cache_key, ttl)
     if cached is not None:
-        return cached
+        return cached['items']
 
     if start_date:
         start = start_date
-        end = end_date or datetime.now().date()
+        end = end_date or timezone.localdate()
     else:
-        end = datetime.now().date()
+        end = timezone.localdate()
         start = end - timedelta(days=_RANGE_LOOKBACK_DAYS[range_name])
     # 多源路由：东财优先；东财失败/限流时切新浪（新浪无成交额/换手率，字段如实为 None）
+    # 东财取前复权（DAT-14）：ETF 份额折算/分红会让不复权价格出现断崖，区间收益失真；
+    # 新浪接口不提供复权参数，只能不复权，复权口径见 _ETF_HIST_ADJUST 并在 meta 标注
     df, source = _first_ok([
         (lambda: ak.fund_etf_hist_em(
             symbol=code, period='daily',
             start_date=start.strftime('%Y%m%d'), end_date=end.strftime('%Y%m%d'),
-            adjust='',
+            adjust='qfq',
         ), 'em_etf_hist'),
         (lambda: ak.fund_etf_hist_sina(symbol=_etf_sina_symbol(code)), 'sina_etf_hist'),
     ])
     if df is None or df.empty:
-        return _stale_or(cache_key, [])
+        return (_stale_or(cache_key, None) or {}).get('items', [])
 
     if source == 'em_etf_hist':
         items = []
@@ -302,12 +310,19 @@ def _etf_history(code, range_name='3m', start_date=None, end_date=None, ttl=1200
             })
     else:
         items = _parse_sina_etf_hist(df)
-        # 新浪返回全量历史，按区间截断（东财由 start_date/end_date 服务端过滤）
-        items = [item for item in items if item['date'] >= start.isoformat()]
+        # 新浪返回全量历史，按 [start, end] 双边截断（东财由 start_date/end_date
+        # 服务端过滤）；只截起点会让自定义区间混入 end 之后的行（DAT-14）
+        start_s, end_s = start.isoformat(), end.isoformat()
+        items = [item for item in items if start_s <= item['date'] <= end_s]
 
-    _cache_set(cache_key, items)
-    _cache_set(f'{cache_key}_src', source)
+    # items 与来源存同一个缓存值（DAT-19）：分两个 key 会被 LRU 分别淘汰，meta 来源误标
+    _cache_set(cache_key, {'available': bool(items), 'items': items, 'source': source})
     return items
+
+
+def _history_source(cache_key):
+    """缓存里该段历史的实际来源；无缓存时按主源东财。"""
+    return (_stale_or(cache_key, None) or {}).get('source') or 'em_etf_hist'
 
 
 def _period_return(history, bars):
@@ -359,13 +374,13 @@ def get_etf_detail(code, range_name='3m', start_date=None, end_date=None):
         start = _parse_range_date(start_date, 'start_date')
         end = _parse_range_date(end_date, 'end_date') if end_date else None
         if end is None:
-            end = datetime.now().date()
+            end = timezone.localdate()
         if start > end:
             raise ValueError('start_date 不能晚于 end_date')
         if (end - start).days > _CUSTOM_MAX_SPAN_DAYS:
             raise ValueError(f'自定义区间最长 {_CUSTOM_MAX_SPAN_DAYS} 天（约 3 年）')
     else:
-        end = datetime.now().date()
+        end = timezone.localdate()
         start = end - timedelta(days=_RANGE_LOOKBACK_DAYS[range_name])
 
     quote = next((item for item in _normalized_etf_items() if item['code'] == code), None)
@@ -382,6 +397,8 @@ def get_etf_detail(code, range_name='3m', start_date=None, end_date=None):
     history = _etf_history(code, range_name=range_name, start_date=start, end_date=end)
     history_key = _history_cache_key(code, range_name, start, end)
     history_dates = [item['date'] for item in history if item.get('date')]
+    history_src = _history_source(history_key)
+    history_adjust = _ETF_HIST_ADJUST.get(history_src, 'none')
     share_series = snapshots.share_history_series(code, start, end)
     if share_series:
         share_note = None
@@ -415,14 +432,17 @@ def get_etf_detail(code, range_name='3m', start_date=None, end_date=None):
             'available': bool(share_series),
             'items': share_series or [],
             'message': share_note,
-            'meta': _cache_meta(
-                'etf_share_snapshots',
-                0,
-                '本站日度快照（沪市历史来自上交所官方接口回填）',
-                bool(share_series),
-                source_data_date=share_series[-1]['date'] if share_series else None,
-                disclaimer='份额为收盘口径；沪市历史由上交所官方接口回填，深市随本站快照积累。',
-            ),
+            # 直接读库、不走进程内缓存：原先套一个从不写入的缓存 key，
+            # cache_status 永远是 unavailable（DAT-19）
+            'meta': {
+                'available': bool(share_series),
+                'source': '本站日度快照（沪市历史来自上交所官方接口回填）',
+                'source_data_date': share_series[-1]['date'] if share_series else None,
+                'data_as_of': share_series[-1]['date'] if share_series else None,
+                'fetched_at': None,
+                'cache_status': 'fresh' if share_series else 'unavailable',
+                'disclaimer': '份额为收盘口径；沪市历史由上交所官方接口回填，深市随本站快照积累。',
+            },
         },
         'holder_structure': fetch_holder_structure(code),
         'history': {
@@ -433,13 +453,17 @@ def get_etf_detail(code, range_name='3m', start_date=None, end_date=None):
             'start_date': min(history_dates) if history_dates else None,
             'end_date': max(history_dates) if history_dates else None,
             'stats': _window_stats(history),
+            'adjust': history_adjust,
             'meta': _cache_meta(
                 history_key,
                 1200,
-                f'akshare.{_stale_or(f"{history_key}_src", "fund_etf_hist_em")}',
+                f'akshare.{history_src}',
                 bool(history),
                 source_data_date=max(history_dates) if history_dates else None,
-                disclaimer='仅为 ETF 市场价格日线；不包含历史份额。新浪备源无成交额/换手率，如实为空。',
+                disclaimer=(
+                    f'仅为 ETF 市场价格日线（{_ADJUST_LABELS[history_adjust]}）；不包含历史份额。'
+                    '东财源为前复权，新浪备源不复权且无成交额/换手率，如实为空。'
+                ),
             ),
             'items': history,
         },

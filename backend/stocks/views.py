@@ -1,12 +1,20 @@
 from rest_framework import viewsets, status
 from rest_framework.decorators import action, api_view
 from rest_framework.response import Response
+from django.conf import settings
+from django.db import IntegrityError, close_old_connections, transaction
+from django.db.models import OuterRef, Subquery
 from django.utils import timezone
+from concurrent.futures import ThreadPoolExecutor, TimeoutError as FutureTimeout
 from datetime import date, datetime, timedelta
 import logging
+import threading
+import time
+import uuid
 
 from .models import Stock, DailyQuote, MinuteBar
 from .serializers import (
+    normalize_stock_code,
     StockSerializer, DailyQuoteSerializer,
     MinuteBarSerializer, DashboardStockSerializer,
     StockSearchSerializer,
@@ -31,6 +39,14 @@ from .market.periods import FULL_PRESETS, resolve_period
 logger = logging.getLogger(__name__)
 
 
+def _initial_fetch(stock_id):
+    """新增关注后的首拉：忙时排队而不是静默丢弃（REL-04），结果回给前端。"""
+    started, st = start_fetch_one(stock_id, light=True, queue_if_busy=True)
+    if started and not st.get('queued'):
+        return {'status': 'started'}
+    return {'status': 'queued', 'message': '已有拉取任务在执行，已排队，完成后自动补拉'}
+
+
 class StockViewSet(viewsets.ModelViewSet):
     """关注股票 CRUD"""
     queryset = Stock.objects.filter(is_active=True)
@@ -38,23 +54,29 @@ class StockViewSet(viewsets.ModelViewSet):
 
     def create(self, request, *args, **kwargs):
         """添加关注：如果股票已存在但被软删除，则恢复；创建/恢复后后台拉行情"""
-        code = request.data.get('code', '')
-        existing = Stock.objects.filter(code=code).first()
+        code = normalize_stock_code(request.data.get('code', ''))
+        existing = Stock.objects.filter(code=code).first() if code else None
         if existing and not existing.is_active:
-            name = request.data.get('name', '') or ''
+            # 恢复分支也走序列化器校验（SEC-08）：name/group/持仓字段与新建同一套规则
+            serializer = self.get_serializer(existing, data=request.data, partial=True)
+            serializer.is_valid(raise_exception=True)
+            name = serializer.validated_data.get('name', '') or ''
             if not name.strip():
                 name = code
-            existing.is_active = True
-            existing.name = name
-            existing.save()
-            serializer = self.get_serializer(existing)
-            start_fetch_one(existing.id, light=True)
-            return Response(serializer.data, status=status.HTTP_201_CREATED)
-        response = super().create(request, *args, **kwargs)
+            serializer.save(is_active=True, name=name)
+            data = dict(serializer.data)
+            data['fetch'] = _initial_fetch(existing.id)
+            return Response(data, status=status.HTTP_201_CREATED)
+        try:
+            with transaction.atomic():
+                response = super().create(request, *args, **kwargs)
+        except IntegrityError:
+            # 先查后建竞态：并发请求已建同代码股票（PERF-06）
+            return Response({'detail': f'股票「{code}」已存在'}, status=status.HTTP_409_CONFLICT)
         if response.status_code == status.HTTP_201_CREATED:
             stock_id = response.data.get('id')
             if stock_id:
-                start_fetch_one(stock_id, light=True)
+                response.data['fetch'] = _initial_fetch(stock_id)
         return response
 
     def perform_create(self, serializer):
@@ -133,9 +155,10 @@ class StockViewSet(viewsets.ModelViewSet):
 
     @action(detail=True, methods=['get'], url_path='daily')
     def daily_quotes(self, request, pk=None):
-        """获取某股票日K数据，支持 ?days=N 和 ?date=YYYY-MM-DD"""
+        """获取某股票日K数据，支持 ?days=N（上限 3650）和 ?date=YYYY-MM-DD；缺省近 365 天"""
         stock = self.get_object()
-        queryset = DailyQuote.objects.filter(stock=stock)
+        # select_related：序列化器 source='stock.code' 否则每行懒加载一次（PERF-05）
+        queryset = DailyQuote.objects.filter(stock=stock).select_related('stock')
 
         # 按日期筛选
         if date_str := request.query_params.get('date'):
@@ -160,8 +183,11 @@ class StockViewSet(viewsets.ModelViewSet):
                     {'detail': 'days 必须是正整数'},
                     status=status.HTTP_400_BAD_REQUEST,
                 )
-            start_date = timezone.now().date() - timedelta(days=min(days, 3650))
+            start_date = timezone.localdate() - timedelta(days=min(days, 3650))
             queryset = queryset.filter(trade_date__gte=start_date)
+        else:
+            # 无参数默认近 365 天，不再整表倒出（PERF-05）
+            queryset = queryset.filter(trade_date__gte=timezone.localdate() - timedelta(days=365))
 
         queryset = queryset.order_by('-trade_date')
         serializer = DailyQuoteSerializer(queryset, many=True)
@@ -262,36 +288,113 @@ def _quote_row(stock, quote):
 @api_view(['GET'])
 def dashboard(request):
     """Dashboard 聚合：自选 + 每只最新日行情（2 次查询，避免 N+1）"""
-    stocks = list(Stock.objects.filter(is_active=True).select_related('group').order_by('code'))
+    # 每只最新一行日线用相关子查询取 id（走 stock+trade_date 唯一索引），
+    # 不再每 60s 轮询都遍历全部历史日线（PERF-05）
+    latest = DailyQuote.objects.filter(stock_id=OuterRef('pk')).order_by('-trade_date').values('id')[:1]
+    stocks = list(
+        Stock.objects.filter(is_active=True).select_related('group')
+        .annotate(latest_quote_id=Subquery(latest)).order_by('code')
+    )
     if not stocks:
         return Response([])
 
-    stock_ids = [s.id for s in stocks]
-    # 按 stock、日期倒序，遍历时取每只第一条即为最新
-    quotes = (
-        DailyQuote.objects
-        .filter(stock_id__in=stock_ids)
-        .order_by('stock_id', '-trade_date')
-    )
-    latest_map = {}
-    for q in quotes.iterator(chunk_size=200):
-        if q.stock_id not in latest_map:
-            latest_map[q.stock_id] = q
+    quotes = DailyQuote.objects.in_bulk([s.latest_quote_id for s in stocks if s.latest_quote_id])
+    latest_map = {s.id: quotes.get(s.latest_quote_id) for s in stocks}
 
     data = [_quote_row(s, latest_map.get(s.id)) for s in stocks]
     serializer = DashboardStockSerializer(data, many=True)
     return Response(serializer.data)
 
 
+# ------------------------------------------------------------
+# 同步拉上游的市场接口：总时限 + 熔断（REL-05）
+# 请求线程把 loader 交给有界线程池，最多等 STOCKTRACE_REQUEST_DEADLINE 秒（默认 100，
+# 小于 nginx proxy_read_timeout 120s），超时返回 504 而不是让 nginx 先断开、worker 继续空等。
+# 同一接口连续 3 次超时即熔断 60s，期间直接 503，避免挂死的上游把线程池占满。
+# ------------------------------------------------------------
+_UPSTREAM_POOL = ThreadPoolExecutor(max_workers=4, thread_name_prefix='upstream')
+_BREAKER_THRESHOLD = 3
+_BREAKER_OPEN_SECONDS = 60
+_breaker_lock = threading.Lock()
+_breaker = {}  # label -> {'timeouts': 连续超时次数, 'open_until': monotonic 秒}
+
+
+class UpstreamTimeout(Exception):
+    pass
+
+
+class UpstreamCircuitOpen(Exception):
+    pass
+
+
+def _request_deadline():
+    return float(getattr(settings, 'STOCKTRACE_REQUEST_DEADLINE', 100))
+
+
+def _run_loader(loader):
+    try:
+        return loader()
+    finally:
+        close_old_connections()  # 池线程长驻：用完归还 DB 连接
+
+
+def _call_with_deadline(loader, label):
+    """在线程池里执行 loader，带总时限与按 label 熔断。超时抛 UpstreamTimeout，熔断中抛 UpstreamCircuitOpen。"""
+    now = time.monotonic()
+    with _breaker_lock:
+        st = _breaker.get(label)
+        if st and st['open_until'] > now:
+            raise UpstreamCircuitOpen(label)
+    future = _UPSTREAM_POOL.submit(_run_loader, loader)
+    try:
+        result = future.result(timeout=_request_deadline())
+    except FutureTimeout:
+        future.cancel()  # 还在排队则不再执行；已在跑的线程无法强停，由上游 socket 超时兜底
+        with _breaker_lock:
+            st = _breaker.setdefault(label, {'timeouts': 0, 'open_until': 0.0})
+            st['timeouts'] += 1
+            if st['timeouts'] >= _BREAKER_THRESHOLD:
+                st['open_until'] = time.monotonic() + _BREAKER_OPEN_SECONDS
+                st['timeouts'] = 0
+                logger.warning(f'{label} 连续 {_BREAKER_THRESHOLD} 次超时，熔断 {_BREAKER_OPEN_SECONDS}s')
+        raise UpstreamTimeout(label)
+    with _breaker_lock:
+        _breaker.pop(label, None)
+    return result
+
+
+def _deadline_error_response(exc, label):
+    if isinstance(exc, UpstreamCircuitOpen):
+        return Response(
+            {'detail': f'{label}上游连续超时，暂停访问 {_BREAKER_OPEN_SECONDS} 秒后再试'},
+            status=status.HTTP_503_SERVICE_UNAVAILABLE,
+        )
+    logger.warning(f'获取{label}超过 {_request_deadline():.0f}s 总时限')
+    return Response({'detail': f'获取{label}超时，请稍后重试'}, status=status.HTTP_504_GATEWAY_TIMEOUT)
+
+
 def _market_response(loader, label):
     try:
-        return Response(loader())
-    except Exception as e:
-        logger.exception(f'获取{label}失败')
-        return Response(
-            {'detail': f'获取{label}失败: {e}'},
-            status=status.HTTP_502_BAD_GATEWAY,
-        )
+        return Response(_call_with_deadline(loader, label))
+    except (UpstreamTimeout, UpstreamCircuitOpen) as e:
+        return _deadline_error_response(e, label)
+    except Exception:
+        return _upstream_failed(label)
+
+
+def _upstream_failed(label):
+    """上游/内部异常的统一出口：对外只给通用文案与 error_id，详情进日志（SEC-07）。
+
+    异常原文可能含上游响应片段、内网地址或文件路径，不回显给客户端；
+    error_id 同时写进日志，排障时按它在日志里定位堆栈。
+    """
+    error_id = uuid.uuid4().hex[:12]
+    logger.exception(f'获取{label}失败 error_id={error_id}')
+    return Response(
+        {'detail': f'获取{label}失败，请稍后重试（错误编号 {error_id}）',
+         'error_id': error_id},
+        status=status.HTTP_502_BAD_GATEWAY,
+    )
 
 
 @api_view(['GET'])
@@ -338,7 +441,7 @@ def market_trend(request):
         else:
             raise ValueError('period 必须是 1w、1m、3m、6m、1y 或 ytd')
         return get_market_trend(days=min(days, 300))
-    return _market_bad_request(load)
+    return _market_bad_request(load, '全市场走势')
 
 
 def _positive_int(request, key, default, maximum=None):
@@ -367,14 +470,15 @@ def _optional_float(request, key):
     return value
 
 
-def _market_bad_request(loader):
+def _market_bad_request(loader, label='市场数据'):
     try:
-        return Response(loader())
+        return Response(_call_with_deadline(loader, label))
+    except (UpstreamTimeout, UpstreamCircuitOpen) as e:
+        return _deadline_error_response(e, label)
     except ValueError as e:
         return Response({'detail': str(e)}, status=status.HTTP_400_BAD_REQUEST)
-    except Exception as e:
-        logger.exception('获取市场数据失败')
-        return Response({'detail': f'获取市场数据失败: {e}'}, status=status.HTTP_502_BAD_GATEWAY)
+    except Exception:
+        return _upstream_failed(label)
 
 
 @api_view(['GET'])
@@ -390,7 +494,7 @@ def market_sectors(request):
             page=_positive_int(request, 'page', 1),
             page_size=_positive_int(request, 'page_size', 50, maximum=100),
         )
-    return _market_bad_request(load)
+    return _market_bad_request(load, '板块资金轮动')
 
 
 @api_view(['GET'])
@@ -408,7 +512,7 @@ def market_national_etf_flow(request):
             start=request.query_params.get('start'),
             end=request.query_params.get('end'),
         )
-    return _market_bad_request(load)
+    return _market_bad_request(load, '国家队ETF资金流向')
 
 
 @api_view(['GET'])
@@ -425,24 +529,31 @@ def market_etf_radar(request):
             page=_positive_int(request, 'page', 1),
             page_size=_positive_int(request, 'page_size', 50, maximum=100),
         )
-    return _market_bad_request(load)
+    return _market_bad_request(load, 'ETF雷达')
 
 
 @api_view(['GET'])
 def market_etf_detail(request, code):
     """单 ETF 当前快照与按需价格历史。"""
+    norm = normalize_stock_code(code)
+    if norm is None:
+        return Response({'detail': 'ETF 代码须为 6 位数字'}, status=status.HTTP_400_BAD_REQUEST)
     return _market_bad_request(lambda: get_etf_detail(
-        code=code,
+        code=norm,
         range_name=request.query_params.get('range', '3m'),
         start_date=request.query_params.get('start_date') or None,
         end_date=request.query_params.get('end_date') or None,
-    ))
+    ), 'ETF详情')
 
 
 @api_view(['GET'])
 def market_stock_margin(request, code):
     """个股两融余额（交易所官方披露，T+1）。"""
-    return _market_bad_request(lambda: fetch_stock_margin(code.zfill(6)))
+    # 路由是 <str:code>，先校验格式再进入上游请求与缓存键（SEC-08）
+    norm = normalize_stock_code(code)
+    if norm is None:
+        return Response({'detail': '股票代码须为 6 位数字'}, status=status.HTTP_400_BAD_REQUEST)
+    return _market_bad_request(lambda: fetch_stock_margin(norm), '个股两融')
 
 
 @api_view(['GET'])
@@ -451,7 +562,7 @@ def market_fund_flow_window(request):
     def load():
         window = resolve_period(request.query_params.get, FULL_PRESETS, default='1m')
         return get_market_fund_flow_window(window)
-    return _market_bad_request(load)
+    return _market_bad_request(load, '大盘资金流')
 
 
 @api_view(['GET'])
@@ -460,7 +571,7 @@ def market_northbound_window(request):
     def load():
         window = resolve_period(request.query_params.get, FULL_PRESETS, default='1m')
         return get_northbound_window(window)
-    return _market_bad_request(load)
+    return _market_bad_request(load, '北向资金')
 
 
 @api_view(['GET'])
@@ -470,15 +581,14 @@ def market_institutions(request):
     code = (request.query_params.get('code') or '').strip() or None
     quarter = (request.query_params.get('quarter') or '').strip() or None
     try:
-        return Response(get_institution_holdings(stock_code=code, quarter=quarter))
+        return Response(_call_with_deadline(
+            lambda: get_institution_holdings(stock_code=code, quarter=quarter), '机构持仓'))
+    except (UpstreamTimeout, UpstreamCircuitOpen) as e:
+        return _deadline_error_response(e, '机构持仓')
     except ValueError as e:
         return Response({'detail': str(e)}, status=status.HTTP_400_BAD_REQUEST)
-    except Exception as e:
-        logger.exception('获取机构持仓失败')
-        return Response(
-            {'detail': f'获取机构持仓失败: {e}'},
-            status=status.HTTP_502_BAD_GATEWAY,
-        )
+    except Exception:
+        return _upstream_failed('机构持仓')
 
 
 # ============================================================
@@ -517,11 +627,32 @@ def _alert_rule_error(stock_id, rule_type, threshold_raw):
         threshold = Decimal(str(threshold_raw))
     except (TypeError, InvalidOperation):
         return 'threshold 必须是数字'
+    if not threshold.is_finite():
+        return 'threshold 必须是数字'
     if rule_type in (_PA.PRICE_ABOVE, _PA.PRICE_BELOW) and threshold <= 0:
         return '价格阈值必须大于 0'
     if rule_type in (_PA.DAILY_PCT_ABOVE, _PA.DAILY_PCT_BELOW) and abs(threshold) == 0:
         return '涨跌幅阈值不能为 0'
+    if abs(threshold) >= Decimal('1e8'):
+        return 'threshold 超出范围'
     return None
+
+
+def _normalize_threshold(rule_type, raw):
+    """阈值统一为 4 位小数的 Decimal（模型 decimal_places=4）；涨跌幅规则存绝对值。
+
+    旧实现把请求里的原值直接交给 ORM（ALG-14）：字符串/浮点各走各的转换，
+    超精度的值在 SQLite 下原样落库；涨跌幅规则的负数阈值则让「涨幅达到 -2%」
+    几乎每天触发。评估端已按绝对值判断，这里存绝对值让展示与判断一致。
+    """
+    from decimal import ROUND_HALF_UP, Decimal
+
+    from .models import PriceAlert as _PA
+
+    value = Decimal(str(raw)).quantize(Decimal('0.0001'), rounding=ROUND_HALF_UP)
+    if rule_type in (_PA.DAILY_PCT_ABOVE, _PA.DAILY_PCT_BELOW):
+        value = abs(value)
+    return value
 
 
 @api_view(['GET', 'POST'])
@@ -542,7 +673,7 @@ def alert_list(request):
     alert = PriceAlert.objects.create(
         stock_id=stock_id,
         rule_type=rule_type,
-        threshold=request.data.get('threshold'),
+        threshold=_normalize_threshold(rule_type, request.data.get('threshold')),
         note=(request.data.get('note') or '').strip()[:100],
     )
     return Response(_alert_row(alert), status=status.HTTP_201_CREATED)
@@ -560,7 +691,13 @@ def alert_detail(request, pk):
         alert.delete()
         return Response(status=status.HTTP_204_NO_CONTENT)
     if 'is_active' in request.data:
-        alert.is_active = bool(request.data['is_active'])
+        # 按 DRF 布尔口径解析（ALG-14）：bool("false") 是 True，旧实现会把停用请求当启用
+        from rest_framework import serializers as drf_serializers
+
+        try:
+            alert.is_active = drf_serializers.BooleanField().to_internal_value(request.data['is_active'])
+        except drf_serializers.ValidationError:
+            return Response({'detail': 'is_active 必须是布尔值'}, status=status.HTTP_400_BAD_REQUEST)
         alert.save(update_fields=['is_active'])
     if 'note' in request.data:
         alert.note = (request.data.get('note') or '').strip()[:100]
@@ -611,11 +748,11 @@ def alert_event_read(request):
 @api_view(['GET', 'POST'])
 def screener_preset_list(request):
     """预设列表 / 保存（spec 用与执行完全相同的校验规则，保存即可执行）"""
-    from .ai.screener import ConditionError, _validate
+    from .screener.engine import ConditionError, _validate
     from .models import ScreenerPreset
 
     if request.method == 'GET':
-        from .ai.strategies import BUILTIN_STRATEGIES
+        from .screener.strategies import BUILTIN_STRATEGIES
 
         presets = ScreenerPreset.objects.all()
         builtins = [{
@@ -644,7 +781,11 @@ def screener_preset_list(request):
         return Response({'detail': f'筛选条件不合法：{e}'}, status=status.HTTP_400_BAD_REQUEST)
     if ScreenerPreset.objects.filter(name=name).exists():
         return Response({'detail': f'预设「{name}」已存在'}, status=status.HTTP_409_CONFLICT)
-    preset = ScreenerPreset.objects.create(name=name, spec=spec)
+    try:
+        with transaction.atomic():
+            preset = ScreenerPreset.objects.create(name=name, spec=spec)
+    except IntegrityError:  # 并发同名创建（PERF-06）
+        return Response({'detail': f'预设「{name}」已存在'}, status=status.HTTP_409_CONFLICT)
     return Response({'id': preset.id, 'name': preset.name, 'spec': preset.spec},
                     status=status.HTTP_201_CREATED)
 
@@ -665,11 +806,16 @@ def screener_preset_detail(request, pk):
 # ============================================================
 
 def _group_row(group):
+    # 列表查询已用 annotate 算好活跃股票数（PERF-08：旧实现每组一次 count()）；
+    # 单个分组的新建/修改路径没有注解，退回单次计数
+    count = getattr(group, 'active_stock_count', None)
+    if count is None:
+        count = group.stocks.filter(is_active=True).count()
     return {
         'id': group.id,
         'name': group.name,
         'order': group.order,
-        'stock_count': group.stocks.filter(is_active=True).count(),
+        'stock_count': count,
         'created_at': group.created_at,
     }
 
@@ -680,7 +826,11 @@ def stock_group_list(request):
     from .models import StockGroup
 
     if request.method == 'GET':
-        groups = StockGroup.objects.all()
+        from django.db.models import Count, Q
+
+        groups = StockGroup.objects.annotate(
+            active_stock_count=Count('stocks', filter=Q(stocks__is_active=True)),
+        )
         return Response([_group_row(g) for g in groups])
 
     name = (request.data.get('name') or '').strip()
@@ -688,7 +838,11 @@ def stock_group_list(request):
         return Response({'detail': '分组名称必填且不超过 50 字'}, status=status.HTTP_400_BAD_REQUEST)
     if StockGroup.objects.filter(name=name).exists():
         return Response({'detail': f'分组「{name}」已存在'}, status=status.HTTP_409_CONFLICT)
-    group = StockGroup.objects.create(name=name)
+    try:
+        with transaction.atomic():
+            group = StockGroup.objects.create(name=name)
+    except IntegrityError:  # 并发同名创建（PERF-06）
+        return Response({'detail': f'分组「{name}」已存在'}, status=status.HTTP_409_CONFLICT)
     return Response(_group_row(group), status=status.HTTP_201_CREATED)
 
 
@@ -716,5 +870,9 @@ def stock_group_detail(request, pk):
             group.order = int(request.data['order'])
         except (TypeError, ValueError):
             return Response({'detail': 'order 必须是整数'}, status=status.HTTP_400_BAD_REQUEST)
-    group.save()
+    try:
+        with transaction.atomic():
+            group.save()
+    except IntegrityError:  # 并发重命名撞名（PERF-06）
+        return Response({'detail': f'分组「{name}」已存在'}, status=status.HTTP_409_CONFLICT)
     return Response(_group_row(group))

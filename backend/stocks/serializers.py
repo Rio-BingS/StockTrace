@@ -1,11 +1,29 @@
+import re
+
 from rest_framework import serializers
 from .models import Stock, StockGroup, DailyQuote, MinuteBar
+
+# A 股/ETF 代码：6 位数字（SEC-08）
+STOCK_CODE_RE = re.compile(r'^\d{6}$')
+
+
+def normalize_stock_code(value):
+    """去首尾空白后校验 6 位数字代码；合法返回规范化代码，否则返回 None。"""
+    code = str(value or '').strip()
+    return code if STOCK_CODE_RE.match(code) else None
 
 
 class StockSerializer(serializers.ModelSerializer):
     group = serializers.PrimaryKeyRelatedField(
         queryset=StockGroup.objects.all(), required=False, allow_null=True,
     )
+
+    def validate_code(self, value):
+        # 入库前统一校验格式，避免任意字符串进入行情拉取与缓存键（SEC-08）
+        code = normalize_stock_code(value)
+        if code is None:
+            raise serializers.ValidationError('股票代码须为 6 位数字')
+        return code
 
     class Meta:
         model = Stock
@@ -57,18 +75,19 @@ class DashboardStockSerializer(serializers.Serializer):
     cost_price = serializers.DecimalField(max_digits=10, decimal_places=3, allow_null=True)
     quantity = serializers.IntegerField(allow_null=True)
     trade_date = serializers.DateField(allow_null=True)
-    open_price = serializers.DecimalField(max_digits=10, decimal_places=2, allow_null=True)
-    close_price = serializers.DecimalField(max_digits=10, decimal_places=2, allow_null=True)
-    high_price = serializers.DecimalField(max_digits=10, decimal_places=2, allow_null=True)
-    low_price = serializers.DecimalField(max_digits=10, decimal_places=2, allow_null=True)
+    # 价格类 3 位小数，与 DailyQuote 一致（DAT-11）
+    open_price = serializers.DecimalField(max_digits=10, decimal_places=3, allow_null=True)
+    close_price = serializers.DecimalField(max_digits=10, decimal_places=3, allow_null=True)
+    high_price = serializers.DecimalField(max_digits=10, decimal_places=3, allow_null=True)
+    low_price = serializers.DecimalField(max_digits=10, decimal_places=3, allow_null=True)
     high_time = serializers.DateTimeField(allow_null=True)
     low_time = serializers.DateTimeField(allow_null=True)
-    open_close_diff = serializers.DecimalField(max_digits=10, decimal_places=2, allow_null=True)
+    open_close_diff = serializers.DecimalField(max_digits=10, decimal_places=3, allow_null=True)
     open_close_pct = serializers.DecimalField(max_digits=8, decimal_places=4, allow_null=True)
-    high_low_diff = serializers.DecimalField(max_digits=10, decimal_places=2, allow_null=True)
+    high_low_diff = serializers.DecimalField(max_digits=10, decimal_places=3, allow_null=True)
     high_low_pct = serializers.DecimalField(max_digits=8, decimal_places=4, allow_null=True)
-    prev_close = serializers.DecimalField(max_digits=10, decimal_places=2, allow_null=True)
-    change_diff = serializers.DecimalField(max_digits=10, decimal_places=2, allow_null=True)
+    prev_close = serializers.DecimalField(max_digits=10, decimal_places=3, allow_null=True)
+    change_diff = serializers.DecimalField(max_digits=10, decimal_places=3, allow_null=True)
     change_pct = serializers.DecimalField(max_digits=8, decimal_places=4, allow_null=True)
     volume = serializers.IntegerField(allow_null=True)
     turnover = serializers.DecimalField(max_digits=15, decimal_places=2, allow_null=True)

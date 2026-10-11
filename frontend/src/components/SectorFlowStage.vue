@@ -1,12 +1,7 @@
 <script setup>
 import { computed } from 'vue'
 import { pctClass } from '../utils/format.js'
-import {
-  flowPath,
-  netToneLabel,
-  rowTitle,
-  signedAmount,
-} from '../utils/sectorFlow.js'
+import { flowPath, netToneLabel, rowTitle, signedAmount } from '../utils/sectorFlow.js'
 
 const props = defineProps({
   board: { type: String, default: 'industry' },
@@ -16,83 +11,126 @@ const props = defineProps({
 })
 
 const periodLabel = computed(() =>
-  props.period === '5d' ? '5日累计' : props.period === '10d' ? '10日累计' : '当日')
+  props.period === '5d' ? '5日累计' : props.period === '10d' ? '10日累计' : '当日',
+)
 
 const summary = computed(() => props.data?.summary || {})
 const inflowRows = computed(() => (props.data?.inflow_top || []).slice(0, 5))
 const outflowRows = computed(() => (props.data?.outflow_top || []).slice(0, 5))
-const inflowTotal = computed(() => inflowRows.value.reduce((sum, row) => sum + Number(row.net || 0), 0))
-const outflowTotal = computed(() => outflowRows.value.reduce((sum, row) => sum + Number(row.net || 0), 0))
+const inflowTotal = computed(() =>
+  inflowRows.value.reduce((sum, row) => sum + Number(row.net || 0), 0),
+)
+const outflowTotal = computed(() =>
+  outflowRows.value.reduce((sum, row) => sum + Number(row.net || 0), 0),
+)
 const netTone = computed(() => netToneLabel(summary.value.net_total))
 
 function barWidth(row, side) {
   const rows = side === 'in' ? inflowRows.value : outflowRows.value
-  const maximum = Math.max(...rows.map(item => Math.abs(Number(item.net || 0))), 0)
+  const maximum = Math.max(...rows.map((item) => Math.abs(Number(item.net || 0))), 0)
   if (!maximum) return '0%'
-  return `${Math.max(4, Math.abs(Number(row.net || 0)) / maximum * 100)}%`
+  return `${Math.max(4, (Math.abs(Number(row.net || 0)) / maximum) * 100)}%`
 }
 </script>
 
 <template>
-  <section class='flow-shell'>
-    <div class='flow-shell-header'>
+  <section class="flow-shell">
+    <div class="flow-shell-header">
       <div>
-        <span class='eyebrow'>资金流向</span>
+        <span class="eyebrow">资金流向</span>
         <h2>{{ board === 'industry' ? '行业' : '概念' }}板块前五强弱</h2>
       </div>
-      <span class='method-label'>{{ periodLabel }}</span>
+      <span class="method-label">{{ periodLabel }}</span>
     </div>
 
-    <div v-if='loading && !data' class='flow-loading'>正在加载板块资金...</div>
-    <div v-else class='flow-stage'>
-      <svg class='flow-lines' viewBox='0 0 1200 360' preserveAspectRatio='none' aria-hidden='true'>
-        <path v-for='(_, index) in outflowRows' :key='`out-${index}`' class='line-out' :d='flowPath(`out`, index)' />
-        <path v-for='(_, index) in inflowRows' :key='`in-${index}`' class='line-in' :d='flowPath(`in`, index)' />
+    <div v-if="loading && !data" class="flow-loading">正在加载板块资金...</div>
+    <div v-else class="flow-stage">
+      <svg class="flow-lines" viewBox="0 0 1200 360" preserveAspectRatio="none" aria-hidden="true">
+        <path
+          v-for="(_, index) in outflowRows"
+          :key="`out-${index}`"
+          class="line-out"
+          :d="flowPath(`out`, index)"
+        />
+        <path
+          v-for="(_, index) in inflowRows"
+          :key="`in-${index}`"
+          class="line-in"
+          :d="flowPath(`in`, index)"
+        />
       </svg>
 
-      <div class='flow-column flow-column-out'>
-        <div class='column-heading'>
+      <div class="flow-column flow-column-out">
+        <div class="column-heading">
           <div><span>净流出板块</span><small>前五合计</small></div>
-          <strong class='down'>{{ signedAmount(outflowTotal) }}</strong>
+          <strong class="down">{{ signedAmount(outflowTotal) }}</strong>
         </div>
-        <div class='flow-list'>
-          <div v-for='(row, index) in outflowRows' :key='row.name' class='flow-row' :title='rowTitle(row)'>
-            <span class='rank rank-out'>{{ String(index + 1).padStart(2, '0') }}</span>
-            <div class='flow-name'><b>{{ row.name }}</b><small>{{ row.leader || '暂无领涨股' }}</small></div>
-            <div class='flow-track'><i class='flow-fill' :style='{ width: barWidth(row, `out`) }'></i></div>
-            <strong class='flow-value down'>{{ signedAmount(row.net) }}</strong>
+        <div class="flow-list">
+          <div
+            v-for="(row, index) in outflowRows"
+            :key="row.name"
+            class="flow-row"
+            :title="rowTitle(row)"
+          >
+            <span class="rank rank-out">{{ String(index + 1).padStart(2, '0') }}</span>
+            <div class="flow-name">
+              <b>{{ row.name }}</b
+              ><small>{{ row.leader || '暂无领涨股' }}</small>
+            </div>
+            <div class="flow-track">
+              <i class="flow-fill" :style="{ width: barWidth(row, `out`) }"></i>
+            </div>
+            <strong class="flow-value down">{{ signedAmount(row.net) }}</strong>
           </div>
         </div>
       </div>
-      <div class='flow-core-wrap'>
-        <div class='flow-core'>
-          <span class='flow-symbol' aria-hidden='true'>⇄</span>
+      <div class="flow-core-wrap">
+        <div class="flow-core">
+          <span class="flow-symbol" aria-hidden="true">⇄</span>
           <small>{{ netTone }}</small>
-          <strong :class='pctClass(summary.net_total)'>{{ signedAmount(summary.net_total) }}</strong>
+          <strong :class="pctClass(summary.net_total)">{{
+            signedAmount(summary.net_total)
+          }}</strong>
           <span>板块净额</span>
         </div>
       </div>
 
-      <div class='flow-column flow-column-in'>
-        <div class='column-heading'>
+      <div class="flow-column flow-column-in">
+        <div class="column-heading">
           <div><span>净流入板块</span><small>前五合计</small></div>
-          <strong class='up'>{{ signedAmount(inflowTotal) }}</strong>
+          <strong class="up">{{ signedAmount(inflowTotal) }}</strong>
         </div>
-        <div class='flow-list'>
-          <div v-for='(row, index) in inflowRows' :key='row.name' class='flow-row' :title='rowTitle(row)'>
-            <span class='rank rank-in'>{{ String(index + 1).padStart(2, '0') }}</span>
-            <div class='flow-name'><b>{{ row.name }}</b><small>{{ row.leader || '暂无领涨股' }}</small></div>
-            <div class='flow-track'><i class='flow-fill' :style='{ width: barWidth(row, `in`) }'></i></div>
-            <strong class='flow-value up'>{{ signedAmount(row.net) }}</strong>
+        <div class="flow-list">
+          <div
+            v-for="(row, index) in inflowRows"
+            :key="row.name"
+            class="flow-row"
+            :title="rowTitle(row)"
+          >
+            <span class="rank rank-in">{{ String(index + 1).padStart(2, '0') }}</span>
+            <div class="flow-name">
+              <b>{{ row.name }}</b
+              ><small>{{ row.leader || '暂无领涨股' }}</small>
+            </div>
+            <div class="flow-track">
+              <i class="flow-fill" :style="{ width: barWidth(row, `in`) }"></i>
+            </div>
+            <strong class="flow-value up">{{ signedAmount(row.net) }}</strong>
           </div>
         </div>
       </div>
-      <div v-if='!outflowRows.length && !inflowRows.length' class='flow-empty'>暂无资金流向数据</div>
+      <div v-if="!outflowRows.length && !inflowRows.length" class="flow-empty">
+        暂无资金流向数据
+      </div>
     </div>
 
-    <footer class='flow-footnote'>
-      <span aria-hidden='true'>ⓘ</span>
-      <p>{{ data?.methodology || '板块资金为上游当日聚合强弱指标，不代表板块之间的真实资金转移路径。' }}</p>
+    <footer class="flow-footnote">
+      <span aria-hidden="true">ⓘ</span>
+      <p>
+        {{
+          data?.methodology || '板块资金为上游当日聚合强弱指标，不代表板块之间的真实资金转移路径。'
+        }}
+      </p>
     </footer>
   </section>
 </template>
@@ -124,7 +162,7 @@ function barWidth(row, side) {
 .eyebrow {
   display: block;
   margin-bottom: 2px;
-  color: #70808e;
+  color: #84929e;
   font-size: 10px;
 }
 
@@ -196,7 +234,7 @@ function barWidth(row, side) {
 
 .column-heading small {
   margin-top: 2px;
-  color: #677581;
+  color: #87929b;
   font-size: 10px;
 }
 
@@ -211,7 +249,7 @@ function barWidth(row, side) {
 
 .flow-row {
   display: grid;
-  grid-template-columns: 28px minmax(68px, .7fr) minmax(80px, 1.25fr) 82px;
+  grid-template-columns: 28px minmax(68px, 0.7fr) minmax(80px, 1.25fr) 82px;
   gap: 8px;
   align-items: center;
   min-height: 48px;
@@ -225,7 +263,7 @@ function barWidth(row, side) {
   place-items: center;
   border: 1px solid #31424d;
   border-radius: 4px;
-  color: #7f8d99;
+  color: #84929d;
   font-family: ui-monospace, SFMono-Regular, Consolas, monospace;
   font-size: 10px;
 }
@@ -259,7 +297,7 @@ function barWidth(row, side) {
 
 .flow-name small {
   margin-top: 2px;
-  color: #687682;
+  color: #86919b;
   font-size: 9px;
 }
 
@@ -306,7 +344,7 @@ function barWidth(row, side) {
   border: 1px solid #31526a;
   border-radius: 7px;
   background: #101b27;
-  box-shadow: 0 0 0 5px rgba(23, 52, 69, .18);
+  box-shadow: 0 0 0 5px rgba(23, 52, 69, 0.18);
 }
 
 .flow-symbol {
@@ -317,7 +355,7 @@ function barWidth(row, side) {
 
 .flow-core small,
 .flow-core > span:last-child {
-  color: #738390;
+  color: #84929d;
   font-size: 10px;
 }
 
@@ -331,7 +369,7 @@ function barWidth(row, side) {
   display: grid;
   min-height: 330px;
   place-items: center;
-  color: #6d7a86;
+  color: #86919b;
   font-size: 12px;
 }
 
@@ -346,7 +384,7 @@ function barWidth(row, side) {
   gap: 7px;
   align-items: flex-start;
   border-top: 1px solid #25323c;
-  color: #687681;
+  color: #86919a;
   padding: 9px 13px;
   font-size: 10px;
 }
@@ -369,7 +407,7 @@ function barWidth(row, side) {
   }
 
   .flow-row {
-    grid-template-columns: 26px minmax(62px, .8fr) minmax(56px, 1fr) 74px;
+    grid-template-columns: 26px minmax(62px, 0.8fr) minmax(56px, 1fr) 74px;
     gap: 6px;
     padding-inline: 5px;
   }
@@ -422,12 +460,18 @@ function barWidth(row, side) {
     grid-column: 1;
   }
 
-  .flow-core-wrap { grid-row: 1; }
-  .flow-column-out { grid-row: 2; }
-  .flow-column-in { grid-row: 3; }
+  .flow-core-wrap {
+    grid-row: 1;
+  }
+  .flow-column-out {
+    grid-row: 2;
+  }
+  .flow-column-in {
+    grid-row: 3;
+  }
 
   .flow-row {
-    grid-template-columns: 28px minmax(72px, .75fr) minmax(75px, 1.2fr) 78px;
+    grid-template-columns: 28px minmax(72px, 0.75fr) minmax(75px, 1.2fr) 78px;
   }
 }
 

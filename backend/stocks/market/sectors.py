@@ -4,7 +4,10 @@ from __future__ import annotations
 
 import logging
 import re
+import threading
+import time
 from io import StringIO
+from pathlib import Path
 
 import akshare as ak
 import pandas as pd
@@ -12,7 +15,7 @@ import requests
 
 from ._cache import _cache_get, _cache_meta, _cache_set, _now_str, _to_float
 from ._query import _paginate, _sort_items
-from ._sources import _safe_df_call, _source_is_cool, _source_mark_fail, _source_mark_ok
+from ._sources import _safe_df_call
 
 logger = logging.getLogger(__name__)
 
@@ -24,11 +27,18 @@ _SECTOR_SORT_FIELDS = {
     'leader_pct': 'leader_pct',
 }
 
-# 5d/10d 有两条路径：日度快照优先（不依赖东财），快照不足时退回东财原生排行；
-# 20d 无上游可退，只能由快照供数。东财 rank/hist 接口（push2）近年限流频繁。
+# 多日（5d/10d/20d）轮动口径固定为「本站日度快照（同花顺当日净额）累加」，窗口
+# 不齐就如实不可用（DAT-15）：不再退回东财原生 5日/10日排行——那是另一套主力
+# 口径和行业名单，随快照积累程度来回切换会让同一页面前后不可比。
+# 下面的东财排行指标只保留给 fetch_*_fund_flow(period=...) 的直接调用方。
 _SECTOR_RANK_INDICATORS = {'5d': '5日', '10d': '10日'}
 _SECTOR_PERIODS = ('day', '5d', '10d', '20d')
 _SNAPSHOT_PERIOD_DAYS = {'5d': 5, '10d': 10, '20d': 20}
+# 当日横截面实际来源：自抓同花顺资金流页面（非 akshare 封装）
+_THS_DAY_SOURCE = {
+    'industry': '同花顺 data.10jqka.com.cn/funds/hyzjl（自抓）',
+    'concept': '同花顺 data.10jqka.com.cn/funds/gnzjl（自抓）',
+}
 
 
 def _parse_sector_rank_table(df):
@@ -137,20 +147,41 @@ _THS_COLUMNS = {
 _THS_MAX_PAGES = 50
 
 
-def _ths_token_headers(referer):
-    """同花顺 hexin-v 反爬 token：复用 akshare 自带 ths.js 生成。"""
-    import py_mini_racer
-    from akshare.stock_feature.stock_fund_flow import _get_file_content_ths
+# ths.js 已 vendoring 到仓库（DAT-17）：不再依赖 akshare 私有函数 _get_file_content_ths，
+# 来源与更新方式见 vendor/README.md
+_THS_JS_PATH = Path(__file__).resolve().parent / 'vendor' / 'ths.js'
+# hexin-v 按分钟复用：每次都起 MiniRacer 执行 40KB 脚本，在 1H2G 上开销不小
+_THS_TOKEN_TTL = 60
+_ths_token = {'v': None, 'at': 0.0}
+_ths_token_lock = threading.Lock()
+# 分页请求间隔（秒）：连续翻 50 页容易触发同花顺反爬封禁
+_THS_PAGE_INTERVAL = 0.5
 
-    js_code = py_mini_racer.MiniRacer()
-    js_code.eval(_get_file_content_ths('ths.js'))
+
+def _ths_hexin_v():
+    """生成（或复用一分钟内的）同花顺 hexin-v token。"""
+    with _ths_token_lock:
+        now = time.time()
+        if _ths_token['v'] and now - _ths_token['at'] < _THS_TOKEN_TTL:
+            return _ths_token['v']
+        import py_mini_racer
+
+        js_code = py_mini_racer.MiniRacer()
+        js_code.eval(_THS_JS_PATH.read_text(encoding='utf-8'))
+        _ths_token['v'] = js_code.call('v')
+        _ths_token['at'] = now
+        return _ths_token['v']
+
+
+def _ths_token_headers(referer):
+    """同花顺请求头（含 hexin-v 反爬 token）。"""
     return {
         'Accept': 'text/html, */*; q=0.01',
         'Accept-Encoding': 'gzip, deflate',
         'Accept-Language': 'zh-CN,zh;q=0.9,en;q=0.8',
         'Cache-Control': 'no-cache',
         'Connection': 'keep-alive',
-        'hexin-v': js_code.call('v'),
+        'hexin-v': _ths_hexin_v(),
         'Referer': referer,
         'User-Agent': (
             'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 '
@@ -189,6 +220,7 @@ def _ths_fund_flow(board):
     m = re.search(r'class="page_info"[^>]*>\s*\d+/(\d+)', html1)
     page_num = min(int(m.group(1)) if m else 1, _THS_MAX_PAGES)
     for page in range(2, page_num + 1):
+        time.sleep(_THS_PAGE_INTERVAL)
         frames.append(_parse(_page_html(page), page))
     df = pd.concat(frames, ignore_index=True)
     if '序号' in df.columns:
@@ -201,19 +233,8 @@ def _ths_fund_flow(board):
 
 
 def _ths_fund_flow_df(board, source_name):
-    """带源冷却的同花顺板块资金流抓取；失败计入冷却，避免高频重试。"""
-    if _source_is_cool(source_name):
-        return None
-    try:
-        df = _ths_fund_flow(board)
-    except Exception as e:
-        _source_mark_fail(source_name, e)
-        return None
-    if df is None or df.empty:
-        _source_mark_fail(source_name, 'empty')
-        return None
-    _source_mark_ok(source_name)
-    return df
+    """带源冷却的同花顺板块资金流抓取；失败计入冷却，避免高频重试（走统一 failover，ARC-03）。"""
+    return _safe_df_call(_ths_fund_flow, board, source_name=source_name)
 
 
 def fetch_concept_fund_flow(period='day', ttl=180):
@@ -316,19 +337,13 @@ def get_sector_rotation(board='industry', period='day', q='', sort='net', order=
     if order not in ('asc', 'desc'):
         raise ValueError('order 必须是 asc 或 desc')
 
-    if period in _SNAPSHOT_PERIOD_DAYS and sort != 'net':
-        # 快照只含净额；5d/10d 可退回东财原生排行（含涨跌幅），20d 无上游可退
-        if period == '20d':
-            raise ValueError('20d 轮动由日度快照供数，仅支持按净额排序')
-
-    if period in _SNAPSHOT_PERIOD_DAYS and sort == 'net':
-        # 快照优先：窗口齐全就不碰东财 push2（限流/502 高发）
-        snapshot_result = _snapshot_rotation(
+    if period in _SNAPSHOT_PERIOD_DAYS:
+        # 多日轮动只由日度快照供数（DAT-15）；快照只含净额，其他排序字段无值可排
+        if sort != 'net':
+            raise ValueError(f'{period} 轮动由日度快照供数，仅支持按净额排序')
+        return _snapshot_rotation(
             board, period, q=q, order=order, page=page, page_size=page_size,
         )
-        if snapshot_result['available'] or period == '20d':
-            return snapshot_result
-        # 5d/10d 快照不足 → 落到下方东财原生排行兜底
 
     if board == 'industry':
         loader = fetch_industry_fund_flow
@@ -342,11 +357,11 @@ def get_sector_rotation(board='industry', period='day', q='', sort='net', order=
     )
     return {
         'updated_at': _now_str(),
+        'basis': 'ths_day',
         'meta': _cache_meta(
             cache_key,
             180,
-            f'akshare.stock_fund_flow_{board}' if period == 'day'
-            else f'akshare.stock_sector_fund_flow_rank({period})',
+            _THS_DAY_SOURCE[board],
             payload['available'],
             disclaimer=payload['methodology'],
         ),
@@ -355,7 +370,7 @@ def get_sector_rotation(board='industry', period='day', q='', sort='net', order=
 
 
 def _snapshot_rotation(board, period, q='', order='desc', page=1, page_size=50):
-    """20 日（等）轮动：由日度快照的当日净额累加得到，窗口不齐则如实不可用。"""
+    """5/10/20 日轮动：由日度快照的当日净额累加得到，窗口不齐则如实不可用。"""
     from . import snapshots
     from ..models import MarketDailySnapshot
 
@@ -387,8 +402,9 @@ def _snapshot_rotation(board, period, q='', order='desc', page=1, page_size=50):
     )
     return {
         'updated_at': _now_str(),
+        'basis': 'ths_snapshot',
         'meta': snapshots.snapshot_meta(
-            f'MarketDailySnapshot({kind}) n={n}',
+            f'MarketDailySnapshot({kind}) n={n}（同花顺当日净额逐日累加）',
             bool(items),
             latest=latest,
             message=message,

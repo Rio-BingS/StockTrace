@@ -7,16 +7,19 @@ APScheduler 集成到 Django
 3. 收盘后 15:10 汇总当日日线+分钟（自选库最后一次自动写入；随后评估价格提醒、清理 AI 调用记录）
 4. 收盘后 15:30–21:00 每30分钟预热晚到行情缓存并落日度快照（交易日）
 5. 每交易日 17:15 探测器扫描（板块/大盘快照已在前两轮预热落库后）
+6. 每日 02:30 清理超出保留期的分钟 K 线
 
 运行方式（REL-01）：
 - 生产：独立进程 `python manage.py run_scheduler`（systemd 单元 stocktrace-scheduler），
   不再寄生在 Gunicorn worker 里——worker 被 max_requests 回收/重启时会杀掉长任务、错过定时点。
-- 兼容：设置 STOCKTRACE_RUN_SCHEDULER_IN_WEB=1 时仍由 AppConfig.ready() 在 Web 进程内启动。
+- 兼容：设置 STOCKTRACE_RUN_SCHEDULER_IN_WEB=1 时仍由 AppConfig.ready() 在 Web 进程内启动
+  （白名单：仅 gunicorn 或 runserver 子进程；锁被占用时后台每 60s 重试）。
 两种方式都用同一把文件锁（STOCKTRACE_SCHEDULER_LOCK，默认 <STOCKTRACE_RUN_DIR>/scheduler.lock）
 保证全机只有一个进程持有调度器。
 """
 
 import atexit
+import functools
 import json
 import logging
 import os
@@ -38,14 +41,12 @@ logger = logging.getLogger(__name__)
 scheduler = None
 _lock_fh = None
 
-_SKIP_COMMANDS = {
-    'migrate', 'makemigrations', 'showmigrations', 'sqlmigrate',
-    'collectstatic', 'shell', 'dbshell', 'test', 'check',
-    'createsuperuser', 'changepassword', 'flush', 'loaddata',
-    'dumpdata', 'inspectdb',
-    # 独立调度进程自己管理调度器，ready() 不能再在同进程内启动一份
-    'run_scheduler',
-}
+# Web 内兼容模式下，调度锁被占用时的后台重试间隔（秒）（REL-03）
+LOCK_RETRY_SECONDS = 60
+_start_mutex = threading.Lock()
+_retry_stop = threading.Event()
+_retry_thread = None
+_atexit_registered = False
 
 # A 股交易时间天然是北京时间：trigger 显式带时区，不依赖服务器/进程的本地时区
 SCHEDULER_TZ = ZoneInfo('Asia/Shanghai')
@@ -63,20 +64,28 @@ _POST_CLOSE_START = dt_time(15, 30)
 _POST_CLOSE_END = dt_time(21, 0)
 
 
+def _is_web_server_process():
+    """当前进程是否为 Web 服务进程：gunicorn（含 python -m gunicorn），或 runserver 的
+    reloader 子进程（只有子进程 RUN_MAIN=true）。管理命令、shell、测试等一律不是。"""
+    if sys.argv and 'gunicorn' in sys.argv[0].lower():
+        return True
+    argv = [a.lower() for a in sys.argv[1:]]
+    return 'runserver' in argv and os.environ.get('RUN_MAIN') == 'true'
+
+
 def _should_start_scheduler():
+    """白名单（REL-03）：全局开关未关、STOCKTRACE_RUN_SCHEDULER_IN_WEB=1，且确实是 Web 服务进程。
+
+    旧实现靠 argv 黑名单，漏掉的管理命令（fetch_stock_data、backfill_* 等）会在 CLI 进程里
+    启动调度器、抢走调度锁，甚至以 root 身份建出锁文件。
+    """
     if os.environ.get('STOCKTRACE_SCHEDULER', '1').lower() in ('0', 'false', 'no', 'off'):
         return False
+    from .apps import run_scheduler_in_web
 
-    argv = [a.lower() for a in sys.argv]
-    for cmd in _SKIP_COMMANDS:
-        if cmd in argv:
-            return False
-
-    # Django runserver reloader: only the child process has RUN_MAIN=true
-    if 'runserver' in argv and os.environ.get('RUN_MAIN') != 'true':
+    if not run_scheduler_in_web():
         return False
-
-    return True
+    return _is_web_server_process()
 
 
 def _acquire_lock():
@@ -143,18 +152,39 @@ def _release_lock():
     _lock_fh = None
 
 
+def _run_steps(job_name, steps):
+    """逐步执行任务链（REL-08）：每一步单独 try，前一步异常不跳过后面的提醒与清理。
+
+    steps: [(步骤名, 可调用对象)]。返回失败的步骤名列表；全部失败信息带堆栈写日志。
+    """
+    failed = []
+    for name, step in steps:
+        try:
+            step()
+        except Exception:
+            failed.append(name)
+            logger.exception(f'定时任务 {job_name} 的步骤「{name}」失败，继续后续步骤')
+    if failed:
+        logger.error(f'定时任务 {job_name} 完成，失败步骤：{"、".join(failed)}')
+    return failed
+
+
 def _intraday_job():
     from .services import fetch_intraday_update
-    fetch_intraday_update()
-    _evaluate_alerts()
+    return _run_steps('intraday_fetch', [
+        ('盘中行情拉取', fetch_intraday_update),
+        ('价格提醒评估', _evaluate_alerts),
+    ])
 
 
 def _daily_summary_job():
     from .services import fetch_daily_summary
-    fetch_daily_summary()
-    _evaluate_alerts()
-    _cleanup_ai_logs()
-    _cleanup_market_snapshots()
+    return _run_steps('daily_summary', [
+        ('收盘日线汇总', fetch_daily_summary),
+        ('价格提醒评估', _evaluate_alerts),
+        ('AI 调用记录清理', _cleanup_ai_logs),
+        ('市场快照清理', _cleanup_market_snapshots),
+    ])
 
 
 def _evaluate_alerts():
@@ -162,8 +192,8 @@ def _evaluate_alerts():
     from .alerts import evaluate_alerts
     try:
         evaluate_alerts()
-    except Exception as e:
-        logger.error(f"价格提醒评估失败: {e}")
+    except Exception:
+        logger.exception("价格提醒评估失败")
 
 
 def _cleanup_ai_logs():
@@ -188,7 +218,7 @@ def _cleanup_market_snapshots():
 
     from .models import MarketDailySnapshot
 
-    days = getattr(settings, 'MARKET_SNAPSHOT_RETENTION_DAYS', 600)
+    days = settings.MARKET_SNAPSHOT_RETENTION_DAYS  # settings 已接线环境变量并保证下限（OPS-06）
     try:
         cutoff = timezone.localdate() - timedelta(days=days)
         deleted, _ = MarketDailySnapshot.objects.filter(trade_date__lt=cutoff).delete()
@@ -196,6 +226,36 @@ def _cleanup_market_snapshots():
             logger.info(f"清理 {days} 天前的市场日度快照 {deleted} 行")
     except Exception as e:
         logger.error(f"市场日度快照清理失败: {e}")
+
+
+MINUTE_BAR_DELETE_BATCH = 5000
+
+
+def _minute_bar_cleanup_job():
+    """分钟 K 线保留 N 天（默认 120，MINUTE_BAR_RETENTION_DAYS），分批删除（PERF-02）。
+
+    每批 5000 行一个短事务：SQLite 单写锁，一次性删几十万行会长时间挡住盘中写入。
+    按主键取批（旧数据主键小，扫描很快结束），不按默认的 datetime 排序整表。
+    """
+    from datetime import timedelta
+
+    from .models import MinuteBar
+
+    days = int(getattr(settings, 'MINUTE_BAR_RETENTION_DAYS', 120))
+    cutoff = timezone.now() - timedelta(days=days)
+    total = 0
+    while True:
+        batch = (
+            MinuteBar.objects.filter(datetime__lt=cutoff)
+            .order_by('pk').values_list('pk', flat=True)[:MINUTE_BAR_DELETE_BATCH]
+        )
+        deleted, _ = MinuteBar.objects.filter(pk__in=list(batch)).delete()
+        total += deleted
+        if deleted < MINUTE_BAR_DELETE_BATCH:
+            break
+    if total:
+        logger.info(f"清理 {days} 天前的分钟K线 {total} 行")
+    return total
 
 
 def _preopen_incremental_job():
@@ -228,12 +288,39 @@ def _post_close_lagging_job():
     warm_post_close_lagging()
 
 
+# 探测器依赖的当日快照（REL-08）：17:15 首次尝试，缺快照则每 30 分钟重试，
+# 最后一次（18:45）不再等待，降级照跑（维度自行标记降级）
+_DETECTOR_REQUIRED_SNAPSHOTS = ('industry_ff', 'market_ff')
+_DETECTOR_LAST_ATTEMPT = dt_time(18, 45)
+
+
+def _detector_dependencies_ready(trade_date):
+    """返回 (是否应现在扫描, 原因)。已扫过的当日不重复；快照未齐且非最后一次则延后。"""
+    from .models import DetectorRun, MarketDailySnapshot
+
+    done = DetectorRun.objects.filter(trade_date=trade_date).exclude(status='failed').exists()
+    if done:
+        return False, 'already_done'
+    have = set(MarketDailySnapshot.objects.filter(
+        trade_date=trade_date, kind__in=_DETECTOR_REQUIRED_SNAPSHOTS,
+    ).values_list('kind', flat=True))
+    missing = [k for k in _DETECTOR_REQUIRED_SNAPSHOTS if k not in have]
+    if not missing:
+        return True, 'ready'
+    if timezone.localtime().time() >= _DETECTOR_LAST_ATTEMPT:
+        logger.warning(f'探测器最后一次尝试：当日快照仍缺 {missing}，降级扫描')
+        return True, 'degraded'
+    logger.warning(f'探测器延后：当日快照未落库 {missing}，30 分钟后重试')
+    return False, 'waiting'
+
+
 def _detector_scan_job():
-    """探测器日度扫描：每交易日 17:15（快照已落库、两融 T+1 基本可取）。
+    """探测器日度扫描：每交易日 17:15 起（快照已落库、两融 T+1 基本可取）。
 
     为什么 17:15 独立成任务而不是并入 15:30 预热链：板块/大盘快照要等
     15:30/16:00 两轮预热写完，且融资余额快照只应每天探测一次（深市按日
-    探测有请求成本）；失败只记日志，不影响其他任务。
+    探测有请求成本）；失败只记日志，不影响其他任务。按依赖编排（REL-08）：
+    当日 industry_ff/market_ff 快照未落库则延后 30 分钟重试，最多 3 次。
     """
     if os.environ.get('STOCKTRACE_DETECTOR', '1').lower() in ('0', 'false', 'no', 'off'):
         return
@@ -248,12 +335,42 @@ def _detector_scan_job():
         logger.debug('未到 15:30 收盘，跳过探测器扫描')
         return
 
+    ready, _reason = _detector_dependencies_ready(now.date())
+    if not ready:
+        return
+
     from .detector.scan import run_scan
 
     try:
         run_scan()
-    except Exception as e:
-        logger.error(f'探测器扫描失败: {e}')
+    except Exception:
+        logger.exception('探测器扫描失败')
+
+
+# 任务互斥（REL-04）：与手动拉取、管理命令共用 task_lock 的同名锁。
+# 盘中任务忙则直接跳过（下一轮 5 分钟后再来）；日度任务限时等待，等不到才跳过。
+_INTRADAY_SKIP = 0
+_DAILY_WAIT_SECONDS = 1800
+
+
+def _guarded(func, lock_name, wait=_INTRADAY_SKIP):
+    """包装定时任务：执行前取任务锁，取不到记 WARNING 并跳过本次。"""
+    from .task_lock import TaskLock
+
+    @functools.wraps(func)
+    def wrapper(*args, **kwargs):
+        lock = TaskLock(lock_name)
+        if not lock.acquire(timeout=wait):
+            logger.warning(f'定时任务 {func.__name__} 跳过：任务锁 {lock_name} 被占用（已等待 {wait}s）')
+            return None
+        try:
+            return func(*args, **kwargs)
+        finally:
+            lock.release()
+
+    wrapper.lock_name = lock_name
+    wrapper.lock_wait = wait
+    return wrapper
 
 
 def register_jobs(sched):
@@ -275,23 +392,33 @@ def register_jobs(sched):
         )
 
     # 开盘前：增量日线预热
-    add(_preopen_incremental_job, CronTrigger(hour=8, minute=50, timezone=SCHEDULER_TZ),
+    add(_guarded(_preopen_incremental_job, 'stock_quotes', _DAILY_WAIT_SECONDS),
+        CronTrigger(hour=8, minute=50, timezone=SCHEDULER_TZ),
         'preopen_incremental', 1800)
 
-    add(_intraday_job, CronTrigger(hour='9-14', minute='*/5', timezone=SCHEDULER_TZ),
+    add(_guarded(_intraday_job, 'stock_quotes', _INTRADAY_SKIP),
+        CronTrigger(hour='9-14', minute='*/5', timezone=SCHEDULER_TZ),
         'intraday_fetch', 240)
 
-    add(_daily_summary_job, CronTrigger(hour=15, minute=10, timezone=SCHEDULER_TZ),
+    add(_guarded(_daily_summary_job, 'stock_quotes', _DAILY_WAIT_SECONDS),
+        CronTrigger(hour=15, minute=10, timezone=SCHEDULER_TZ),
         'daily_summary', 3600)
 
     # 收盘后：15:30–21:00 每 30 分钟预热晚到行情（cron 含 15:00，由窗口守卫丢弃）
-    add(_post_close_lagging_job,
+    add(_guarded(_post_close_lagging_job, 'market_snapshots', 600),
         CronTrigger(day_of_week='mon-fri', hour='15,16,17,18,19,20,21', minute='0,30', timezone=SCHEDULER_TZ),
         'post_close_lagging', 900)
 
-    # 探测器：交易日 17:15（板块/大盘快照已在前两轮预热落库）
-    add(_detector_scan_job, CronTrigger(day_of_week='mon-fri', hour=17, minute=15, timezone=SCHEDULER_TZ),
-        'detector_scan', 3600)
+    # 探测器：交易日 17:15（板块/大盘快照已在前两轮预热落库）；
+    # 17:45/18:15/18:45 为依赖未齐时的重试点，当日已扫过则直接跳过（REL-08）
+    add(_guarded(_detector_scan_job, 'detector_scan', _DAILY_WAIT_SECONDS),
+        CronTrigger(day_of_week='mon-fri', hour='17-18', minute='15,45', timezone=SCHEDULER_TZ),
+        'detector_scan', 1500)
+
+    # 分钟 K 线保留期清理：每日 02:30 低峰执行（PERF-02）
+    add(_guarded(_minute_bar_cleanup_job, 'minute_bar_cleanup', _DAILY_WAIT_SECONDS),
+        CronTrigger(hour=2, minute=30, timezone=SCHEDULER_TZ),
+        'minute_bar_cleanup', 3600)
     return sched
 
 
@@ -412,41 +539,74 @@ def build_scheduler(scheduler_cls=BackgroundScheduler):
 _STARTED_MSG = (
     "APScheduler 已启动 "
     "(08:50 增量日线 / 09-14 */5 分钟 / 15:10 收盘汇总 / "
-    "15:30-21:00 */30 晚到行情预热 / 17:15 探测器扫描)"
+    "15:30-21:00 */30 晚到行情预热 / 17:15 探测器扫描 / 02:30 分钟线清理)"
 )
 
 
-def start():
-    """Web 进程内启动 APScheduler（兼容模式；带启动条件与单实例文件锁）"""
+def _start_web_scheduler_locked():
+    """已持有调度锁：构造并启动 Web 内调度器。调用方需持有 _start_mutex。"""
     global scheduler
-    if scheduler is not None:
-        return
-
-    if not _should_start_scheduler():
-        logger.debug("跳过 APScheduler 启动（命令或环境禁用）")
-        return
-
-    if not _acquire_lock():
-        logger.info("APScheduler 未启动：其他进程已持有调度锁")
-        return
-
     scheduler = attach_heartbeat(build_scheduler(), mode='web')
     scheduler.start()
     write_heartbeat(scheduler)
-    atexit.register(stop)
     logger.info(_STARTED_MSG + "，运行于 Web 进程（兼容模式）")
+
+
+def _retry_lock_loop(interval):
+    """后台线程：每 interval 秒重试一次调度锁，拿到即启动调度器；stop() 置位后退出。"""
+    while not _retry_stop.wait(interval):
+        if not _acquire_lock():
+            logger.warning(f"调度锁仍被其他进程持有，{interval}s 后重试")
+            continue
+        with _start_mutex:
+            if _retry_stop.is_set() or scheduler is not None:
+                _release_lock()
+                return
+            _start_web_scheduler_locked()
+        return
+
+
+def start(retry_seconds=None):
+    """Web 进程内启动 APScheduler（兼容模式；白名单启动条件 + 单实例文件锁）。
+
+    锁被占用（如独立调度进程或另一个 worker 持有）时不再只试一次就放弃，
+    而是起后台线程每 LOCK_RETRY_SECONDS 秒重试并记 WARNING（REL-03）。
+    """
+    global _retry_thread, _atexit_registered
+    if not _should_start_scheduler():
+        logger.debug("跳过 APScheduler 启动（非 Web 服务进程或环境禁用）")
+        return
+
+    interval = LOCK_RETRY_SECONDS if retry_seconds is None else retry_seconds
+    with _start_mutex:
+        if scheduler is not None or (_retry_thread is not None and _retry_thread.is_alive()):
+            return
+        if not _atexit_registered:
+            atexit.register(stop)
+            _atexit_registered = True
+        _retry_stop.clear()
+        if _acquire_lock():
+            _start_web_scheduler_locked()
+            return
+        logger.warning(f"APScheduler 暂未启动：其他进程已持有调度锁，后台每 {interval}s 重试")
+        _retry_thread = threading.Thread(
+            target=_retry_lock_loop, args=(interval,), daemon=True, name='scheduler-lock-retry',
+        )
+        _retry_thread.start()
 
 
 def stop():
     global scheduler
-    if scheduler is not None:
-        try:
-            scheduler.shutdown(wait=False)
-        except Exception:
-            pass
-        write_heartbeat(scheduler, running=False)
-        scheduler = None
-    _release_lock()
+    _retry_stop.set()
+    with _start_mutex:
+        if scheduler is not None:
+            try:
+                scheduler.shutdown(wait=False)
+            except Exception:
+                pass
+            write_heartbeat(scheduler, running=False)
+            scheduler = None
+        _release_lock()
 
 
 def run_forever(stop_event, lock_retry_seconds=60):

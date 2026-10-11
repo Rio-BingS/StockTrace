@@ -7,6 +7,19 @@ const apiTarget = process.env.VITE_API_TARGET || 'http://localhost:8000'
 
 export default defineConfig({
   plugins: [vue()],
+  build: {
+    rolldownOptions: {
+      output: {
+        // 框架单独成 vendor chunk：业务代码发版时这块缓存不失效（FEX-07）。
+        // ECharts 不合并成一个大块：各页面只用到部分图表类型，保持按需拆分更小
+        codeSplitting: {
+          groups: [
+            { name: 'vendor-vue', test: /node_modules[\\/](vue|@vue|vue-router|axios)[\\/]/ },
+          ],
+        },
+      },
+    },
+  },
   server: {
     port: 5173,
     proxy: {

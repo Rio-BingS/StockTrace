@@ -25,6 +25,7 @@ from .views import (
 )
 from .ai.views import (
     AiProviderViewSet,
+    ai_job_detail,
     stock_ai_analysis,
     screener,
     screener_ai,
@@ -46,6 +47,7 @@ urlpatterns = [
     path('health/', health, name='health'),
     path('', include(router.urls)),
     path('stocks/<int:pk>/ai-analysis/', stock_ai_analysis, name='stock-ai-analysis'),
+    path('ai/jobs/<str:job_id>/', ai_job_detail, name='ai-job-detail'),
     path('screener/', screener, name='screener'),
     path('screener/ai/', screener_ai, name='screener-ai'),
     path('screener/ai/comment/', screener_ai_comment, name='screener-ai-comment'),

@@ -120,7 +120,8 @@ class SchedulerConfigTests(SimpleTestCase):
         jobs = {j.id: j for j in s.get_jobs()}
         self.assertEqual(
             set(jobs),
-            {'preopen_incremental', 'intraday_fetch', 'daily_summary', 'post_close_lagging', 'detector_scan'},
+            {'preopen_incremental', 'intraday_fetch', 'daily_summary', 'post_close_lagging', 'detector_scan',
+             'minute_bar_cleanup'},
         )
         for job in jobs.values():
             self.assertTrue(job.coalesce, job.id)
@@ -157,9 +158,15 @@ class SchedulerConfigTests(SimpleTestCase):
             cfg.ready()
 
     def test_run_scheduler_command_skipped_by_ready(self):
+        # REL-03：启动判定改白名单，run_scheduler 等管理命令进程不会在 ready() 里启动调度器
+        from unittest import mock
+
         from stocks import scheduler as sch
 
-        self.assertIn('run_scheduler', sch._SKIP_COMMANDS)
+        env = {'STOCKTRACE_RUN_SCHEDULER_IN_WEB': '1', 'STOCKTRACE_SCHEDULER': '1'}
+        with mock.patch.dict(os.environ, env), \
+                mock.patch.object(sch.sys, 'argv', ['manage.py', 'run_scheduler']):
+            self.assertFalse(sch._should_start_scheduler())
 
     def test_lock_path_configurable(self):
         from unittest import mock

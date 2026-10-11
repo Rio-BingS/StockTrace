@@ -11,7 +11,9 @@
 
 from __future__ import annotations
 
-from datetime import date, datetime, timedelta
+from datetime import datetime, timedelta
+
+from django.utils import timezone
 
 PERIOD_LABELS = {
     '1d': '当日',
@@ -65,7 +67,7 @@ def resolve_period(params_get, allowed, default='1m', allow_custom=True,
 
     params_get: callable(key, default='')，通常为 request.query_params.get
     """
-    today = today or date.today()
+    today = today or timezone.localdate()
     preset = (params_get('period') or '').strip() or default
     start_raw = (params_get('start') or '').strip()
     end_raw = (params_get('end') or '').strip()

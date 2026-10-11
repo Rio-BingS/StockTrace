@@ -125,7 +125,7 @@ class MarketFundHistNormalizeTests(TestCase):
         self.assertIsNone(data['items'][0]['main_net'])
 
 
-@patch('stocks.market.snapshots._expected_latest_date', return_value=_D2)
+@patch('stocks.trading_calendar.expected_latest_date', return_value=_D2)
 class BackfillMarketFfTests(TestCase):
     """DAT-06：回填只认东财主源、只补缺不覆盖（除非 --force）、不写未收盘日期。"""
 

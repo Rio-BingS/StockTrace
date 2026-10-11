@@ -43,15 +43,42 @@ class AiCallLog(models.Model):
         'Stock', on_delete=models.SET_NULL, null=True, blank=True, verbose_name='股票'
     )
     purpose = models.CharField('用途', max_length=30, choices=PURPOSE_CHOICES)
+    STATUS_PENDING = 'pending'
+    STATUS_SUCCESS = 'success'
+    STATUS_FAILED = 'failed'
+    STATUS_CHOICES = [
+        (STATUS_PENDING, '进行中'),
+        (STATUS_SUCCESS, '成功'),
+        (STATUS_FAILED, '失败'),
+    ]
+
     success = models.BooleanField('成功', default=True)
+    # 调用状态（AIX-06）：占位流水先记 pending，回填为 success/failed；
+    # 节流的同股冷却只算 pending + success，跨进程也能看到"进行中"
+    status = models.CharField('状态', max_length=10, choices=STATUS_CHOICES,
+                              default=STATUS_SUCCESS, db_index=True)
     prompt_tokens = models.IntegerField('输入 tokens', null=True, blank=True)
     completion_tokens = models.IntegerField('输出 tokens', null=True, blank=True)
+    # 可观测性字段（AIX-08）：均可空，旧行与未知值保持 NULL，不拿 0 冒充
+    model = models.CharField('模型名', max_length=100, null=True, blank=True)
+    duration_ms = models.PositiveIntegerField('耗时(毫秒)', null=True, blank=True)
+    error_reason = models.CharField('失败原因', max_length=200, null=True, blank=True,
+                                    help_text='失败时的简短原因，写入前截断到 200 字')
+    total_tokens = models.IntegerField('总 tokens', null=True, blank=True)
+    cost = models.DecimalField('估算费用', max_digits=12, decimal_places=6, null=True, blank=True,
+                               help_text='按服务商计价币种估算；无单价配置时为空')
     created_at = models.DateTimeField('创建时间', auto_now_add=True)
 
     class Meta:
         verbose_name = 'AI 调用记录'
         verbose_name_plural = 'AI 调用记录'
         ordering = ['-created_at']
+        # 节流按 created_at 计当日次数、按 (stock, purpose, created_at) 查冷却，
+        # 清理任务按 created_at 删旧行（PERF-10）
+        indexes = [
+            models.Index(fields=['created_at'], name='aicalllog_created_idx'),
+            models.Index(fields=['stock', 'purpose', 'created_at'], name='aicalllog_stock_purpose_idx'),
+        ]
 
 
 class StockGroup(models.Model):
@@ -117,12 +144,16 @@ class MarketDailySnapshot(models.Model):
     trade_date = models.DateField('交易日期')
     payload = models.JSONField('快照数据')
     created_at = models.DateTimeField('创建时间', auto_now_add=True)
+    # 同日重跑 update_or_create 会覆盖 payload：读方据此判断快照是否变化（PERF-07）
+    updated_at = models.DateTimeField('更新时间', auto_now=True)
 
     class Meta:
         verbose_name = '市场日度快照'
         verbose_name_plural = '市场日度快照'
-        unique_together = ['kind', 'trade_date']
         ordering = ['-trade_date']
+        constraints = [
+            models.UniqueConstraint(fields=['kind', 'trade_date'], name='uniq_snapshot_kind_day'),
+        ]
 
     def __str__(self):
         return f"{self.kind} {self.trade_date}"
@@ -177,6 +208,14 @@ class AlertEvent(models.Model):
         verbose_name = '提醒记录'
         verbose_name_plural = '提醒记录'
         ordering = ['-created_at']
+        # 库级保证同规则同日只一条，防并发评估重复触发（PERF-06）
+        constraints = [
+            models.UniqueConstraint(fields=['alert', 'trade_date'], name='uniq_alert_day'),
+        ]
+        # 评估时按当日取已触发规则、列表按未读筛选（PERF-10）
+        indexes = [
+            models.Index(fields=['trade_date', 'is_read'], name='alertevent_day_read_idx'),
+        ]
 
     def __str__(self):
         return f"{self.message} ({self.trade_date})"
@@ -205,31 +244,32 @@ class DailyQuote(models.Model):
     )
     trade_date = models.DateField('交易日期')
 
-    open_price = models.DecimalField('开盘价', max_digits=10, decimal_places=2)
-    close_price = models.DecimalField('收盘价', max_digits=10, decimal_places=2)
-    high_price = models.DecimalField('最高价', max_digits=10, decimal_places=2)
-    low_price = models.DecimalField('最低价', max_digits=10, decimal_places=2)
+    # 价格类字段 3 位小数：ETF/LOF 报价精确到 0.001 元，2 位会被舍入失真（DAT-11）
+    open_price = models.DecimalField('开盘价', max_digits=10, decimal_places=3)
+    close_price = models.DecimalField('收盘价', max_digits=10, decimal_places=3)
+    high_price = models.DecimalField('最高价', max_digits=10, decimal_places=3)
+    low_price = models.DecimalField('最低价', max_digits=10, decimal_places=3)
 
     high_time = models.DateTimeField('最高点时间', null=True, blank=True)
     low_time = models.DateTimeField('最低点时间', null=True, blank=True)
 
     # 计算字段
     open_close_diff = models.DecimalField(
-        '收盘-开盘差值', max_digits=10, decimal_places=2
+        '收盘-开盘差值', max_digits=10, decimal_places=3
     )
     open_close_pct = models.DecimalField(
         '收盘-开盘百分比', max_digits=8, decimal_places=4
     )
     high_low_diff = models.DecimalField(
-        '最高-最低差值', max_digits=10, decimal_places=2
+        '最高-最低差值', max_digits=10, decimal_places=3
     )
     high_low_pct = models.DecimalField(
         '最高-最低百分比', max_digits=8, decimal_places=4
     )
 
     # 相对昨收的涨跌
-    prev_close = models.DecimalField('昨收价', max_digits=10, decimal_places=2, null=True, blank=True)
-    change_diff = models.DecimalField('涨跌额', max_digits=10, decimal_places=2, null=True, blank=True)
+    prev_close = models.DecimalField('昨收价', max_digits=10, decimal_places=3, null=True, blank=True)
+    change_diff = models.DecimalField('涨跌额', max_digits=10, decimal_places=3, null=True, blank=True)
     change_pct = models.DecimalField('涨跌幅', max_digits=8, decimal_places=4, null=True, blank=True)
 
     # 单位约定：成交量「股」、成交额「元」（各数据源在适配层换算，见 services.py）
@@ -239,12 +279,17 @@ class DailyQuote(models.Model):
     )
     # 实际数据来源（eastmoney/sina/baostock/tencent）；空串为 0009 迁移前的存量行，来源未知
     source = models.CharField('数据来源', max_length=16, blank=True, default='')
+    # 是否为收盘后的最终日 K（DAT-13）：盘中拉到的当日 bar 为 False，收盘汇总后置 True；
+    # 存量行默认 True。探测器/选股/回看等需要完整日 K 的读方应过滤 is_final=True
+    is_final = models.BooleanField('已收盘', default=True)
 
     class Meta:
         verbose_name = '每日行情'
         verbose_name_plural = '每日行情'
-        unique_together = ['stock', 'trade_date']
         ordering = ['-trade_date']
+        constraints = [
+            models.UniqueConstraint(fields=['stock', 'trade_date'], name='uniq_quote_stock_day'),
+        ]
 
     def __str__(self):
         return f"{self.stock.code} {self.trade_date}"
@@ -276,10 +321,10 @@ class MinuteBar(models.Model):
         related_name='minute_bars', verbose_name='股票'
     )
     datetime = models.DateTimeField('分钟时间戳')
-    open = models.DecimalField('开盘价', max_digits=10, decimal_places=2)
-    close = models.DecimalField('收盘价', max_digits=10, decimal_places=2)
-    high = models.DecimalField('最高价', max_digits=10, decimal_places=2)
-    low = models.DecimalField('最低价', max_digits=10, decimal_places=2)
+    open = models.DecimalField('开盘价', max_digits=10, decimal_places=3)
+    close = models.DecimalField('收盘价', max_digits=10, decimal_places=3)
+    high = models.DecimalField('最高价', max_digits=10, decimal_places=3)
+    low = models.DecimalField('最低价', max_digits=10, decimal_places=3)
     volume = models.BigIntegerField('成交量(股)')
     turnover = models.DecimalField(
         '成交额(元)', max_digits=15, decimal_places=2, null=True, blank=True
@@ -291,8 +336,11 @@ class MinuteBar(models.Model):
     class Meta:
         verbose_name = '分钟K线'
         verbose_name_plural = '分钟K线'
-        unique_together = ['stock', 'datetime']
         ordering = ['datetime']
+        # bulk_create(update_conflicts) 依赖此唯一约束
+        constraints = [
+            models.UniqueConstraint(fields=['stock', 'datetime'], name='uniq_minutebar_stock_dt'),
+        ]
 
     def __str__(self):
         return f"{self.stock.code} {self.datetime}"
@@ -391,8 +439,12 @@ class DetectorSignal(models.Model):
     class Meta:
         verbose_name = '探测器信号'
         verbose_name_plural = '探测器信号'
-        unique_together = ['target_kind', 'target_code', 'trade_date']
         ordering = ['-trade_date', '-score']
+        constraints = [
+            models.UniqueConstraint(
+                fields=['target_kind', 'target_code', 'trade_date'], name='uniq_signal_target_day',
+            ),
+        ]
         indexes = [
             models.Index(fields=['trade_date', 'severity']),
             models.Index(fields=['status', 'review_hit']),

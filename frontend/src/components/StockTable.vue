@@ -1,11 +1,15 @@
 <script setup>
-import { ref } from 'vue'
-import { formatPct, formatNum, formatSigned, pctClass } from '../utils/format.js'
+import { computed, ref, watch } from 'vue'
+import { formatPct, formatNum, formatRate, formatSigned, pctClass } from '../utils/format.js'
 import { stockApi } from '../api/stocks.js'
+import { computePnl, syncDrafts, validateHolding } from '../utils/holding.js'
+import { confirmDialog, toastError } from '../stores/feedback.js'
 
-defineProps({
+const props = defineProps({
   data: { type: Array, default: () => [] },
   loading: { type: Boolean, default: false },
+  // 加载失败文案：有值时空状态显示错误而不是误导性的"暂无数据"
+  error: { type: String, default: '' },
   groups: { type: Array, default: () => [] },
 })
 
@@ -14,6 +18,8 @@ const emit = defineEmits(['row-click', 'delete', 'ai-click', 'refresh'])
 const expandedRows = ref(new Set())
 const costDrafts = ref({})
 const savingIds = ref(new Set())
+// 持仓校验失败的提示：code → 文案
+const costErrors = ref({})
 
 function toggleRow(code) {
   if (expandedRows.value.has(code)) {
@@ -27,30 +33,32 @@ function isExpanded(code) {
   return expandedRows.value.has(code)
 }
 
-// 盈亏：仅填了成本价的行参与；数据全部来自看板真实行情
-function pnlOf(item) {
-  if (item.cost_price == null || item.quantity == null || item.close_price == null) return null
-  return (Number(item.close_price) - Number(item.cost_price)) * Number(item.quantity)
-}
+// 盈亏：仅填了成本价的行参与；数据全部来自看板真实行情。
+// 预先按 code 计算，模板只读不写（FEF-08）
+const pnlMap = computed(() => {
+  const map = {}
+  for (const item of props.data) map[item.code] = computePnl(item)
+  return map
+})
+
+// 草稿在数据变化时同步（未编辑的行跟随服务端，编辑中的行保留），
+// 不在渲染期间写响应式状态（FEF-08）
+watch(
+  () => props.data,
+  (items) => {
+    costDrafts.value = syncDrafts(costDrafts.value, items)
+  },
+  { immediate: true },
+)
 
 function draftOf(item, key) {
-  if (!(item.code in costDrafts.value)) {
-    costDrafts.value[item.code] = {
-      cost_price: item.cost_price ?? '',
-      quantity: item.quantity ?? '',
-    }
-  }
-  return costDrafts.value[item.code][key]
+  return costDrafts.value[item.code]?.[key] ?? ''
 }
 
 function setDraft(item, key, value) {
-  if (!(item.code in costDrafts.value)) {
-    costDrafts.value[item.code] = {
-      cost_price: item.cost_price ?? '',
-      quantity: item.quantity ?? '',
-    }
-  }
-  costDrafts.value[item.code][key] = value
+  const old = costDrafts.value[item.code] || { cost_price: '', quantity: '' }
+  costDrafts.value[item.code] = { ...old, [key]: value, dirty: true }
+  if (costErrors.value[item.code]) delete costErrors.value[item.code]
 }
 
 async function changeGroup(item, value) {
@@ -58,21 +66,25 @@ async function changeGroup(item, value) {
     await stockApi.update(item.id, { group_id: value === '' ? null : Number(value) })
     emit('refresh')
   } catch {
-    alert('修改分组失败，请重试')
+    toastError('修改分组失败，请重试')
   }
 }
 
 async function saveCost(item) {
-  const draft = costDrafts.value[item.code] || {}
-  const cost = draft.cost_price === '' ? null : Number(draft.cost_price)
-  const qty = draft.quantity === '' ? null : Number(draft.quantity)
-  if (cost !== null && (Number.isNaN(cost) || cost <= 0)) return
+  const check = validateHolding(costDrafts.value[item.code])
+  if (!check.ok) {
+    costErrors.value[item.code] = check.error
+    return
+  }
   savingIds.value.add(item.code)
   try {
-    await stockApi.update(item.id, { cost_price: cost, quantity: qty })
+    await stockApi.update(item.id, { cost_price: check.cost, quantity: check.qty })
+    // 保存成功后取消编辑标记，下一次刷新按服务端值同步
+    const d = costDrafts.value[item.code]
+    if (d) costDrafts.value[item.code] = { ...d, dirty: false }
     emit('refresh')
   } catch {
-    alert('保存持仓失败，请重试')
+    toastError('保存持仓失败，请重试')
   } finally {
     savingIds.value.delete(item.code)
   }
@@ -90,7 +102,14 @@ function handleAi(e, item) {
 
 async function handleDelete(e, item) {
   e.stopPropagation()
-  if (!confirm(`确认取消关注 ${item.name || item.code}？`)) return
+  const ok = await confirmDialog({
+    title: '取消关注',
+    message: `确认取消关注 ${item.name || item.code}？`,
+    confirmText: '取消关注',
+    cancelText: '保留',
+    danger: true,
+  })
+  if (!ok) return
   emit('delete', item)
 }
 </script>
@@ -120,8 +139,20 @@ async function handleDelete(e, item) {
             :class="{ expanded: isExpanded(item.code) }"
             @click="toggleRow(item.code)"
           >
-            <td class="expand-icon" @click.stop="toggleRow(item.code)">
-              <span :class="isExpanded(item.code) ? 'arrow-down' : 'arrow-right'"></span>
+            <td class="expand-icon">
+              <!-- 键盘可达的展开按钮；整行点击仍可展开（FEX-03） -->
+              <button
+                type="button"
+                class="expand-btn"
+                :aria-expanded="isExpanded(item.code) ? 'true' : 'false'"
+                :aria-label="`${isExpanded(item.code) ? '收起' : '展开'} ${item.name || item.code} 详情`"
+                @click.stop="toggleRow(item.code)"
+              >
+                <span
+                  :class="isExpanded(item.code) ? 'arrow-down' : 'arrow-right'"
+                  aria-hidden="true"
+                ></span>
+              </button>
             </td>
             <td class="code">{{ item.code }}</td>
             <td class="name">{{ item.name }}</td>
@@ -134,12 +165,21 @@ async function handleDelete(e, item) {
             <td :class="pctClass(item.change_diff)">
               {{ formatSigned(item.change_diff) }}
             </td>
-            <td :class="pctClass(pnlOf(item))">
-              {{ pnlOf(item) == null ? '-' : formatNum(pnlOf(item)) }}
+            <td :class="pctClass(pnlMap[item.code])">
+              {{ formatSigned(pnlMap[item.code]) }}
             </td>
             <td class="actions">
-              <button class="btn-kline" @click="handleGoDetail($event, item)" title="查看K线图">K线</button>
-              <button class="btn-delete" @click="handleDelete($event, item)" title="取消关注">✕</button>
+              <button class="btn-kline" @click="handleGoDetail($event, item)" title="查看K线图">
+                K线
+              </button>
+              <button
+                class="btn-delete"
+                @click="handleDelete($event, item)"
+                title="取消关注"
+                :aria-label="`取消关注 ${item.name || item.code}`"
+              >
+                ✕
+              </button>
             </td>
           </tr>
           <!-- 展开行 -->
@@ -149,11 +189,14 @@ async function handleDelete(e, item) {
                 <div class="expand-grid">
                   <div class="expand-item">
                     <span class="elabel">振幅</span>
-                    <span :class="pctClass(item.high_low_pct)">{{ formatPct(item.high_low_pct) }}</span>
+                    <!-- 振幅为非负量：不加正号、不着色（FEF-11） -->
+                    <span>{{ formatRate(item.high_low_pct) }}</span>
                   </div>
                   <div class="expand-item">
                     <span class="elabel">日内涨幅（较开盘）</span>
-                    <span :class="pctClass(item.open_close_pct)">{{ formatPct(item.open_close_pct) }}</span>
+                    <span :class="pctClass(item.open_close_pct)">{{
+                      formatPct(item.open_close_pct)
+                    }}</span>
                   </div>
                   <div class="expand-item">
                     <span class="elabel">昨收</span>
@@ -177,12 +220,19 @@ async function handleDelete(e, item) {
                   </div>
                 </div>
                 <div class="expand-actions">
-                  <button class="btn-kline-lg" @click="handleGoDetail($event, item)">查看K线图 →</button>
-                  <button class="btn-kline-lg btn-ai-lg" @click="handleAi($event, item)">AI 分析</button>
+                  <button class="btn-kline-lg" @click="handleGoDetail($event, item)">
+                    查看K线图 →
+                  </button>
+                  <button class="btn-kline-lg btn-ai-lg" @click="handleAi($event, item)">
+                    AI 分析
+                  </button>
                 </div>
                 <div class="group-row">
                   <span class="elabel">分组</span>
-                  <select :value="item.group_id ?? ''" @change="changeGroup(item, $event.target.value)">
+                  <select
+                    :value="item.group_id ?? ''"
+                    @change="changeGroup(item, $event.target.value)"
+                  >
                     <option value="">未分组</option>
                     <option v-for="g in groups" :key="g.id" :value="g.id">{{ g.name }}</option>
                   </select>
@@ -190,25 +240,38 @@ async function handleDelete(e, item) {
                 <div class="cost-row">
                   <span class="elabel">持仓（可选，填后参与盈亏统计）</span>
                   <input
-                    type="number" step="any" placeholder="成本价"
+                    type="number"
+                    step="any"
+                    placeholder="成本价"
                     :value="draftOf(item, 'cost_price')"
                     @input="setDraft(item, 'cost_price', $event.target.value)"
                   />
                   <input
-                    type="number" step="1" placeholder="持股数"
+                    type="number"
+                    step="1"
+                    min="0"
+                    placeholder="持股数"
                     :value="draftOf(item, 'quantity')"
                     @input="setDraft(item, 'quantity', $event.target.value)"
                   />
-                  <button class="btn-kline-lg" :disabled="savingIds.has(item.code)" @click="saveCost(item)">
+                  <button
+                    class="btn-kline-lg"
+                    :disabled="savingIds.has(item.code)"
+                    @click="saveCost(item)"
+                  >
                     {{ savingIds.has(item.code) ? '保存中…' : '保存持仓' }}
                   </button>
+                  <span v-if="costErrors[item.code]" class="cost-error">{{
+                    costErrors[item.code]
+                  }}</span>
                 </div>
               </div>
             </td>
           </tr>
         </template>
         <tr v-if="!data.length">
-          <td colspan="8" class="empty">暂无数据，请先添加关注的股票并点击"刷新数据"</td>
+          <td v-if="error" colspan="9" class="empty error">{{ error }}</td>
+          <td v-else colspan="9" class="empty">暂无数据，请先添加关注的股票并点击"刷新数据"</td>
         </tr>
       </tbody>
     </table>
@@ -225,7 +288,7 @@ async function handleDelete(e, item) {
 .loading {
   text-align: center;
   padding: 40px;
-  color: #888;
+  color: #909090;
 }
 
 .stock-table {
@@ -273,23 +336,35 @@ async function handleDelete(e, item) {
 
 .expand-icon {
   text-align: center;
+}
+
+.expand-btn {
+  background: transparent;
+  border: none;
+  padding: 4px 6px;
   cursor: pointer;
+  line-height: 1;
+}
+
+.expand-btn:focus-visible {
+  outline: 2px solid var(--accent);
+  border-radius: 4px;
 }
 
 .arrow-right::before {
   content: '▶';
   font-size: 10px;
-  color: #888;
+  color: #909090;
 }
 
 .arrow-down::before {
   content: '▼';
   font-size: 10px;
-  color: #888;
+  color: #909090;
 }
 
 .code {
-  color: #e94560;
+  color: var(--accent);
   font-weight: bold;
 }
 
@@ -302,19 +377,28 @@ async function handleDelete(e, item) {
 }
 
 .up {
-  color: #e94560;
+  color: var(--up);
   font-weight: bold;
 }
 
 .down {
-  color: #00c853;
+  color: var(--down);
   font-weight: bold;
 }
 
 .empty {
   text-align: center;
-  color: #666;
+  color: #919191;
   padding: 40px !important;
+}
+
+.cost-error {
+  color: var(--danger);
+  font-size: 12px;
+}
+
+.empty.error {
+  color: var(--danger);
 }
 
 /* 展开行 */
@@ -342,7 +426,7 @@ async function handleDelete(e, item) {
 }
 
 .elabel {
-  color: #888;
+  color: #909090;
   font-size: 12px;
 }
 
@@ -398,7 +482,7 @@ async function handleDelete(e, item) {
 .btn-kline {
   background: transparent;
   border: 1px solid #3a7bd5;
-  color: #3a7bd5;
+  color: var(--accent);
   border-radius: 4px;
   padding: 2px 8px;
   font-size: 13px;
@@ -416,7 +500,7 @@ async function handleDelete(e, item) {
 .btn-kline-lg {
   background: #0f3460;
   border: 1px solid #3a7bd5;
-  color: #3a7bd5;
+  color: var(--accent);
   border-radius: 4px;
   padding: 6px 16px;
   font-size: 13px;
@@ -443,8 +527,8 @@ async function handleDelete(e, item) {
 /* 删除按钮 */
 .btn-delete {
   background: transparent;
-  border: 1px solid #e94560;
-  color: #e94560;
+  border: 1px solid var(--danger);
+  color: var(--danger);
   border-radius: 4px;
   padding: 2px 8px;
   font-size: 13px;
@@ -453,8 +537,8 @@ async function handleDelete(e, item) {
 }
 
 .btn-delete:hover {
-  background: #e94560;
-  color: #fff;
+  background: var(--danger-bg);
+  color: var(--danger);
 }
 
 /* 移动端适配 */

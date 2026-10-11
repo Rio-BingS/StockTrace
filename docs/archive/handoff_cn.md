@@ -1,3 +1,5 @@
+> ⚠️ 已过时：v1.01 时代的交接文档，仅供考古。其中的部署方式（Flexible SSL、http 访问等）已废弃，以 `deploy/DEPLOY.md` 与 `CLAUDE.md` 为准。
+
 # StockTrace 项目交接文档
 
 ## 概要

@@ -70,7 +70,7 @@ class AlertDailyFallbackTests(TestCase):
         PriceAlert.objects.create(
             stock=self.stock, rule_type=PriceAlert.PRICE_ABOVE, threshold=Decimal('10'),
         )
-        with patch('stocks.services.is_trading_day', _trading_true):
+        with patch('stocks.trading_calendar.is_trading_day', _trading_true):
             events = alerts.evaluate_alerts(now=_INTRADAY)
         self.assertEqual(len(events), 1)
         self.assertIn('10.50', events[0].message)
@@ -90,7 +90,7 @@ class AlertDailyFallbackTests(TestCase):
                 raise RuntimeError('boom')
             return real(alert, today)
 
-        with patch('stocks.services.is_trading_day', _trading_true), \
+        with patch('stocks.trading_calendar.is_trading_day', _trading_true), \
                 patch.object(alerts, '_evaluate_one', side_effect=flaky), \
                 self.assertLogs('stocks.alerts', level='ERROR') as logs:
             events = alerts.evaluate_alerts(now=_INTRADAY)
@@ -111,12 +111,13 @@ class AlertStaleDataTests(TestCase):
         self.pct_alert = PriceAlert.objects.create(
             stock=self.stock, rule_type=PriceAlert.DAILY_PCT_ABOVE, threshold=Decimal('5'),
         )
+        # 阈值高于昨收 10.60：上穿语义下今天涨过 11 才算穿越（ALG-14）
         self.price_alert = PriceAlert.objects.create(
-            stock=self.stock, rule_type=PriceAlert.PRICE_ABOVE, threshold=Decimal('10.5'),
+            stock=self.stock, rule_type=PriceAlert.PRICE_ABOVE, threshold=Decimal('11'),
         )
 
     def _eval(self, now):
-        with patch('stocks.services.is_trading_day', _trading_true):
+        with patch('stocks.trading_calendar.is_trading_day', _trading_true):
             return alerts.evaluate_alerts(now=now)
 
     def test_premarket_does_not_evaluate(self):
@@ -144,10 +145,11 @@ class AlertStaleDataTests(TestCase):
         self.assertTrue(all(e.trade_date == _TODAY for e in events))
 
     def test_intraday_pct_uses_today_bar_vs_prev_close(self):
-        # 当日最新价 10.70 / 昨收 10.60 = +0.94%，不应因昨日 change_pct=6 触发
+        # 当日最新价 10.70 / 昨收 10.60 = +0.94%，不应因昨日 change_pct=6 触发；
+        # 10.70 也没上穿 11，价格规则同样不触发
         _make_bar(self.stock, datetime.combine(_TODAY, time(10, 0)), Decimal('10.70'))
         events = self._eval(_at(10, 5))
-        self.assertEqual([e.alert_id for e in events], [self.price_alert.id])
+        self.assertEqual(events, [])
 
     def test_after_close_uses_today_daily_change_pct(self):
         _make_daily(self.stock, _TODAY, Decimal('11.20'), 5.66)
@@ -158,7 +160,7 @@ class AlertStaleDataTests(TestCase):
 
     def test_non_trading_day_skips(self):
         _make_bar(self.stock, datetime.combine(_TODAY, time(10, 0)), Decimal('11.30'))
-        with patch('stocks.services.is_trading_day', return_value=False):
+        with patch('stocks.trading_calendar.is_trading_day', return_value=False):
             self.assertEqual(alerts.evaluate_alerts(now=_at(10, 5)), [])
 
 
@@ -215,12 +217,13 @@ class ScanTargetIsolationTests(TestCase):
                 raise TypeError("unsupported operand type(s) for /: 'NoneType' and 'float'")
             return False, {'reason': '不平静'}
 
-        with patch('stocks.services.is_trading_day', _trading_true), \
+        with patch('stocks.trading_calendar.is_trading_day', _trading_true), \
                 patch.object(scan, 'timezone', _after_close_clock()), \
                 patch.object(scan, 'save_margin_snapshot', return_value=0), \
                 patch.object(scan, '_collect_targets', return_value=targets), \
                 patch.object(scan, '_build_context',
-                             side_effect=lambda t: ({'kind': t['kind'], 'code': t['code']}, None)), \
+                             side_effect=lambda t: ({'kind': t['kind'], 'code': t['code'],
+                                                     'as_of': _TODAY.isoformat()}, None)), \
                 patch.object(scan.calm_mod, 'is_calm', side_effect=fake_calm), \
                 self.assertLogs('stocks.detector.scan', level='ERROR'):
             summary = scan.run_scan()

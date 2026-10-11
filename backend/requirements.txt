@@ -16,6 +16,8 @@ akshare==1.18.64
 # 上界卡在下一个大版本（4.x 的 API 变更需先在测试环境验证）
 pandas>=2.2,<4
 baostock>=0.9,<1
+# 同花顺 hexin-v token 由仓库内 vendored ths.js 生成，代码直接 import（DAT-17）
+py_mini_racer>=0.6,<0.7
 cryptography>=42.0,<51
 requests>=2.31,<3
 gunicorn>=21.0,<27

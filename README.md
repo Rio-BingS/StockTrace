@@ -44,25 +44,38 @@
 
 ## 开发
 
-```bash
-# 后端（仓库根目录，Windows Git Bash）
-source venv/Scripts/activate
-cd backend
-python manage.py migrate
-python manage.py runserver 8000
-python manage.py test stocks        # 市场服务与 API 契约测试
+运行时：Python 3.12（`.python-version`）、Node.js 22 LTS ≥ 22.13（`frontend/.nvmrc`）。
 
-# 前端
+```bash
+# 后端：在仓库根目录建虚拟环境（只需一次）
+python3.12 -m venv venv                   # Windows：py -3.12 -m venv venv
+source venv/bin/activate                  # Linux/macOS
+# source venv/Scripts/activate            # Windows Git Bash
+# .\venv\Scripts\Activate.ps1           # Windows PowerShell
+pip install -r backend/requirements-dev.txt
+
+cd backend
+# 本地必须带 DJANGO_DEBUG=true：缺省 DEBUG=False，且此时没有合规的 DJANGO_SECRET_KEY 会拒绝启动
+export DJANGO_DEBUG=true                  # PowerShell：$env:DJANGO_DEBUG="true"
+python manage.py migrate
+python manage.py runserver 8000           # 8000 被占用时换端口，并让前端 VITE_API_TARGET 指过来
+python manage.py test stocks              # 全部后端测试（会访问上游的用例已打桩）
+python -m ruff check .
+
+# 前端（另开终端）
 cd frontend
-npm install
-npm run dev      # http://localhost:5173，/api 代理到 8000
-npm run lint && npm run build
+npm ci
+npm run dev                               # http://localhost:5173，/api 代理到 localhost:8000
+# VITE_API_TARGET=http://localhost:8001 npm run dev   # 后端不在 8000 时
+npm run lint && npm test && npm run build
 ```
 
 目录速览：`backend/stocks/`（models / services 多源抓取 / tasks 后台拉取 / market/ 行情中心包 / detector/ 探测器包 / scheduler 定时任务）；`frontend/src/`（views / components / api）；`deploy/`（VPS 部署模板与 `DEPLOY.md`）。
 
-定时任务（APScheduler，交易日才跑）：08:50 盘前增量日线；09–14 点每 5 分钟分钟线；15:10 收盘汇总；15:30–21:00 每 30 分钟预热晚到行情缓存；17:15 探测器日度扫描（可 `python manage.py run_detector_scan` 手动触发）。
+定时任务（APScheduler，交易日才跑；生产由独立进程 `python manage.py run_scheduler` 运行）：08:50 盘前增量日线；09–14 点每 5 分钟分钟线；15:10 收盘汇总；15:30–21:00 每 30 分钟预热晚到行情缓存；17:15 探测器日度扫描，当日快照未落库时 17:45/18:15/18:45 重试（可 `python manage.py run_detector_scan` 手动触发）。
 
 ## 部署
 
-1H2G VPS：Nginx + Gunicorn（1 worker 2 线程）+ systemd，Cloudflare Full (strict) SSL + Nginx 限流 + Basic Auth。模板与步骤见 [`deploy/DEPLOY.md`](deploy/DEPLOY.md)。发版流程：验证通过后在 main 上打注释标签 `git tag -a vX.Y.Z` 并 `git push --follow-tags`。
+1H2G VPS：Nginx + Gunicorn（1 worker 2 线程）+ systemd，Cloudflare Full (strict) SSL + Nginx 限流 + Basic Auth。模板与步骤见 [`deploy/DEPLOY.md`](deploy/DEPLOY.md)。
+
+**版本号只以 git 标签为准**（SemVer，`git describe --tags` 查看当前版本），文档里不再写死版本号；`frontend/package.json` 的 `version` 是私有包占位，不代表发布版本。发版流程：CI 通过后在 main 上打注释标签 `git tag -a vX.Y.Z` 并 `git push --follow-tags`。

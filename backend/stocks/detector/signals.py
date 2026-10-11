@@ -29,32 +29,61 @@ def _as_date(value):
     return _date.fromisoformat(value) if isinstance(value, str) else value
 
 
+# 周期计数最多回看的交易日数（与旧实现的 20 次循环同一上限）
+_CYCLE_LOOKBACK = 20
+
+
+def _previous_trading_days(before_date, n):
+    """before_date 之前（不含）的最近 n 个交易日，降序；日历给不出结论时返回 None。
+
+    is_trading_day 是三态：None（未知）或抛异常都视为「日历不可用」——旧实现在
+    这种情况下把自然日当交易日推进（ALG-15），节假日会被当成「当天没信号」而断链。
+    """
+    from ..services import is_trading_day
+
+    days = []
+    day = before_date
+    for _ in range(n * 3 + 15):
+        day -= timedelta(days=1)
+        try:
+            flag = is_trading_day(day)
+        except Exception:  # noqa: BLE001
+            return None
+        if flag is None:
+            return None
+        if flag:
+            days.append(day)
+            if len(days) == n:
+                return days
+    return None
+
+
 def _count_cycles(target_kind, target_code, direction, before_date):
     """信号日之前连续多少个交易日存在同方向信号行（周期维持计数）。
 
     为什么按信号行而非「微变状态」计数：状态没有被持久化，信号行本身就是
     每日状态快照；中间某天扫描没跑（宕机/上游全挂）周期自然中断——维持
     本来就要求逐日确认，中断后重新累计是符合语义的保守行为。
-    交易日历不可用时按自然日推进：可能低估连续性，宁可少算不多算。
-    """
-    from ..services import is_trading_day
 
-    cycles = 0
-    day = before_date
-    for _ in range(20):
-        day -= timedelta(days=1)
-        try:
-            if not is_trading_day(day):
-                continue
-        except Exception:
-            pass
-        row = DetectorSignal.objects.filter(
+    一次查询取回看窗口内该对象同方向的信号日期，再与交易日序列逐日比对
+    （PERF-08：旧实现逐日单查，每个对象最多 20 次查询）。交易日历不可用时
+    返回 None（未知），不再按自然日推进（ALG-15）。
+    """
+    days = _previous_trading_days(before_date, _CYCLE_LOOKBACK)
+    if days is None:
+        return None
+    present = set(
+        DetectorSignal.objects.filter(
             target_kind=target_kind,
             target_code=target_code,
-            trade_date=day,
             direction=direction,
-        ).first()
-        if row is None:
+            trade_date__gte=days[-1],
+            trade_date__lt=before_date,
+        ).values_list('trade_date', flat=True)
+    )
+    cycles = 0
+    for day in days:
+        if day not in present:
             break
         cycles += 1
     return cycles
@@ -82,6 +111,9 @@ def evaluate_target(ctx, configs):
     up_votes, down_votes = [], []
 
     for cfg in configs:
+        # 停用维度（DB is_enabled=False，或注册表未实现）既不评估也不投票（ALG-07）
+        if not cfg.get('enabled', True) or cfg.get('evaluate') is None:
+            continue
         if ctx['kind'] not in cfg['targets']:
             continue
         try:
@@ -93,6 +125,7 @@ def evaluate_target(ctx, configs):
             }
         res['name'] = cfg['name']
         res['weight'] = cfg['weight']
+        res['params'] = dict(cfg.get('params') or {})
         dim_results[cfg['key']] = res
         if res['direction'] == 'up':
             up_votes.append((cfg['key'], res))
@@ -115,7 +148,9 @@ def evaluate_target(ctx, configs):
         sum(abs(res['value'] or 0.0) * res['weight'] for _k, res in votes) / total_w, 1
     ) if total_w else 0.0
 
-    cycles = _count_cycles(ctx['kind'], ctx['code'], direction, _as_date(ctx['as_of'])) + 1
+    prev_cycles = _count_cycles(ctx['kind'], ctx['code'], direction, _as_date(ctx['as_of']))
+    # 日历不可用：周期无法确认，按 1 记（只会少算），并让 scan 记一条降级
+    cycles = (prev_cycles or 0) + 1
     signal_data = {
         'target_kind': ctx['kind'],
         'target_code': ctx['code'],
@@ -129,12 +164,17 @@ def evaluate_target(ctx, configs):
             DetectorSignal.STATUS_ACTIVE if cycles >= 2
             else DetectorSignal.STATUS_WATCHING
         ),
+        'cycles_unknown': prev_cycles is None,
     }
     return signal_data, dim_results
 
 
 def dimensions_payload(dim_results):
-    """落库用的维度明细（去掉 series 大字段，详情页需要时重算）。"""
+    """落库用的维度明细（去掉 series 大字段，详情页需要时重算）。
+
+    params 是信号当日生效的维度参数快照（ALG-15）：自动调参会改 min/权重，
+    详情页重算曲线要用信号当时的参数，否则曲线与落库判定对不上。
+    """
     return {
         key: {
             'name': res.get('name'),
@@ -143,6 +183,7 @@ def dimensions_payload(dim_results):
             'weight': res.get('weight'),
             'available': res.get('available'),
             'note': res.get('note', ''),
+            'params': res.get('params'),
         }
         for key, res in dim_results.items()
     }

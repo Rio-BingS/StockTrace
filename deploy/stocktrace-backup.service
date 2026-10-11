@@ -13,3 +13,18 @@ ExecStart=/opt/stocktrace/deploy/stocktrace-backup.sh
 Nice=10
 IOSchedulingClass=best-effort
 IOSchedulingPriority=7
+
+# ---- 沙箱（SEC-10）：只读整个系统，仅备份目录可写；源库只读即可（.backup 走在线备份 API）
+# 注意 SQLite 读 WAL 库需要能写 -shm，所以 backend/ 仍需可写
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=read-only
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+UMask=0027
+ReadWritePaths=/opt/stocktrace/backend /var/backups/stocktrace

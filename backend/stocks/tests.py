@@ -12,6 +12,11 @@ from . import tasks
 from .market._cache import _cache_get, _cache_set
 
 
+def _no_holders(code, **kwargs):
+    """持有人结构是独立上游（东财基金档案），ETF 详情用例不关心：固定为不可用，避免触网（OPS-03）"""
+    return {'available': False, 'items': [], 'message': '测试桩：不拉持有人结构', 'meta': {}}
+
+
 class MarketParsingTests(SimpleTestCase):
     def setUp(self):
         market._cache.clear()
@@ -114,15 +119,13 @@ class MarketParsingTests(SimpleTestCase):
         self.assertIsNone(items[0]['inflow'])
 
     @patch('stocks.market.sectors.fetch_industry_fund_flow')
-    def test_sector_rotation_supports_native_multi_day_periods(self, fetch_flow):
-        fetch_flow.return_value = [
-            {'name': '半导体', 'net': 100.0, 'inflow': None, 'outflow': None,
-             'change_pct': 1.0, 'leader': None, 'leader_pct': None},
-        ]
+    def test_sector_rotation_multi_day_periods_use_snapshots_only(self, fetch_flow):
+        # 多日口径固定为日度快照（DAT-15），不再调用东财原生 5日排行
         data = market.get_sector_rotation(board='industry', period='5d')
 
-        fetch_flow.assert_called_once_with(period='5d')
+        fetch_flow.assert_not_called()
         self.assertEqual(data['period'], '5d')
+        self.assertEqual(data['basis'], 'ths_snapshot')
         self.assertIn('5d', data['supported_periods'])
 
     @patch('stocks.market.etf_flow.flow_history')
@@ -167,6 +170,7 @@ class MarketParsingTests(SimpleTestCase):
         for item in data['items']:
             self.assertTrue(forbidden.isdisjoint(item))
 
+    @patch('stocks.market.etf.fetch_holder_structure', new=_no_holders)
     @patch('stocks.market.etf._etf_history')
     @patch('stocks.market.etf._normalized_etf_items')
     def test_etf_detail_returns_price_history_only(self, normalized, history):
@@ -187,6 +191,7 @@ class MarketParsingTests(SimpleTestCase):
         self.assertEqual(data['history']['start_date'], '2026-01-01')
         self.assertEqual(data['history']['end_date'], '2026-01-21')
 
+    @patch('stocks.market.etf.fetch_holder_structure', new=_no_holders)
     @patch('stocks.market.etf._etf_history', return_value=[])
     @patch('stocks.market.etf._normalized_etf_items')
     def test_etf_detail_keeps_quote_when_history_is_unavailable(self, normalized, history):
@@ -537,23 +542,25 @@ class FetchTaskWatchdogTests(SimpleTestCase):
             self.assertTrue(tasks._state['running'])
             self.assertEqual(tasks._state['last_status'], 'running')
 
-    def test_stale_running_task_recovered_to_error(self):
+    def test_stale_running_task_only_marked(self):
+        # REL-04：看门狗只标记 stale，不复位 running（旧线程仍持锁）
         self._claim_running('all')
         with tasks._lock:
             tasks._started_at = monotonic() - 31 * 60
             tasks._recover_stale_locked()
-            self.assertFalse(tasks._state['running'])
-            self.assertEqual(tasks._state['last_status'], 'error')
-            self.assertIn('看门狗', tasks._state['last_error'])
+            self.assertTrue(tasks._state['running'])
+            self.assertTrue(tasks._state['stale'])
+            self.assertIn('疑似挂死', tasks._state['last_error'])
 
-    def test_start_takes_over_stale_task(self):
+    def test_start_does_not_run_concurrently_with_stale_task(self):
         self._claim_running('all')
         with tasks._lock:
             tasks._started_at = monotonic() - 31 * 60
         with patch('stocks.tasks.threading.Thread') as thread_mock:
-            started, _ = tasks.start_fetch_one(1)
-        self.assertTrue(started)
-        thread_mock.assert_called_once()
+            started, st = tasks.start_fetch_one(1)
+        self.assertFalse(started)
+        self.assertTrue(st['stale'])
+        thread_mock.assert_not_called()
 
 
 class UpstreamTimeoutSettingsTests(SimpleTestCase):

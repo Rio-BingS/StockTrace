@@ -13,8 +13,14 @@ from django.utils import timezone
 from .models import AiCallLog, AiProvider, DailyQuote, Stock
 from .ai.crypto import decrypt_api_key, encrypt_api_key, mask_api_key
 from .ai.llm import LlmClient, LlmError, validate_base_url
+from .ai.prompts import DISCLAIMER
 from .ai.screener import ConditionError, run_screener
-from .ai.throttle import DAILY_LIMIT, check_throttle, log_call
+from .ai.throttle import check_throttle, daily_limit, log_call
+
+
+def _no_valuation(codes):
+    """估值快照（腾讯）是独立上游：选股用例按「估值不可用」口径运行，避免触网（OPS-03）"""
+    return {}
 
 
 class CryptoTests(TestCase):
@@ -33,6 +39,7 @@ def _mock_chat_json(spec):
     return lambda messages, **kwargs: (spec, {})
 
 
+@patch('stocks.ai.valuation.fetch_valuation_map', new=_no_valuation)
 class ScreenerEngineTests(TestCase):
     def setUp(self):
         self.stock = Stock.objects.create(code='000001', name='测试银行')
@@ -123,7 +130,7 @@ class ThrottleTests(TestCase):
         self.assertTrue(allowed)
 
     def test_daily_limit_blocks(self):
-        for _ in range(DAILY_LIMIT):
+        for _ in range(daily_limit()):
             log_call('screener_comment')
         allowed, reason = check_throttle('screener_comment')
         self.assertFalse(allowed)
@@ -280,6 +287,7 @@ class AiProviderApiTests(TestCase):
         self.assertIn('****2222', body)
 
 
+@patch('stocks.ai.valuation.fetch_valuation_map', new=_no_valuation)
 class AiEndpointTests(TestCase):
     def setUp(self):
         self.stock = Stock.objects.create(code='000001', name='测试')
@@ -311,15 +319,20 @@ class AiEndpointTests(TestCase):
         response = self.client.post(f'/api/stocks/{self.stock.id}/ai-analysis/')
         self.assertEqual(response.status_code, 200)
         self.assertEqual(response.data['analysis'], '看起来不错')
-        self.assertEqual(response.data['disclaimer'], 'AI 生成，非投资建议')
+        self.assertEqual(response.data['disclaimer'], DISCLAIMER)
 
     @patch('stocks.ai.views.LlmClient')
     def test_analysis_upstream_error_is_honest(self, mock_client_cls):
         mock_client_cls.return_value.provider = self.provider
-        mock_client_cls.return_value.chat.side_effect = LlmError('上游挂了')
+        mock_client_cls.return_value.chat.side_effect = LlmError(
+            '上游挂了', kind='upstream', status_code=500)
         response = self.client.post(f'/api/stocks/{self.stock.id}/ai-analysis/')
         self.assertEqual(response.status_code, 502)
-        self.assertIn('上游挂了', response.data['detail'])
+        # 如实报错但只给通用分类，不回显异常原文（SEC-07）
+        self.assertEqual(response.data['error'], 'upstream')
+        self.assertIn('HTTP 500', response.data['detail'])
+        self.assertNotIn('上游挂了', response.data['detail'])
+        self.assertFalse(AiCallLog.objects.get(purpose='analysis').success)
 
     def test_screener_invalid_condition_returns_400(self):
         response = self.client.post('/api/screener/', {
@@ -373,7 +386,7 @@ class AiEndpointTests(TestCase):
         }, content_type='application/json')
         self.assertEqual(response.status_code, 200)
         self.assertEqual(response.data['comment'], '强势')
-        self.assertEqual(response.data['disclaimer'], 'AI 生成，非投资建议')
+        self.assertEqual(response.data['disclaimer'], DISCLAIMER)
 
     def test_comment_requires_results(self):
         response = self.client.post('/api/screener/ai/comment/', {
@@ -393,6 +406,8 @@ def _fake_response(status_code, text='', json_data=None):
     return resp
 
 
+# 关闭重试：这里只验证单次请求的安全行为与错误分类，重试见 tests_p1_ai.py
+@override_settings(STOCKTRACE_LLM_MAX_RETRIES=0)
 @patch('stocks.ai.llm.socket.getaddrinfo', side_effect=_fake_getaddrinfo(_PUBLIC_DNS))
 class LlmClientSecurityTests(TestCase):
     """SEC-01：LlmClient 调用前再次校验地址、不跟随重定向"""
@@ -537,6 +552,7 @@ def _make_bars(stock, closes, volumes=None, start=date(2026, 6, 1)):
         )
 
 
+@patch('stocks.ai.valuation.fetch_valuation_map', new=_no_valuation)
 class ScreenerDerivedFieldsTests(TestCase):
     """多日衍生字段：区间涨跌/均线/量比/新高新低/连涨天数。"""
 
@@ -607,6 +623,7 @@ class ScreenerDerivedFieldsTests(TestCase):
             ]})
 
 
+@patch('stocks.ai.valuation.fetch_valuation_map', new=_no_valuation)
 class ScreenerTechIndicatorTests(TestCase):
     """技术指标字段：MACD/KDJ/RSI/BOLL 的口径与边界。"""
 
@@ -618,7 +635,7 @@ class ScreenerTechIndicatorTests(TestCase):
 
     def test_macd_bullish_uptrend(self):
         # 单调上行序列：DIF>0、DIF>DEA、金叉发生在早期（此处只验多头态）
-        _make_bars(self.stock, [10.0 + i * 0.1 for i in range(40)])
+        _make_bars(self.stock, [10.0 + i * 0.1 for i in range(130)])  # MACD 预热需 ≥120 根（ALG-12）
         rows = run_screener({'logic': 'all', 'conditions': [
             {'field': 'macd_dif_gt_zero', 'op': 'eq', 'value': 1},
             {'field': 'macd_dif_gt_dea', 'op': 'eq', 'value': 1},

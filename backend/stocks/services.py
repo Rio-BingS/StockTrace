@@ -28,6 +28,10 @@ import pandas as pd
 from django.db import transaction
 from django.utils import timezone
 
+from . import trading_calendar
+# BaoStock 会话串行化与交易日历已分别抽到 baostock_session / trading_calendar（ARC-02），
+# 旧名保留供既有调用方使用
+from .baostock_session import bs_lock as _bs_lock, bs_session as _bs_session  # noqa: F401
 from .models import Stock, DailyQuote, MinuteBar
 
 logger = logging.getLogger(__name__)
@@ -36,30 +40,27 @@ logger = logging.getLogger(__name__)
 _stock_list_cache = {'df': None, 'expires': 0}
 _STOCK_LIST_TTL = 1800
 
-# 交易日历缓存（DAT-07）：
-# - 整表（新浪）带 TTL，过期后刷新失败继续沿用旧表（日历极少变化），只在表覆盖
-#   范围内给出确定结论；范围外不再一律判为非交易日
-# - 单日结论（BaoStock 兜底）按 date 缓存且带 TTL：date -> (bool, expires_at)
-# - 上游失败做负缓存（冷却期内不再请求），避免日历故障时逐日重复打接口
-# - 全部不可用时返回 None（未知），不再把「仅排除周末」的猜测结果永久缓存
-_trade_day_cache = {}
-_trade_calendar_set = None
-_trade_calendar_range = None   # (min_date, max_date)
-_trade_calendar_expires = 0
-_TRADE_CAL_TTL = 6 * 3600
-_TRADE_DAY_TTL = 6 * 3600
-_CALENDAR_FAIL_TTL = 300
-_calendar_fail_until = {'sina': 0, 'baostock': 0}
-
 # ============================================================
 # 工具函数
 # ============================================================
 
+def _exchange(code):
+    """6位代码所属交易所（DAT-12）：'sh' / 'sz' / 'bj'
+
+    北交所 92/4/8 开头（先于 9 判断）；沪市 5（ETF/LOF）/6/9（B 股）开头；其余深市。
+    """
+    code = str(code).zfill(6)
+    if code.startswith(('92', '4', '8')):
+        return 'bj'
+    if code.startswith(('5', '6', '9')):
+        return 'sh'
+    return 'sz'
+
+
 def _to_shsz_prefix(code):
-    """6位代码转为 sh/sz 前缀格式: 600000→sh600000, 000001→sz000001"""
+    """6位代码转为交易所前缀格式: 600000→sh600000, 000001→sz000001, 830799→bj830799"""
     code = code.zfill(6)
-    prefix = 'sh' if code.startswith(('6', '9')) else 'sz'
-    return f'{prefix}{code}'
+    return f'{_exchange(code)}{code}'
 
 
 def _to_numeric_cols(df, cols=('开盘', '收盘', '最高', '最低', '成交量', '成交额')):
@@ -181,6 +182,8 @@ class SinaSource(DataSource):
 
     def fetch_daily(self, symbol, start_date, end_date):
         # 新浪接口需要 sh/sz 前缀
+        # 注意：akshare stock_zh_a_daily 内部已把 OHLC round 到 2 位，ETF 走此源时
+        # 第 3 位小数已丢失；库字段虽为 3 位（DAT-11），此源无法恢复精度
         bs_code = _to_shsz_prefix(symbol)
         df = ak.stock_zh_a_daily(
             symbol=bs_code, start_date=start_date,
@@ -293,20 +296,23 @@ class BaoStockSource(DataSource):
 
     @staticmethod
     def _format_code(code):
-        """6位代码转 BaoStock 格式: sz.000001, sh.600000"""
+        """6位代码转 BaoStock 格式: sz.000001, sh.600000；北交所不支持返回 None"""
         code = code.zfill(6)
-        prefix = 'sh' if code.startswith(('6', '9')) else 'sz'
+        prefix = _exchange(code)
+        if prefix == 'bj':
+            return None
         return f'{prefix}.{code}'
 
     def fetch_daily(self, symbol, start_date, end_date):
-        import baostock as bs
         bs_code = self._format_code(symbol)
+        if bs_code is None:
+            # BaoStock 不支持北交所，跳过该源（DAT-12）
+            return None
         # start_date/end_date 格式: YYYYMMDD → YYYY-MM-DD
         sd = f'{start_date[:4]}-{start_date[4:6]}-{start_date[6:8]}'
         ed = f'{end_date[:4]}-{end_date[4:6]}-{end_date[6:8]}'
 
-        bs.login()
-        try:
+        with _bs_session() as bs:
             rs = bs.query_history_k_data_plus(
                 bs_code,
                 'date,open,high,low,close,volume,amount',
@@ -316,8 +322,6 @@ class BaoStockSource(DataSource):
             rows = []
             while rs.next():
                 rows.append(rs.get_row_data())
-        finally:
-            bs.logout()
 
         if not rows:
             return pd.DataFrame()
@@ -335,13 +339,13 @@ class BaoStockSource(DataSource):
         return df
 
     def fetch_minute(self, symbol, start_dt, end_dt):
-        import baostock as bs
         bs_code = self._format_code(symbol)
+        if bs_code is None:
+            return None
         # start_dt 格式: 'YYYY-MM-DD HH:MM:SS'，提取日期
         date_str = start_dt[:10] if ' ' in start_dt else start_dt
 
-        bs.login()
-        try:
+        with _bs_session() as bs:
             # BaoStock 支持5分钟(frequency='5')，不支持1分钟
             rs = bs.query_history_k_data_plus(
                 bs_code,
@@ -352,8 +356,6 @@ class BaoStockSource(DataSource):
             rows = []
             while rs.next():
                 rows.append(rs.get_row_data())
-        finally:
-            bs.logout()
 
         if not rows:
             return pd.DataFrame()
@@ -371,16 +373,14 @@ class BaoStockSource(DataSource):
         return df
 
     def fetch_stock_name(self, code):
-        import baostock as bs
         bs_code = self._format_code(code)
-        bs.login()
-        try:
+        if bs_code is None:
+            return None
+        with _bs_session() as bs:
             rs = bs.query_stock_basic(code=bs_code)
             while rs.next():
                 row = rs.get_row_data()
                 return row[1]  # code_name 字段
-        finally:
-            bs.logout()
         return None
 
 
@@ -390,163 +390,78 @@ DATA_SOURCES = [EastMoneySource(), SinaSource(), BaoStockSource(), TencentSource
 NAME_SOURCES = [BaoStockSource(), SinaSource(), EastMoneySource()]
 
 
+def _stock_backoff(attempt):
+    """个股链路换源前的等待：第 1、2 个源失败后 1s，之后 2s（与原顺序重试一致）"""
+    return min(2 ** attempt, 2)
+
+
+def _source_call(source, method_name):
+    """把数据源方法包成 SourceChain 候选；分钟线按请求区间过滤（DAT-01）"""
+    def call(*args, **kwargs):
+        result = getattr(source, method_name)(*args, **kwargs)
+        if method_name == 'fetch_minute' and len(args) >= 3:
+            # 按请求区间过滤；过滤后为空（源返回的全是别的日子）视为该源无数据
+            before = len(result) if isinstance(result, pd.DataFrame) else 0
+            result = _filter_minute_range(result, args[1], args[2])
+            if before and (result is None or result.empty):
+                logger.info(
+                    f"数据源 {source.name} 分钟线 {before} 根均不在 "
+                    f"{args[1]}~{args[2]} 内，尝试下一个"
+                )
+        return result
+    return call
+
+
 def _try_sources(method_name, *args, sources=None, **kwargs):
     """
-    依次尝试多个数据源，成功则返回 (source, result)，全部失败返回 None
+    依次尝试多个数据源，成功则返回 (source, result)，全部失败返回 (None, None)
+
+    走统一的 SourceChain（ARC-03）：保持原有顺序与换源退避（1s, 1s, 2s），并获得
+    源冷却——同一源同一方法连续抛异常 2 次后冷却 180s，冷却期内直接跳过。
+    空结果（该区间确实无数据）只换下一个源，不计入冷却。
 
     Args:
         method_name: 数据源方法名 'fetch_daily' / 'fetch_minute' / 'fetch_stock_name'
         sources: 可选数据源列表，默认 DATA_SOURCES
     """
-    last_error = None
-    source_list = sources if sources is not None else DATA_SOURCES
-    for attempt, source in enumerate(source_list):
-        try:
-            method = getattr(source, method_name)
-            result = method(*args, **kwargs)
-            if method_name == 'fetch_minute' and len(args) >= 3:
-                # 按请求区间过滤；过滤后为空（源返回的全是别的日子）视为该源失败
-                before = len(result) if isinstance(result, pd.DataFrame) else 0
-                result = _filter_minute_range(result, args[1], args[2])
-                if before and (result is None or result.empty):
-                    logger.info(
-                        f"数据源 {source.name} 分钟线 {before} 根均不在 "
-                        f"{args[1]}~{args[2]} 内，尝试下一个"
-                    )
-            if result is not None and (not isinstance(result, pd.DataFrame) or not result.empty):
-                logger.info(f"数据源 {source.name} 获取 {method_name} 成功")
-                return source, result
-            logger.debug(f"数据源 {source.name} 返回空数据，尝试下一个")
-        except Exception as e:
-            last_error = e
-            logger.warning(f"数据源 {source.name} 获取 {method_name} 失败: {e}")
-        # 指数退避: 1s, 1s, 2s
-        if attempt < len(source_list) - 1:
-            delay = min(2 ** attempt, 2)
-            time.sleep(delay)
+    from .market._sources import SourceChain
 
-    logger.error(f"所有数据源均失败，最后错误: {last_error}")
-    return None, None
+    source_list = sources if sources is not None else DATA_SOURCES
+    by_name = {}
+    candidates = []
+    for source in source_list:
+        chain_name = f'stock_{source.name}_{method_name}'
+        by_name[chain_name] = source
+        candidates.append((_source_call(source, method_name), chain_name))
+    chain = SourceChain(
+        backoff=_stock_backoff, empty_is_failure=False,
+        sleep=lambda sec: time.sleep(sec),  # 运行时取本模块 time.sleep（测试可打桩）
+    )
+    result, chain_name = chain.run(candidates, *args, **kwargs)
+    if chain_name is None:
+        logger.error(f"所有数据源获取 {method_name} 均失败或无数据")
+        return None, None
+    source = by_name[chain_name]
+    logger.info(f"数据源 {source.name} 获取 {method_name} 成功")
+    return source, result
 
 # ============================================================
 # 核心业务逻辑
 # ============================================================
 
 def is_trading_time(dt=None):
-    """判断当前是否在A股交易时段内"""
-    if dt is None:
-        dt = timezone.now()
-
-    local_time = dt.astimezone(timezone.get_default_timezone())
-    hour, minute = local_time.hour, local_time.minute
-
-    # 上午 9:30 - 11:30
-    if hour == 9 and minute >= 30:
-        return True
-    if hour == 10:
-        return True
-    if hour == 11 and minute <= 30:
-        return True
-
-    # 下午 13:00 - 15:00
-    if hour == 13:
-        return True
-    if hour == 14:
-        return True
-    if hour == 15 and minute == 0:
-        return True
-
-    return False
+    """判断当前是否在A股交易时段内（薄包装，实现见 trading_calendar，ARC-02）"""
+    return trading_calendar.is_trading_time(dt)
 
 
 def _reset_trade_calendar_cache():
-    """清空交易日历全部缓存（测试 / 运维用）"""
-    global _trade_calendar_set, _trade_calendar_range, _trade_calendar_expires
-    _trade_day_cache.clear()
-    _trade_calendar_set = None
-    _trade_calendar_range = None
-    _trade_calendar_expires = 0
-    for k in _calendar_fail_until:
-        _calendar_fail_until[k] = 0
-
-
-def _refresh_trade_calendar(now):
-    """按需刷新新浪整表交易日历；失败进入冷却，保留旧表"""
-    global _trade_calendar_set, _trade_calendar_range, _trade_calendar_expires
-    if _trade_calendar_set is not None and now < _trade_calendar_expires:
-        return
-    if now < _calendar_fail_until['sina']:
-        return
-    try:
-        trade_dates = ak.tool_trade_date_hist_sina()
-        days = set(pd.to_datetime(trade_dates['trade_date']).dt.date)
-        if not days:
-            raise ValueError('交易日历为空')
-        _trade_calendar_set = days
-        _trade_calendar_range = (min(days), max(days))
-        _trade_calendar_expires = now + _TRADE_CAL_TTL
-    except Exception as e:
-        _calendar_fail_until['sina'] = now + _CALENDAR_FAIL_TTL
-        logger.warning(
-            f"新浪交易日历获取失败（{_CALENDAR_FAIL_TTL}s 内不再重试）"
-            f"{'，沿用旧表' if _trade_calendar_set is not None else ''}: {e}"
-        )
-
-
-def _baostock_is_trading_day(date, now):
-    """BaoStock 单日查询；返回 True/False，失败或无结果返回 None（失败进入冷却）"""
-    if now < _calendar_fail_until['baostock']:
-        return None
-    date_str = date.strftime('%Y-%m-%d')
-    try:
-        import baostock as bs
-        bs.login()
-        try:
-            rs = bs.query_trade_dates(start_date=date_str, end_date=date_str)
-            while rs.next():
-                row = rs.get_row_data()
-                return row[1] == '1'
-        finally:
-            bs.logout()
-    except Exception as e:
-        _calendar_fail_until['baostock'] = now + _CALENDAR_FAIL_TTL
-        logger.warning(f"BaoStock交易日历获取失败（{_CALENDAR_FAIL_TTL}s 内不再重试）: {e}")
-    return None
+    """清空交易日历全部缓存（薄包装，实现见 trading_calendar，ARC-02）"""
+    trading_calendar.reset_cache()
 
 
 def is_trading_day(date=None):
-    """判断是否为交易日（排除周末和节假日），三态：True / False / None（未知）
-
-    多源备用 + 带 TTL 的缓存。日历全部不可用、或日期超出日历覆盖范围且兜底源
-    也查不到时返回 None：写库类调用方（`if not is_trading_day()`）会保守跳过，
-    只读类调用方可用 `is False` 只排除明确的非交易日。
-    """
-    if date is None:
-        # 本地交易日（timezone.now() 是 UTC，凌晨会落到前一天）
-        date = timezone.localdate()
-
-    if date.weekday() >= 5:
-        return False
-
-    now = time.time()
-
-    # 方式1: 新浪交易日历（AkShare）整表，只在表覆盖范围内下结论
-    _refresh_trade_calendar(now)
-    if _trade_calendar_set is not None and _trade_calendar_range[0] <= date <= _trade_calendar_range[1]:
-        return date in _trade_calendar_set
-
-    # 方式2: BaoStock 单日查询（结论带 TTL 缓存）
-    cached = _trade_day_cache.get(date)
-    if cached is not None and now < cached[1]:
-        return cached[0]
-    result = _baostock_is_trading_day(date, now)
-    if result is not None:
-        _trade_day_cache[date] = (result, now + _TRADE_DAY_TTL)
-        return result
-
-    # 兜底: 未知（不缓存结论；上游失败已有冷却，不会逐日重复请求）
-    logger.debug(f"交易日历无法判定 {date}，返回未知")
-    return None
+    """三态交易日判断 True / False / None（薄包装，实现见 trading_calendar，ARC-02）"""
+    return trading_calendar.is_trading_day(date)
 
 
 def fetch_stock_info(code):
@@ -574,15 +489,28 @@ def _daily_start_date(stock, bootstrap_days=365, overlap_days=5):
         .first()
     )
     if latest is None:
-        return (timezone.now().date() - timedelta(days=bootstrap_days)).strftime('%Y%m%d')
+        # 本地日期（timezone.now() 是 UTC，北京时间凌晨会落到前一天，DAT-18）
+        return (timezone.localdate() - timedelta(days=bootstrap_days)).strftime('%Y%m%d')
     return (latest - timedelta(days=overlap_days)).strftime('%Y%m%d')
 
 
 _DAILY_UPDATE_FIELDS = [
     'open_price', 'close_price', 'high_price', 'low_price',
     'open_close_diff', 'open_close_pct', 'high_low_diff', 'high_low_pct',
-    'prev_close', 'change_diff', 'change_pct', 'volume', 'turnover', 'source',
+    'prev_close', 'change_diff', 'change_pct', 'volume', 'turnover', 'source', 'is_final',
 ]
+
+# 日 K 视为最终（收盘）的时刻：15:00 收盘，留 10 分钟给数据源完成汇总（DAT-13）
+_DAILY_FINAL_TIME = dt_time(15, 10)
+
+
+def _is_final_bar(trade_date, now=None):
+    """交易日早于今天，或今天已过 15:10，才算收盘后的最终日 K"""
+    local = timezone.localtime(now or timezone.now())
+    today = local.date()
+    if trade_date < today:
+        return True
+    return trade_date == today and local.time() >= _DAILY_FINAL_TIME
 
 
 # 复权基准变化判定容差（DAT-02）：相对 0.2%，绝对 0.006 元兜住库内 2 位小数的舍入误差
@@ -683,6 +611,7 @@ def fetch_daily_data(stock, start_date=None, end_date=None, full=False, sources=
             db_prev_close = prev_q.close_price
 
     prev_close_val = db_prev_close
+    now = timezone.now()
     objs = {}
     for _, row in df.iterrows():
         try:
@@ -731,6 +660,7 @@ def fetch_daily_data(stock, start_date=None, end_date=None, full=False, sources=
                 volume=volume,
                 turnover=turnover,
                 source=source.name,
+                is_final=_is_final_bar(trade_date, now),
             )
             # 当前条目的收盘价作为下一条的昨收
             prev_close_val = close_price
@@ -761,13 +691,20 @@ def fetch_daily_data(stock, start_date=None, end_date=None, full=False, sources=
     return count
 
 
-_PRICE_Q = Decimal('0.01')
+# 价格 3 位小数（ETF/LOF 报价到 0.001 元，DAT-11）；成交额仍为 2 位
+_PRICE_Q = Decimal('0.001')
+_AMOUNT_Q = Decimal('0.01')
 _MINUTE_VALUE_FIELDS = ['open', 'close', 'high', 'low', 'volume', 'turnover']
 _MINUTE_UPDATE_FIELDS = _MINUTE_VALUE_FIELDS + ['source', 'freq']
 
 
 def _dec2(v):
-    """与 DecimalField(decimal_places=2) 入库精度一致，便于和库内值比较"""
+    """与成交额 DecimalField(decimal_places=2) 入库精度一致，便于和库内值比较"""
+    return Decimal(str(v)).quantize(_AMOUNT_Q)
+
+
+def _dec3(v):
+    """与价格 DecimalField(decimal_places=3) 入库精度一致，便于和库内值比较"""
     return Decimal(str(v)).quantize(_PRICE_Q)
 
 
@@ -796,7 +733,7 @@ def _save_minute_bars(stock, df, date_obj, source_name='', freq=1):
             vol = rec.get('成交量')
             amt = rec.get('成交额')
             rows[dt] = (
-                _dec2(rec['开盘']), _dec2(rec['收盘']), _dec2(rec['最高']), _dec2(rec['最低']),
+                _dec3(rec['开盘']), _dec3(rec['收盘']), _dec3(rec['最高']), _dec3(rec['最低']),
                 int(vol) if vol is not None and pd.notna(vol) else 0,
                 _dec2(amt) if amt is not None and pd.notna(amt) else None,
             )
@@ -997,9 +934,10 @@ def fetch_daily_summary():
     stocks = Stock.objects.filter(is_active=True)
     for stock in stocks:
         try:
-            today_str = timezone.now().strftime('%Y%m%d')
-            # 带少量重叠，防止昨日缺漏
-            start = (timezone.now().date() - timedelta(days=3)).strftime('%Y%m%d')
+            # 本地日期（DAT-18）；带少量重叠，防止昨日缺漏
+            today = timezone.localdate()
+            today_str = today.strftime('%Y%m%d')
+            start = (today - timedelta(days=3)).strftime('%Y%m%d')
             fetch_daily_data(stock, start_date=start, end_date=today_str)
             fetch_minute_data(stock)
         except Exception as e:

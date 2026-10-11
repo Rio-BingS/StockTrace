@@ -27,7 +27,7 @@ import { RouterLink } from 'vue-router'
 }
 
 .back {
-  color: #e94560;
+  color: var(--accent);
   text-decoration: none;
   font-size: 14px;
   font-weight: 600;

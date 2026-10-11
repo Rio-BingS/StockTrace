@@ -15,6 +15,7 @@ from datetime import timedelta
 
 from django.core.management.base import BaseCommand
 
+from stocks import trading_calendar
 from stocks.market import snapshots
 from stocks.models import MarketDailySnapshot
 
@@ -31,11 +32,9 @@ class Command(BaseCommand):
         parser.add_argument('--sleep', type=float, default=0.5, help='交易日间隔秒数（默认 0.5）')
 
     def handle(self, *args, **options):
-        from stocks.services import is_trading_day
-
         n_days = options['days']
         sleep_s = options['sleep']
-        end_day = snapshots._expected_latest_date()
+        end_day = trading_calendar.expected_latest_date()
         if end_day is None:
             self.stderr.write('交易日历不可用，中止')
             return
@@ -46,7 +45,7 @@ class Command(BaseCommand):
         calendar_cap = n_days * _CALENDAR_CAP_MULTIPLIER + _CALENDAR_CAP_BUFFER
         for _ in range(calendar_cap):
             try:
-                if is_trading_day(day):
+                if trading_calendar.is_trading_day(day):
                     days.append(day)
                     if len(days) == n_days:
                         break

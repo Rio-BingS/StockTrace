@@ -5,13 +5,23 @@ import { stockApi, dashboardApi, groupApi } from '../api/stocks.js'
 import StockTable from '../components/StockTable.vue'
 import StockWatchlist from '../components/StockWatchlist.vue'
 import AlertPanel from '../components/AlertPanel.vue'
+import { errorMessage } from '../utils/errorMessage.js'
+import { confirmDialog, promptDialog, toastError } from '../stores/feedback.js'
+import { formatSigned, pctClass } from '../utils/format.js'
+import { usePolling } from '../composables/usePolling.js'
+import { createBurstScheduler, createSerialRunner } from '../utils/serialRunner.js'
 
 const router = useRouter()
 const dashboardData = ref([])
-const loading = ref(false)
+// 首次加载与后台刷新分离（FEF-05）：只有首屏显示"加载中"，
+// 后台刷新保留旧表格（不重建 DOM、输入框不失焦），只在页头显示角标
+const loading = ref(true)
+const refreshing = ref(false)
+const loaded = ref(false)
+const lastLoadedAt = ref('')
+const loadError = ref('')
 const fetchLoading = ref(false)
 const fetchMessage = ref('')
-let refreshTimer = null
 let pollTimer = null
 
 // 分组：标签页筛选 + 管理（新增/重命名/删除）
@@ -28,42 +38,52 @@ async function loadGroups() {
 
 const filteredData = computed(() => {
   if (activeGroup.value === 'all') return dashboardData.value
-  if (activeGroup.value === 'none') return dashboardData.value.filter(d => d.group_id == null)
-  return dashboardData.value.filter(d => d.group_id === Number(activeGroup.value))
+  if (activeGroup.value === 'none') return dashboardData.value.filter((d) => d.group_id == null)
+  return dashboardData.value.filter((d) => d.group_id === Number(activeGroup.value))
 })
 
-const ungroupedCount = computed(() => dashboardData.value.filter(d => d.group_id == null).length)
+const ungroupedCount = computed(() => dashboardData.value.filter((d) => d.group_id == null).length)
 
 async function addGroup() {
-  const name = prompt('新分组名称：')
+  const name = await promptDialog({ title: '新建分组', placeholder: '分组名称' })
   if (!name || !name.trim()) return
   try {
     await groupApi.create(name.trim())
     await loadGroups()
   } catch (e) {
-    alert(e.response?.data?.detail || '创建分组失败')
+    toastError(errorMessage(e, '创建分组失败'))
   }
 }
 
 async function renameGroup(g) {
-  const name = prompt('修改分组名称：', g.name)
+  const name = await promptDialog({
+    title: '重命名分组',
+    defaultValue: g.name,
+    placeholder: '分组名称',
+  })
   if (!name || !name.trim() || name.trim() === g.name) return
   try {
     await groupApi.update(g.id, { name: name.trim() })
     await Promise.all([loadGroups(), loadDashboard()])
   } catch (e) {
-    alert(e.response?.data?.detail || '重命名失败')
+    toastError(errorMessage(e, '重命名失败'))
   }
 }
 
 async function removeGroup(g) {
-  if (!confirm(`删除分组「${g.name}」？组内股票将变回未分组。`)) return
+  const ok = await confirmDialog({
+    title: '删除分组',
+    message: `删除分组「${g.name}」？组内股票将变回未分组。`,
+    confirmText: '删除',
+    danger: true,
+  })
+  if (!ok) return
   try {
     await groupApi.remove(g.id)
     if (activeGroup.value === g.id) activeGroup.value = 'all'
     await Promise.all([loadGroups(), loadDashboard()])
-  } catch {
-    alert('删除分组失败')
+  } catch (e) {
+    toastError(errorMessage(e, '删除分组失败'))
   }
 }
 
@@ -82,17 +102,32 @@ const portfolio = computed(() => {
   return { cost, value, pnl: value - cost, count }
 })
 
-async function loadDashboard() {
-  loading.value = true
+function hhmm(d) {
+  return `${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}`
+}
+
+async function doLoadDashboard() {
+  if (loaded.value) refreshing.value = true
+  else loading.value = true
   try {
     const res = await dashboardApi.get()
     dashboardData.value = res.data
+    loadError.value = ''
+    lastLoadedAt.value = hhmm(new Date())
   } catch (e) {
-    console.error('加载面板数据失败', e)
+    loadError.value = errorMessage(e, '加载看板数据失败')
   } finally {
     loading.value = false
+    refreshing.value = false
+    loaded.value = true
   }
 }
+
+// 轮询、手动操作、添加后补刷都走这里：串行执行，执行中的重复调用合并为一次
+const loadDashboard = createSerialRunner(doLoadDashboard)
+// 添加自选后后端在后台拉行情：3/8/15s 各补刷一次，重复添加从头重排，卸载时取消
+const burstRefresh = createBurstScheduler(loadDashboard, [3000, 8000, 15000])
+let fetchMsgTimer = null
 
 function stopPoll() {
   if (pollTimer) {
@@ -107,7 +142,8 @@ async function pollFetchStatus() {
     const st = res.data
     if (st.running) {
       fetchLoading.value = true
-      fetchMessage.value = st.task === 'all' ? '正在拉取全部股票...' : `正在拉取 ${st.code || ''}...`
+      fetchMessage.value =
+        st.task === 'all' ? '正在拉取全部股票...' : `正在拉取 ${st.code || ''}...`
       return
     }
     // 任务已结束
@@ -117,7 +153,9 @@ async function pollFetchStatus() {
       fetchMessage.value = st.last_error || '拉取失败'
     } else if (st.last_status === 'success') {
       fetchMessage.value = '拉取完成'
-      setTimeout(() => {
+      if (fetchMsgTimer) clearTimeout(fetchMsgTimer)
+      fetchMsgTimer = setTimeout(() => {
+        fetchMsgTimer = null
         if (fetchMessage.value === '拉取完成') fetchMessage.value = ''
       }, 3000)
     } else {
@@ -145,8 +183,7 @@ async function fetchAllData() {
       pollTimer = setInterval(pollFetchStatus, 3000)
       await pollFetchStatus()
     } else {
-      console.error('拉取数据失败', e)
-      fetchMessage.value = '启动拉取失败'
+      fetchMessage.value = errorMessage(e, '启动拉取失败')
     }
   }
 }
@@ -156,8 +193,7 @@ async function removeStock(item) {
     await stockApi.remove(item.id)
     loadDashboard()
   } catch (e) {
-    console.error('删除失败', e)
-    alert('取消关注失败，请重试')
+    toastError(errorMessage(e, '取消关注失败'))
   }
 }
 
@@ -168,21 +204,21 @@ function goToDetail(item) {
 function onWatchlistRefresh() {
   loadDashboard()
   // 添加后后端会后台拉行情，短时多刷几次
-  setTimeout(loadDashboard, 3000)
-  setTimeout(loadDashboard, 8000)
-  setTimeout(loadDashboard, 15000)
+  burstRefresh.trigger()
 }
 
-// 低配 VPS：看板 60s 轮询即可（拉取任务另有独立轮询）
+// 低配 VPS：看板交易时段 60s 轮询、非交易时段 10 分钟、页面隐藏暂停（FEF-04）；
+// 拉取任务另有独立轮询
+usePolling(loadDashboard, { interval: 60000 })
+
 onMounted(() => {
-  loadDashboard()
   loadGroups()
-  refreshTimer = setInterval(loadDashboard, 60000)
 })
 
 onUnmounted(() => {
-  if (refreshTimer) clearInterval(refreshTimer)
   stopPoll()
+  burstRefresh.cancel()
+  if (fetchMsgTimer) clearTimeout(fetchMsgTimer)
 })
 </script>
 
@@ -191,15 +227,13 @@ onUnmounted(() => {
     <div class="dashboard-header">
       <h1>股票监控面板</h1>
       <div class="header-actions">
-        <span v-if="portfolio" class="portfolio" :class="portfolio.pnl >= 0 ? 'up' : 'down'">
-          持仓{{ portfolio.count }}只 · 盈亏 {{ portfolio.pnl >= 0 ? '+' : '' }}{{ portfolio.pnl.toFixed(2) }}
+        <span v-if="portfolio" class="portfolio" :class="pctClass(portfolio.pnl)">
+          持仓{{ portfolio.count }}只 · 盈亏 {{ formatSigned(portfolio.pnl) }}
         </span>
+        <span v-if="refreshing" class="refresh-badge">刷新中…</span>
+        <span v-else-if="lastLoadedAt" class="updated-at">更新于 {{ lastLoadedAt }}</span>
         <span v-if="fetchMessage" class="fetch-msg">{{ fetchMessage }}</span>
-        <button
-          class="btn btn-primary"
-          @click="fetchAllData"
-          :disabled="fetchLoading"
-        >
+        <button class="btn btn-primary" @click="fetchAllData" :disabled="fetchLoading">
           {{ fetchLoading ? '拉取中...' : '刷新数据' }}
         </button>
       </div>
@@ -210,28 +244,63 @@ onUnmounted(() => {
     <AlertPanel :stocks="dashboardData" />
 
     <div class="group-bar">
-      <button :class="{ active: activeGroup === 'all' }" @click="activeGroup = 'all'">
+      <button
+        :class="{ active: activeGroup === 'all' }"
+        :aria-pressed="activeGroup === 'all' ? 'true' : 'false'"
+        @click="activeGroup = 'all'"
+      >
         全部 {{ dashboardData.length }}
       </button>
-      <button
+      <!-- 分组切换与重命名/删除拆成独立按钮：原来操作图标是嵌在按钮里的 span，键盘无法触达（FEX-03） -->
+      <span
         v-for="g in groups"
         :key="g.id"
+        class="group-chip"
         :class="{ active: activeGroup === g.id }"
-        @click="activeGroup = g.id"
       >
-        {{ g.name }} {{ g.stock_count }}
-        <span class="g-op" title="重命名" @click.stop="renameGroup(g)">✎</span>
-        <span class="g-op danger" title="删除分组" @click.stop="removeGroup(g)">✕</span>
-      </button>
-      <button v-if="ungroupedCount" :class="{ active: activeGroup === 'none' }" @click="activeGroup = 'none'">
+        <button
+          class="g-main"
+          :aria-pressed="activeGroup === g.id ? 'true' : 'false'"
+          @click="activeGroup = g.id"
+        >
+          {{ g.name }} {{ g.stock_count }}
+        </button>
+        <button
+          class="g-op"
+          title="重命名"
+          :aria-label="`重命名分组 ${g.name}`"
+          @click="renameGroup(g)"
+        >
+          ✎
+        </button>
+        <button
+          class="g-op danger"
+          title="删除分组"
+          :aria-label="`删除分组 ${g.name}`"
+          @click="removeGroup(g)"
+        >
+          ✕
+        </button>
+      </span>
+      <button
+        v-if="ungroupedCount"
+        :class="{ active: activeGroup === 'none' }"
+        :aria-pressed="activeGroup === 'none' ? 'true' : 'false'"
+        @click="activeGroup = 'none'"
+      >
         未分组 {{ ungroupedCount }}
       </button>
       <button class="g-add" @click="addGroup">＋ 新分组</button>
     </div>
 
+    <div v-if="loadError && dashboardData.length" class="load-error">
+      {{ loadError }}（当前显示的是上次成功加载的数据）
+    </div>
+
     <StockTable
       :data="filteredData"
       :loading="loading"
+      :error="loadError"
       :groups="groups"
       @row-click="goToDetail"
       @ai-click="goToDetail"
@@ -246,6 +315,8 @@ onUnmounted(() => {
   display: flex;
   justify-content: space-between;
   align-items: center;
+  flex-wrap: wrap;
+  gap: 10px 16px;
   margin-bottom: 24px;
 }
 
@@ -256,12 +327,25 @@ onUnmounted(() => {
 
 .header-actions {
   display: flex;
-  gap: 12px;
+  gap: 8px 12px;
   align-items: center;
+  flex-wrap: wrap;
 }
 
 .fetch-msg {
   color: #aaa;
+  font-size: 13px;
+}
+
+.refresh-badge,
+.updated-at {
+  color: #8a93a6;
+  font-size: 12px;
+}
+
+.load-error {
+  margin-bottom: 10px;
+  color: var(--danger);
   font-size: 13px;
 }
 
@@ -271,11 +355,11 @@ onUnmounted(() => {
 }
 
 .portfolio.up {
-  color: #e94560;
+  color: var(--up);
 }
 
 .portfolio.down {
-  color: #00c853;
+  color: var(--down);
 }
 
 .group-bar {
@@ -306,14 +390,43 @@ onUnmounted(() => {
   border-style: dashed;
 }
 
-.g-op {
-  margin-left: 6px;
-  color: #7ea6d9;
-  cursor: pointer;
+.group-chip {
+  display: inline-flex;
+  align-items: center;
+  border: 1px solid #2a3a5e;
+  border-radius: 16px;
+  background: #16213e;
 }
 
-.g-op.danger {
-  color: #ff8a96;
+.group-chip.active {
+  background: #0f3460;
+  border-color: var(--accent);
+}
+
+.group-bar .group-chip button {
+  border: none;
+  background: transparent;
+}
+
+.group-bar .group-chip.active .g-main {
+  color: #fff;
+}
+
+.group-bar .group-chip .g-op {
+  padding: 6px 6px;
+  color: #7ea6d9;
+}
+
+.group-bar .group-chip .g-op:last-child {
+  padding-right: 12px;
+}
+
+.group-bar .group-chip .g-main {
+  padding-right: 4px;
+}
+
+.group-bar .group-chip .g-op.danger {
+  color: var(--danger);
 }
 
 .btn {
@@ -326,12 +439,12 @@ onUnmounted(() => {
 }
 
 .btn-primary {
-  background: #e94560;
+  background: var(--accent-strong);
   color: #fff;
 }
 
 .btn-primary:hover {
-  background: #c73a52;
+  background: var(--accent-strong-hover);
 }
 
 .btn-primary:disabled {

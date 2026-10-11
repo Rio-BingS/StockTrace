@@ -14,6 +14,7 @@ from pathlib import Path
 import os
 import socket
 
+from cryptography.fernet import Fernet
 from django.core.exceptions import ImproperlyConfigured
 
 # Build paths inside the project like this: BASE_DIR / 'subdir'.
@@ -38,6 +39,32 @@ if not SECRET_KEY:
         raise ImproperlyConfigured(
             'DJANGO_SECRET_KEY 未设置：生产环境必须在环境变量中提供密钥'
         )
+# 生产拒绝公开示例占位符与过短的 key（SEC-04）：照抄 env.example 也能启动等于签名可伪造。
+# 生成：python -c "import secrets; print(secrets.token_urlsafe(64))"
+_PLACEHOLDER_SECRET_KEYS = {
+    'change-me-to-a-long-random-string',
+    'django-insecure-dev-only-key',
+}
+if not DEBUG and (SECRET_KEY in _PLACEHOLDER_SECRET_KEYS or len(SECRET_KEY) < 50):
+    raise ImproperlyConfigured(
+        'DJANGO_SECRET_KEY 过短（< 50 字符）或为示例占位符：请生成长随机字符串'
+    )
+
+# API Key 加密密钥（SEC-04）：与 SECRET_KEY 解耦，便于独立轮换。
+# 逗号分隔的 Fernet key 列表，第一个用于加密，其余仅用于解密（轮换期保留旧 key）；
+# 生成：python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"
+# 未配置时回退为由 SECRET_KEY 派生的旧密钥（兼容旧数据，启动时记 WARNING）；
+# 无论是否配置，旧派生密钥始终参与解密，旧密文不会因此失效。轮换步骤见 deploy/DEPLOY.md。
+STOCKTRACE_FERNET_KEYS = [
+    k.strip() for k in os.environ.get('STOCKTRACE_FERNET_KEY', '').split(',') if k.strip()
+]
+for _k in STOCKTRACE_FERNET_KEYS:
+    try:
+        Fernet(_k)
+    except (ValueError, TypeError) as _exc:
+        raise ImproperlyConfigured(
+            'STOCKTRACE_FERNET_KEY 含无效的 Fernet key（应为 32 字节 urlsafe base64）'
+        ) from _exc
 
 _allowed = os.environ.get('DJANGO_ALLOWED_HOSTS', '')
 ALLOWED_HOSTS = [h.strip() for h in _allowed.split(',') if h.strip()]
@@ -50,6 +77,13 @@ socket.setdefaulttimeout(int(os.environ.get('STOCKTRACE_UPSTREAM_TIMEOUT', '30')
 # stocks/ai/ 可调参数（llm.py 与 throttle.py 经 settings 读取，必须在此接线环境变量）
 STOCKTRACE_LLM_TIMEOUT = int(os.environ.get('STOCKTRACE_LLM_TIMEOUT', '60'))
 STOCKTRACE_AI_DAILY_LIMIT = int(os.environ.get('STOCKTRACE_AI_DAILY_LIMIT', '100'))
+# 同一只股票两次成功分析的最小间隔（秒）；失败调用不计冷却（AIX-06）
+STOCKTRACE_AI_STOCK_COOLDOWN = int(os.environ.get('STOCKTRACE_AI_STOCK_COOLDOWN', '60'))
+# AIX-02：同时进行的 LLM 调用上限（满了立即 429，不排队）、跨重试的总时长上限（秒）、
+# 429/5xx/连接失败的重试次数
+STOCKTRACE_AI_MAX_CONCURRENCY = int(os.environ.get('STOCKTRACE_AI_MAX_CONCURRENCY', '1'))
+STOCKTRACE_LLM_TOTAL_TIMEOUT = int(os.environ.get('STOCKTRACE_LLM_TOTAL_TIMEOUT', '90'))
+STOCKTRACE_LLM_MAX_RETRIES = int(os.environ.get('STOCKTRACE_LLM_MAX_RETRIES', '1'))
 # AI 服务商 base_url 安全校验（SEC-01）：默认只允许 https 公网地址。
 # AI_ALLOW_HTTP_BASE_URL=1 放行 http（仅本地开发）；AI_BASE_URL_ALLOWED_HOSTS 逗号分隔的主机白名单，
 # 非空时只允许白名单主机，且白名单主机跳过内网地址检查（本地开发如 127.0.0.1）。
@@ -65,6 +99,15 @@ AI_CALL_LOG_RETENTION_DAYS = int(os.environ.get('AI_CALL_LOG_RETENTION_DAYS', '9
 # 探测器保留策略：信号行小（600 天对齐市场快照）；run 含热力图矩阵较大，保留更短
 DETECTOR_SIGNAL_RETENTION_DAYS = int(os.environ.get('DETECTOR_SIGNAL_RETENTION_DAYS', '600'))
 DETECTOR_RUN_RETENTION_DAYS = int(os.environ.get('DETECTOR_RUN_RETENTION_DAYS', '120'))
+# 分钟 K 线保留天数（PERF-02）：每日 02:30 分批清理更早的 MinuteBar
+MINUTE_BAR_RETENTION_DAYS = int(os.environ.get('MINUTE_BAR_RETENTION_DAYS', '120'))
+# 市场日度快照保留天数（OPS-06）：之前文档写了该变量但 settings 未接线，环境变量从不生效。
+# 快照只能向前积累、无法重新拉取，且 1y 区间约需 525 自然日，故设下限 400，配错也不会误删一年内数据
+MARKET_SNAPSHOT_RETENTION_MIN_DAYS = 400
+MARKET_SNAPSHOT_RETENTION_DAYS = max(
+    MARKET_SNAPSHOT_RETENTION_MIN_DAYS,
+    int(os.environ.get('MARKET_SNAPSHOT_RETENTION_DAYS', '600')),
+)
 
 
 # Application definition
@@ -88,7 +131,10 @@ MIDDLEWARE = [
     'django.contrib.sessions.middleware.SessionMiddleware',
     'corsheaders.middleware.CorsMiddleware',
     'django.middleware.common.CommonMiddleware',
-    # CsrfViewMiddleware 已移除：纯 API 项目，访问控制在 Nginx Basic Auth 层完成
+    # 恢复 CsrfViewMiddleware 保护 admin（SEC-03）；DRF 视图自带 csrf_exempt 不受影响
+    'django.middleware.csrf.CsrfViewMiddleware',
+    # /api/ 写请求的来源校验（SEC-03），规则见 StockTrace/middleware.py
+    'StockTrace.middleware.ApiOriginCheckMiddleware',
     'django.contrib.auth.middleware.AuthenticationMiddleware',
     'django.contrib.messages.middleware.MessageMiddleware',
     'django.middleware.clickjacking.XFrameOptionsMiddleware',
@@ -113,6 +159,9 @@ TEMPLATES = [
 
 WSGI_APPLICATION = 'StockTrace.wsgi.application'
 
+# 测试 runner：断网闸 + 每个用例前清空进程内缓存（OPS-03）
+TEST_RUNNER = 'StockTrace.isolated_runner.IsolatedTestRunner'
+
 
 # Database
 # https://docs.djangoproject.com/en/6.0/ref/settings/#databases
@@ -124,7 +173,8 @@ DATABASES = {
         # 调度线程写库与 REST 读线程并发：WAL 读写不互斥，timeout 放宽锁等待，
         # 避免 "database is locked" 500
         'OPTIONS': {
-            'timeout': 20,
+            # 锁等待秒数（PERF-03）：可用 STOCKTRACE_DB_TIMEOUT 调整，默认 20
+            'timeout': int(os.environ.get('STOCKTRACE_DB_TIMEOUT', '20')),
             'init_command': 'PRAGMA journal_mode=WAL;',
         },
     }
@@ -134,6 +184,10 @@ DATABASES = {
 # transaction.atomic。该选项需 Django >= 5.1，低版本传给 sqlite3.connect 会报错，故按版本开启
 if __import__('django').VERSION >= (5, 1):
     DATABASES['default']['OPTIONS']['transaction_mode'] = 'IMMEDIATE'
+
+# 主键类型显式钉住（ARC-08）：现有迁移全部是 BigAutoField，与 Django 6.0 的默认值
+# 一致；显式写出后即便降到 4.2/5.x（默认 AutoField）也不会凭空生成改主键的迁移
+DEFAULT_AUTO_FIELD = 'django.db.models.BigAutoField'
 
 
 # Password validation
@@ -172,18 +226,49 @@ USE_TZ = True
 
 STATIC_URL = 'static/'
 
-# 静态文件收集目录（生产环境用）
-STATIC_ROOT = '/opt/stocktrace/staticfiles'
+# 静态文件收集目录（生产环境用）：缺省为仓库根下的 staticfiles/（生产即 /opt/stocktrace/staticfiles，
+# 与 nginx alias 一致）；部署到其他路径时用 STOCKTRACE_STATIC_ROOT 覆盖（OPS-07）
+STATIC_ROOT = Path(os.environ.get('STOCKTRACE_STATIC_ROOT') or BASE_DIR.parent / 'staticfiles')
+
+# 受信来源（SEC-05）：同时用于 CORS 白名单与 CSRF_TRUSTED_ORIGINS（含 scheme，逗号分隔）。
+# 站点只经 HTTPS 对外，删除了原 http 源，避免明文页面被当作受信来源。
+STOCKTRACE_TRUSTED_ORIGINS = [
+    o.strip().rstrip('/') for o in os.environ.get(
+        'STOCKTRACE_TRUSTED_ORIGINS', 'https://stocktrace.yumeat.cc.cd'
+    ).split(',') if o.strip()
+]
 
 # CORS - 限制只允许指定域名
 CORS_ALLOW_ALL_ORIGINS = False
-CORS_ALLOWED_ORIGINS = [
-    'https://stocktrace.yumeat.cc.cd',
-    'http://stocktrace.yumeat.cc.cd',
-]
+CORS_ALLOWED_ORIGINS = list(STOCKTRACE_TRUSTED_ORIGINS)
+CSRF_TRUSTED_ORIGINS = list(STOCKTRACE_TRUSTED_ORIGINS)
+
+# HTTPS 反代（SEC-05）：TLS 在 Cloudflare/Nginx 终止，Gunicorn 收到的是 http。
+# 不信任 X-Forwarded-Proto 时 request.is_secure() 恒为 False，admin 登录的
+# CSRF Origin 校验（https 源 vs http 请求）必然 403。Nginx 必须覆盖写入该头
+# （proxy_set_header X-Forwarded-Proto $scheme），否则客户端可伪造。
+SECURE_PROXY_SSL_HEADER = ('HTTP_X_FORWARDED_PROTO', 'https')
+# /api/ 写请求：浏览器发出（带 Origin/Sec-Fetch-*/Referer）却缺少 X-Requested-With 时拒绝（SEC-03）。
+# 跨站/不受信 Origin 无论此开关一律拒绝；仅在排查兼容问题时临时设 0
+STOCKTRACE_CSRF_REQUIRE_HEADER = (
+    os.environ.get('STOCKTRACE_CSRF_REQUIRE_HEADER', '1').lower() not in ('0', 'false', 'no')
+)
+# 生产默认 Cookie 只走 HTTPS；本地 http 调试 admin 时可设 STOCKTRACE_SECURE_COOKIES=0
+_secure_cookies = os.environ.get('STOCKTRACE_SECURE_COOKIES', '')
+SECURE_COOKIES = (
+    _secure_cookies.lower() in ('1', 'true', 'yes') if _secure_cookies else not DEBUG
+)
+SESSION_COOKIE_SECURE = SECURE_COOKIES
+CSRF_COOKIE_SECURE = SECURE_COOKIES
+# HSTS 默认关闭（0）：一旦下发，浏览器在有效期内拒绝 http，误配难以撤回；
+# 确认全站 HTTPS 稳定后再按需开启（如 31536000），子域名同理单独开关
+SECURE_HSTS_SECONDS = int(os.environ.get('STOCKTRACE_HSTS_SECONDS', '0'))
+SECURE_HSTS_INCLUDE_SUBDOMAINS = (
+    os.environ.get('STOCKTRACE_HSTS_INCLUDE_SUBDOMAINS', '').lower() in ('1', 'true', 'yes')
+)
 
 # DRF
-# ⚠️ 安全边界：本应用自身没有任何认证/授权（AllowAny、无 CSRF），
+# ⚠️ 安全边界：本应用自身没有任何认证/授权（AllowAny；CSRF 仅靠 /api/ 来源校验中间件），
 # 所有访问控制都依赖反向代理层的 Nginx HTTP Basic Auth。
 # 因此：
 #   1. Gunicorn 只绑定 127.0.0.1，绝不能直接对公网暴露 8000 端口；
@@ -201,8 +286,8 @@ REST_FRAMEWORK = {
     'PAGE_SIZE': 100,
 }
 
-# APScheduler
-SCHEDULER_AUTOSTART = True
+# APScheduler：是否在 Web 进程内启动由 STOCKTRACE_SCHEDULER / STOCKTRACE_RUN_SCHEDULER_IN_WEB
+# 环境变量控制（见 stocks/scheduler.py），原 SCHEDULER_AUTOSTART 从未被读取，已删除（REL-10）
 # 调度运行时目录（锁文件/心跳文件）。生产设为 /run/stocktrace（stocktrace-scheduler.service
 # 的 RuntimeDirectory=），本地开发缺省放在 backend/ 下。
 STOCKTRACE_RUN_DIR = Path(os.environ.get('STOCKTRACE_RUN_DIR') or BASE_DIR)
@@ -215,6 +300,12 @@ STOCKTRACE_SCHEDULER_HEARTBEAT = Path(
 )
 # 心跳超过该秒数未更新即判定调度器失联
 STOCKTRACE_HEARTBEAT_STALE_SECONDS = int(os.environ.get('STOCKTRACE_HEARTBEAT_STALE_SECONDS', '180'))
+# 同步拉上游的市场接口总时限（秒，REL-05）：须小于 nginx proxy_read_timeout 120s
+STOCKTRACE_REQUEST_DEADLINE = float(os.environ.get('STOCKTRACE_REQUEST_DEADLINE', '100'))
+
+# 市场缓存是否用交易日历判断新鲜度 / data_as_of（ARC-02）：生产恒为 True；
+# 测试 runner（IsolatedTestRunner）关掉它以免触网、保持确定性，取代原先嗅探 sys.argv
+STOCKTRACE_MARKET_CALENDAR_ENABLED = True
 
 
 # Logging（REL-02）

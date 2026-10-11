@@ -1,7 +1,9 @@
 """手动触发探测器扫描。
 
 为什么提供命令：17:15 的定时任务之外，部署验证、排查与演示都需要能
-手动跑一次；扫描本身幂等（信号/run 行按日期覆盖），重复执行安全。
+手动跑一次；同日重跑幂等，重复执行安全：信号行按对象+日期覆盖，本轮
+确定无信号的对象删除当日未回看的旧信号（数据降级的对象保留旧行），
+run 行的调参流水与回看计数按当日累加而不是被覆盖；落库在单个事务内。
 非交易日/收盘前调用会返回 skipped 原因（守卫与定时任务同一套，不提供
 绕过开关——非交易日落库会产生脏日期数据，2026-09-07 踩过的坑）。
 
@@ -15,10 +17,16 @@ from django.core.management.base import BaseCommand
 
 
 class Command(BaseCommand):
-    help = '手动触发探测器日度扫描（幂等，重跑覆盖当日结果；非交易日/收盘前如实跳过）'
+    help = '手动触发探测器日度扫描（同日重跑幂等；非交易日/收盘前如实跳过）'
 
     def handle(self, *args, **options):
         from stocks.detector.scan import run_scan
+        from stocks.task_lock import task_lock
 
-        summary = run_scan()
+        # 与 17:15 定时扫描共用 detector_scan 任务锁（REL-04）
+        with task_lock('detector_scan', timeout=600) as ok:
+            if not ok:
+                self.stderr.write('探测器扫描任务锁被占用（已等待 600s），请稍后再试')
+                return
+            summary = run_scan()
         self.stdout.write(json.dumps(summary, ensure_ascii=False, indent=2, default=str))

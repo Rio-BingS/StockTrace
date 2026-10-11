@@ -17,9 +17,9 @@ from rest_framework.decorators import api_view
 from rest_framework.response import Response
 
 from ..market._query import _paginate
-from ..market.snapshots import _expected_latest_date
+from ..trading_calendar import expected_latest_date
 from ..models import DetectorDimConfig, DetectorRun, DetectorSignal
-from . import registry
+from . import calm, registry, review, signals
 from .dimensions import (
     build_index_context,
     build_sector_context,
@@ -33,6 +33,15 @@ _META_DISCLAIMER = (
 )
 
 
+# DetectorRun 里的大 JSON 字段：列表/元信息只用标量，读这些字段纯属浪费（PERF-09）
+_HEAVY_RUN_FIELDS = ('matrix', 'degraded', 'adjustments')
+
+
+def _runs_brief():
+    """只取标量字段的 DetectorRun 查询（meta/摘要用），按交易日倒序。"""
+    return DetectorRun.objects.defer(*_HEAVY_RUN_FIELDS).order_by('-trade_date')
+
+
 def _meta(latest_run, message=''):
     """探测器响应的统一 meta；fresh = 最近一次 run 覆盖了最近已完成交易日。"""
     cache_status = 'unavailable'
@@ -43,7 +52,7 @@ def _meta(latest_run, message=''):
         data_date = latest_run.trade_date.isoformat()
         fetched_at = latest_run.updated_at.isoformat(timespec='seconds')
         try:
-            expected = _expected_latest_date()
+            expected = expected_latest_date()
             if expected and latest_run.trade_date >= expected:
                 cache_status = 'fresh'
         except Exception:
@@ -97,7 +106,7 @@ def detector_signals(request):
     target_kind(index/stock/industry/concept)、status、date=YYYY-MM-DD、
     all_dates=1（近 30 天历史，默认只看最新扫描日）。
     """
-    latest_run = DetectorRun.objects.order_by('-trade_date').first()
+    latest_run = _runs_brief().first()
 
     all_dates = request.query_params.get('all_dates') in ('1', 'true')
     date_raw = request.query_params.get('date')
@@ -229,6 +238,8 @@ def detector_signal_detail(request, pk):
 
     曲线在详情请求时按当前序列重算——信号行的 dimensions 是信号当日快照
     （不可变事实），曲线是活数据（可以看到信号之后各维度怎么走）。
+    重算用信号当日的参数快照（ALG-15）；旧信号行没有快照时退回当前参数，
+    params_source 标明用的是哪一份。
     重算失败（上游断/快照过期）时如实返回已落库部分并标注。
     """
     sig = DetectorSignal.objects.filter(pk=pk).first()
@@ -237,6 +248,7 @@ def detector_signal_detail(request, pk):
 
     ctx, err = _context_for_signal(sig)
     dimension_series = {}
+    params_source = {}
     if ctx is not None:
         cfg_rows = {c.key: c for c in DetectorDimConfig.objects.all()}
         for key, stored in (sig.dimensions or {}).items():
@@ -244,8 +256,14 @@ def detector_signal_detail(request, pk):
             if spec is None or spec['evaluate'] is None:
                 dimension_series[key] = []
                 continue
-            cfg = cfg_rows.get(key)
-            params = {**spec['defaults'], **((cfg.params or {}) if cfg else {})}
+            snapshot = (stored or {}).get('params')
+            if snapshot:
+                params = {**spec['defaults'], **snapshot}
+                params_source[key] = 'signal'
+            else:
+                cfg = cfg_rows.get(key)
+                params = {**spec['defaults'], **((cfg.params or {}) if cfg else {})}
+                params_source[key] = 'current'
             try:
                 res = spec['evaluate'](ctx, params)
                 dimension_series[key] = res['series']
@@ -253,10 +271,11 @@ def detector_signal_detail(request, pk):
                 dimension_series[key] = []
 
     return Response({
-        'meta': _meta(DetectorRun.objects.order_by('-trade_date').first(),
+        'meta': _meta(_runs_brief().first(),
                       message=(err or '') if ctx is None else ''),
         'signal': _signal_row(sig),
         'dimension_series': dimension_series,
+        'params_source': params_source,
         'disabled_dims': [
             {'key': d['key'], 'name': d['name'], 'disabled_reason': d['disabled_reason']}
             for d in registry.DIMENSIONS if not d['enabled']
@@ -278,7 +297,8 @@ def detector_heatmap(request):
 
     run = None
     rows = []
-    for candidate in DetectorRun.objects.order_by('-trade_date')[:5]:
+    # 只要矩阵与 meta 用到的标量；degraded/adjustments 不读
+    for candidate in DetectorRun.objects.defer('degraded', 'adjustments').order_by('-trade_date')[:5]:
         rows = (candidate.matrix or {}).get(board) or []
         if rows:
             run = candidate
@@ -330,16 +350,32 @@ def detector_config(request):
             'params': {**spec['defaults'], **((cfg.params or {}) if cfg else {})},
             'defaults': spec['defaults'],
         })
-    runs = [_run_brief(r) for r in DetectorRun.objects.order_by('-trade_date')[:10]]
+    run_rows = list(_runs_brief()[:10])
+    runs = [_run_brief(r) for r in run_rows]
     return Response({
-        'meta': _meta(DetectorRun.objects.order_by('-trade_date').first()),
+        'meta': _meta(run_rows[0] if run_rows else None),
         'dims': dims,
         'runs': runs,
+        # 规则直接引用实现里的常量（ALG-15）：旧实现在这里手写了一份副本，
+        # 改 review.py 后配置页展示的规则会与实际不一致
         'review_rules': {
-            'lookback_days': 5,
-            'hit_pct': 1.5,
-            'weight_bounds': [0.5, 2.0],
-            'min_scale_bounds': [0.5, 2.0],
-            'min_samples': 3,
+            'lookback_days': review.REVIEW_LOOKBACK,
+            'hit_sigma_k': review.HIT_SIGMA_K,
+            'sigma_window': review.SIGMA_WINDOW,
+            'hit_pct': review.HIT_PCT,
+            'weight_bounds': list(review.WEIGHT_BOUNDS),
+            'min_scale_bounds': list(review.MIN_SCALE_BOUNDS),
+            'min_samples': review.MIN_ADJ_SAMPLES,
+            'excess_bounds': [review.EXCESS_LOW, review.EXCESS_HIGH],
+            'weight_band': review.WEIGHT_BAND,
+        },
+        # 平静闸门与分级参数只读展示（不参与自动调参，理由见 calm.py 文件尾）
+        'calm_rules': {
+            'price': dict(calm.PRICE_CALM_PARAMS),
+            'sector': dict(calm.SECTOR_CALM_PARAMS),
+        },
+        'vote_rules': {
+            'min_dims': signals.VOTE_MIN_DIMS,
+            'severity': dict(signals.SEVERITY_RULES),
         },
     })

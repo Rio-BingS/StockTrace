@@ -1,6 +1,8 @@
 [Unit]
 Description=StockTrace Gunicorn
-After=network.target
+# 等网络真正可用（DNS/路由就绪），避免开机首个请求或 SECRET 校验时外网不可达（SEC-10）
+After=network-online.target
+Wants=network-online.target
 
 [Service]
 Type=notify
@@ -11,14 +13,51 @@ EnvironmentFile=/etc/stocktrace/env
 # 调度器由独立的 stocktrace-scheduler.service 运行（REL-01）；Web 只读心跳文件给 /api/health/。
 # 注意 EnvironmentFile 里的同名变量优先于这里：/etc/stocktrace/env 不要设 STOCKTRACE_RUN_SCHEDULER_IN_WEB=1
 Environment=STOCKTRACE_RUN_SCHEDULER_IN_WEB=0
+# 两个单元共用 /run/stocktrace（OPS-05）：之前只有调度单元声明 RuntimeDirectory，
+# 只启动 Web、或调度单元未装时目录不存在，Web 侧需要的跨进程锁/心跳路径无处落地。
+# 两边都 Preserve=yes，任一单元停止都不会删掉另一方正在用的目录；Mode 必须与调度单元一致。
+RuntimeDirectory=stocktrace
+RuntimeDirectoryMode=0755
+RuntimeDirectoryPreserve=yes
 Environment=STOCKTRACE_RUN_DIR=/run/stocktrace
 ExecStart=/opt/stocktrace/backend/venv/bin/gunicorn \
     --config /opt/stocktrace/backend/gunicorn_config.py \
     StockTrace.wsgi:application
 Restart=always
 RestartSec=5
-# Soft limit: leave headroom for nginx + system on 2G RAM
+# 内存：MemoryHigh 是软上限（超过后内核积极回收、进程变慢但不被杀），
+# MemoryMax 是硬上限（超过即 OOM kill，systemd 按 Restart=always 拉起）。1H2G 给 nginx/系统留余量
+MemoryHigh=1000M
 MemoryMax=1200M
+
+# ---- 沙箱（SEC-10）----
+# 整个文件系统只读，只放行 SQLite 所在的 backend/（库、WAL、__pycache__）；
+# 锁/心跳在 RuntimeDirectory、可选日志在 LogsDirectory、库的缓存在 CacheDirectory，均由 systemd 建好并归属 www。
+# 未启用 MemoryDenyWriteExecute：akshare 依赖的 mini_racer(V8) 需要 JIT。
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+ProtectHostname=yes
+RestrictSUIDSGID=yes
+RestrictRealtime=yes
+RestrictNamespaces=yes
+LockPersonality=yes
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+UMask=0027
+ReadWritePaths=/opt/stocktrace/backend
+LogsDirectory=stocktrace
+LogsDirectoryMode=0750
+CacheDirectory=stocktrace
+# ProtectHome 后 ~ 不可访问：把 HOME/缓存指到可写的 CacheDirectory，第三方库写 ~/.xxx 也不会失败
+Environment=XDG_CACHE_HOME=/var/cache/stocktrace
+Environment=HOME=/var/cache/stocktrace
 
 [Install]
 WantedBy=multi-user.target

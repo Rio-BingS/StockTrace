@@ -77,7 +77,8 @@ def fetch_major_indices(ttl=60):
 def fetch_index_trend(days=120, ttl=300, start=None, end=None):
     """多指数收盘价序列 + 归一化涨跌幅（相对窗口首日）。
 
-    days=取最近 N 个交易日；传 start/end（YYYY-MM-DD）则按日期切片。
+    days=取最近 N 个交易日；传 start/end（YYYY-MM-DD）则按日期切片；
+    只传 end 时取截至 end 的最近 N 个交易日。
     """
     cache_key = f'trend_{days}_{start or ""}_{end or ""}'
     cached = _cache_get(cache_key, ttl)
@@ -94,11 +95,12 @@ def fetch_index_trend(days=120, ttl=300, start=None, end=None):
         df = df.copy()
         df['date'] = pd.to_datetime(df['date']).dt.strftime('%Y-%m-%d')
         df = df.sort_values('date')
+        # start/end 各自独立生效（DAT-20）：只传 end 时取 end 及之前最近 days 根
         if start:
             df = df[df['date'] >= start]
-            if end:
-                df = df[df['date'] <= end]
-        else:
+        if end:
+            df = df[df['date'] <= end]
+        if not start:
             df = df.tail(days)
         if df.empty:
             continue
