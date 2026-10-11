@@ -8,7 +8,7 @@ from .detector import calm, constants, dimensions, registry, review, signals
 class DetectorConstantsTests(SimpleTestCase):
     """阈值集中到 detector/constants 后数值一律不变，旧模块上的同名引用仍可用。"""
 
-    def test_values_unchanged(self):
+    def test_values_unchanged(self) -> None:
         # 逐项写死迁移前的数值：常量被误改时这里先失败
         self.assertEqual(constants.PRICE_CALM_PARAMS, {
             'rvol_window': 10, 'cv_window': 5, 'rvol_min': 0.7, 'rvol_max': 1.5,
@@ -37,7 +37,7 @@ class DetectorConstantsTests(SimpleTestCase):
         self.assertEqual(constants.NOISE_DEFAULTS, {'noise_pct': 0.8, 'noise_window': 60, 'noise_min': 15})
         self.assertEqual((constants.COMPRESS_PCT_DEFAULT, constants.SPLIT_RATIO_DEFAULT), (0.25, 1.2))
 
-    def test_old_module_names_point_to_constants(self):
+    def test_old_module_names_point_to_constants(self) -> None:
         self.assertIs(calm.PRICE_CALM_PARAMS, constants.PRICE_CALM_PARAMS)
         self.assertIs(calm.SECTOR_CALM_PARAMS, constants.SECTOR_CALM_PARAMS)
         self.assertIs(signals.SEVERITY_RULES, constants.SEVERITY_RULES)
@@ -48,7 +48,7 @@ class DetectorConstantsTests(SimpleTestCase):
         for name in ('MIN_PRICE_BARS', 'MIN_SECTOR_POINTS', 'MARGIN_VOTE_CODES', 'SECTOR_LOOKBACK_DAYS'):
             self.assertEqual(getattr(dimensions, name), getattr(constants, name), name)
 
-    def test_registry_defaults_unchanged(self):
+    def test_registry_defaults_unchanged(self) -> None:
         spec = registry.DIMENSION_MAP
         self.assertEqual(spec['vol_compress']['defaults']['compress_pct'], 0.25)
         self.assertEqual(spec['turnover_pct']['defaults']['split_ratio'], 1.2)
@@ -63,7 +63,7 @@ class DetectorConstantsTests(SimpleTestCase):
 class AiSerializersMoveTests(SimpleTestCase):
     """ARC-07：ai_serializers 迁到 stocks.ai.serializers，旧路径是同一个模块对象。"""
 
-    def test_old_path_is_alias(self):
+    def test_old_path_is_alias(self) -> None:
         import stocks.ai_serializers as old
         from stocks.ai import serializers as new
 

@@ -3,6 +3,8 @@
 （ARC-07：原 stocks/ai_serializers.py，只服务 ai 包，迁入 stocks.ai；
 stocks.ai_serializers 保留为兼容别名。）
 """
+from typing import Any
+
 from rest_framework import serializers
 
 from ..models import AiProvider
@@ -23,21 +25,21 @@ class AiProviderSerializer(serializers.ModelSerializer):
         ]
         read_only_fields = ['id', 'created_at', 'updated_at']
 
-    def get_api_key_masked(self, obj):
+    def get_api_key_masked(self, obj: AiProvider) -> str:
         try:
             return mask_api_key(decrypt_api_key(obj.api_key_encrypted))
         except ValueError:
             # SECRET_KEY 轮换后旧密文解不开：如实标注而不是假装正常
             return '(无法解密，请重新录入)'
 
-    def validate_base_url(self, value):
+    def validate_base_url(self, value: str) -> str:
         # 只允许 https 公网地址（含 DNS 解析后检查），防 Key 外泄与 SSRF（SEC-01）
         try:
             return validate_base_url(value)
         except ValueError as exc:
             raise serializers.ValidationError(str(exc)) from exc
 
-    def validate(self, attrs):
+    def validate(self, attrs: dict[str, Any]) -> dict[str, Any]:
         api_key = attrs.pop('api_key', None)
         # 改接口地址必须同时重新录入 Key：否则只改 base_url 就能把已存 Key 发往任意地址
         if (
@@ -76,7 +78,7 @@ class ScreenerCommentInputSerializer(serializers.Serializer):
     )
 
 
-def first_error_text(errors):
+def first_error_text(errors: object) -> str:
     """把 DRF 嵌套错误压平成一句可直接展示的文字（前端只展示字符串 detail）。"""
     if isinstance(errors, dict):
         for field, value in errors.items():
