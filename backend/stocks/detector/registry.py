@@ -77,11 +77,12 @@ DIMENSIONS = [
         'targets': ('index', 'stock'),
         'enabled': True,
         'note': (
-            '以成交量自身60日分位实现：个股窗口内股本不变，与换手率分位单调等价；'
+            '以成交量自身60日分位实现：个股窗口内股本不变，与换手率分位单调等价'
+            '（窗口内检测到送转/配股的量价基准断层时暂停，定增解禁等暂无法识别）；'
             '指数无股本概念，为活跃度代理。分位从低位缓升（不热）/高位缓降（不死）才投票。'
         ),
         'defaults': {'window': 60, 'delta_days': 5, 'mild': 30.0, 'min': 8.0, 'max': 60.0,
-                     'pos_cap': 70.0, 'pos_floor': 30.0, **_NOISE},
+                     'pos_cap': 70.0, 'pos_floor': 30.0, 'split_ratio': 1.2, **_NOISE},
         'evaluate': _dims.eval_turnover_pct,
     },
     {

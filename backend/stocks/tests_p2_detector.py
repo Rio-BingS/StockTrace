@@ -329,3 +329,51 @@ class IndexDimensionCoverageTests(TestCase):
             self.assertEqual(ctx['margin'], [])
             ctx, _ = dimensions.build_index_context('sh000300', '沪深300')
             self.assertEqual(len(ctx['margin']), 1)
+
+
+class TurnoverShareChangeTests(TestCase):
+    """ALG-13：窗口内送转导致量价基准断层时，换手率分位维度暂停。"""
+
+    def _ctx(self, split_at=None, n=70):
+        import random
+
+        rng = random.Random(3)
+        closes, vols, amounts = [], [], []
+        for i in range(n):
+            raw_price = 10.0 * (1 + rng.gauss(0, 0.01))
+            raw_vol = 1e6 * (1 + rng.gauss(0, 0.1))
+            if split_at is not None and i < split_at:
+                # 10 转 10 之前：前复权价减半，成交量仍是旧股本口径，成交额不受影响
+                closes.append(raw_price / 2)
+                vols.append(raw_vol)
+                amounts.append(raw_price * raw_vol)
+            else:
+                post_price = raw_price / 2 if split_at is not None else raw_price
+                post_vol = raw_vol * 2 if split_at is not None else raw_vol
+                closes.append(post_price)
+                vols.append(post_vol)
+                amounts.append(post_price * post_vol)
+        ctx = _price_ctx(vols, closes)
+        ctx['amount'] = amounts
+        return ctx
+
+    def test_split_inside_window_makes_dimension_unavailable(self):
+        from .detector.dimensions import eval_turnover_pct
+        from .detector.registry import DIMENSION_MAP
+
+        res = eval_turnover_pct(self._ctx(split_at=60), dict(DIMENSION_MAP['turnover_pct']['defaults']))
+        self.assertFalse(res['available'])
+        self.assertIn('送转', res['note'])
+
+    def test_no_split_keeps_dimension_available(self):
+        from .detector.dimensions import eval_turnover_pct
+        from .detector.registry import DIMENSION_MAP
+
+        res = eval_turnover_pct(self._ctx(), dict(DIMENSION_MAP['turnover_pct']['defaults']))
+        self.assertTrue(res['available'], res)
+
+    def test_split_outside_window_is_ignored(self):
+        from .detector.dimensions import _share_basis_break
+
+        self.assertIsNone(_share_basis_break(self._ctx(split_at=5), 60, 1.2))
+        self.assertIsNotNone(_share_basis_break(self._ctx(split_at=40), 60, 1.2))

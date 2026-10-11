@@ -221,7 +221,7 @@ def build_stock_context(stock):
         .order_by('-trade_date')
         .values_list(
             'trade_date', 'open_price', 'high_price', 'low_price',
-            'close_price', 'volume',
+            'close_price', 'volume', 'turnover',
         )[:70]
     )[::-1]
     if len(rows) < MIN_PRICE_BARS:
@@ -234,10 +234,14 @@ def build_stock_context(stock):
             'low': float(r[3]) if r[3] is not None else None,
             'close': float(r[4]) if r[4] is not None else None,
             'volume': float(r[5]) if r[5] is not None else None,
+            'amount': float(r[6]) if r[6] is not None else None,
         }
         for r in rows
     ]
-    return _price_ctx('stock', stock.code, stock.name, items), ''
+    ctx = _price_ctx('stock', stock.code, stock.name, items)
+    # 成交额（元）只用于识别量价基准断层（ALG-13），不参与其他维度
+    ctx['amount'] = [it['amount'] for it in items]
+    return ctx, ''
 
 
 def _price_ctx(kind, code, name, items):
@@ -506,12 +510,45 @@ def eval_vol_compress(ctx, params):
     return _result(value, direction, note, series)
 
 
+def _share_basis_break(ctx, lookback, ratio, k=3):
+    """量价基准断层（送转/配股等股本变动）检测：返回断层所在日期或 None（ALG-13）。
+
+    原理：日线是前复权价，成交量不复权。r = 成交额 / (成交量 × 收盘价) 在正常
+    交易日约等于「均价/收盘价」，常年在 1 附近小幅波动；送转（如 10 转 10）
+    之前的前复权价被整体压低、成交量仍是旧股本口径，r 会在除权日前后出现
+    台阶（10 转 10 约 2 倍）。比较每个点前后各 k 日 r 的中位数，台阶超过 ratio
+    倍即判为断层。只覆盖送转/配股这类改变复权因子的事件；定增解禁等不改价格
+    的流通股本变动需要真实流通股本数据，本站暂无（见 P2 说明）。
+    成交额缺失太多时无法判断，返回 None（不因缺数据而停用维度）。
+    """
+    amounts, volumes, closes = ctx.get('amount'), ctx.get('volume'), ctx.get('close')
+    if not (amounts and volumes and closes):
+        return None
+    n = len(closes)
+    start = max(0, n - lookback)
+    r = []
+    for i in range(start, n):
+        a, v, c = amounts[i], volumes[i], closes[i]
+        r.append(a / (v * c) if a and v and c else None)
+
+    def med(vals):
+        vals = sorted(x for x in vals if x is not None)
+        return vals[len(vals) // 2] if len(vals) >= 2 else None
+
+    for j in range(k, len(r) - k + 1):
+        before, after = med(r[j - k:j]), med(r[j:j + k])
+        if before and after and max(before, after) / min(before, after) >= ratio:
+            return ctx['dates'][start + j]
+    return None
+
+
 def eval_turnover_pct(ctx, params):
     """换手率分位（指数/个股）：成交量自身 60 日分位的 5 日变化。
 
     口径说明（已在文档中披露）：个股窗口内流通股本基本不变，换手率 =
     量/股本 与成交量单调等价，分位排序完全一致，故用成交量分位实现，
-    零新增上游请求；指数无股本概念，为市场活跃度代理。
+    零新增上游请求；指数无股本概念，为市场活跃度代理。窗口内检测到
+    送转/配股导致的量价基准断层时如实不可用（ALG-13）。
     方向语义：分位从低位缓慢抬升（仍不热）= 关注度悄然回升；从高位回落
     （仍不死）= 温和降温。分位本身过高/过低时不动（已是活跃/冰点状态）。
     """
@@ -523,6 +560,13 @@ def eval_turnover_pct(ctx, params):
     valid = [v for v in volumes if v is not None]
     if len(valid) < MIN_PRICE_BARS:
         return _unavailable('有效成交量样本不足')
+    # 「与换手率单调等价」的前提是窗口内股本不变（ALG-13）：窗口内出现送转/配股
+    # 时成交量整体抬升一个台阶，分位会把股本扩大误读成关注度回升，维度暂停
+    # 直到断层滚出 window 日窗口
+    if ctx.get('kind') == 'stock':
+        broke = _share_basis_break(ctx, window, params.get('split_ratio', 1.2))
+        if broke:
+            return _unavailable(f'{broke} 前后疑似送转/股本变动（量价基准断层），换手率分位暂停至滚出窗口')
 
     def pct_at(i):
         end = i + 1
