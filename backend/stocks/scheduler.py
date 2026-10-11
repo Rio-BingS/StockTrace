@@ -6,7 +6,7 @@ APScheduler 集成到 Django
 2. 盘中每5分钟更新分钟数据（随后评估价格提醒）
 3. 收盘后 15:10 汇总当日日线+分钟（自选库最后一次自动写入；随后评估价格提醒、清理 AI 调用记录与后台任务）
 4. 收盘后 15:30–21:00 每30分钟预热晚到行情缓存并落日度快照（交易日）
-5. 每交易日 17:15 探测器扫描（板块/大盘快照已在前两轮预热落库后）
+5. 每交易日 17:15 探测器扫描（行业/概念板块快照已在前两轮预热落库后）
 6. 每日 02:30 清理超出保留期的分钟 K 线
 
 运行方式（REL-01）：
@@ -306,8 +306,10 @@ def _post_close_lagging_job():
 
 
 # 探测器依赖的当日快照（REL-08）：17:15 首次尝试，缺快照则每 30 分钟重试，
-# 最后一次（18:45）不再等待，降级照跑（维度自行标记降级）
-_DETECTOR_REQUIRED_SNAPSHOTS = ('industry_ff', 'market_ff')
+# 最后一次（18:45）不再等待，降级照跑（维度自行标记降级）。
+# 只等探测器真正读取的行业/概念板块快照（#14）：大盘资金 market_ff 自指数移出
+# 资金维度（ALG-09）后已无读取方，等它只会在其缺失时把扫描无谓延后到 18:45。
+_DETECTOR_REQUIRED_SNAPSHOTS = ('industry_ff', 'concept_ff')
 _DETECTOR_LAST_ATTEMPT = dt_time(18, 45)
 
 
@@ -334,10 +336,10 @@ def _detector_dependencies_ready(trade_date):
 def _detector_scan_job():
     """探测器日度扫描：每交易日 17:15 起（快照已落库、两融 T+1 基本可取）。
 
-    为什么 17:15 独立成任务而不是并入 15:30 预热链：板块/大盘快照要等
+    为什么 17:15 独立成任务而不是并入 15:30 预热链：板块快照要等
     15:30/16:00 两轮预热写完，且融资余额快照只应每天探测一次（深市按日
     探测有请求成本）；失败只记日志，不影响其他任务。按依赖编排（REL-08）：
-    当日 industry_ff/market_ff 快照未落库则延后 30 分钟重试，最多 3 次。
+    当日 industry_ff/concept_ff 快照未落库则延后 30 分钟重试，最多 3 次。
     """
     if os.environ.get('STOCKTRACE_DETECTOR', '1').lower() in ('0', 'false', 'no', 'off'):
         return
@@ -426,7 +428,7 @@ def register_jobs(sched):
         CronTrigger(day_of_week='mon-fri', hour='15,16,17,18,19,20,21', minute='0,30', timezone=SCHEDULER_TZ),
         'post_close_lagging', 900)
 
-    # 探测器：交易日 17:15（板块/大盘快照已在前两轮预热落库）；
+    # 探测器：交易日 17:15（行业/概念板块快照已在前两轮预热落库）；
     # 17:45/18:15/18:45 为依赖未齐时的重试点，当日已扫过则直接跳过（REL-08）
     add(_guarded(_detector_scan_job, 'detector_scan', _DAILY_WAIT_SECONDS),
         CronTrigger(day_of_week='mon-fri', hour='17-18', minute='15,45', timezone=SCHEDULER_TZ),
