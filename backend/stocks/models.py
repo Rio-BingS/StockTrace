@@ -177,6 +177,10 @@ class AlertEvent(models.Model):
         verbose_name = '提醒记录'
         verbose_name_plural = '提醒记录'
         ordering = ['-created_at']
+        # 库级保证同规则同日只一条，防并发评估重复触发（PERF-06）
+        constraints = [
+            models.UniqueConstraint(fields=['alert', 'trade_date'], name='uniq_alert_day'),
+        ]
 
     def __str__(self):
         return f"{self.message} ({self.trade_date})"

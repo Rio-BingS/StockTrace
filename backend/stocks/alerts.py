@@ -20,6 +20,7 @@ from datetime import time as dt_time
 
 import requests
 from django.conf import settings
+from django.db import IntegrityError, transaction
 from django.utils import timezone
 
 from .models import AlertEvent, PriceAlert
@@ -138,10 +139,17 @@ def _evaluate_one(alert, today):
         pct = _current_pct(stock, today)
     if not _hit(alert, price, pct):
         return None
-    event = AlertEvent.objects.create(
-        alert=alert, stock=stock,
-        message=_message(alert, price, desc), trade_date=today,
-    )
+    # (alert, trade_date) 有唯一约束：并发评估时另一方已写入则视为已触发（PERF-06）
+    try:
+        with transaction.atomic():
+            event, created = AlertEvent.objects.get_or_create(
+                alert=alert, trade_date=today,
+                defaults={'stock': stock, 'message': _message(alert, price, desc)},
+            )
+    except IntegrityError:
+        return None
+    if not created:
+        return None
     alert.last_triggered_at = timezone.now()
     alert.save(update_fields=['last_triggered_at'])
     return event

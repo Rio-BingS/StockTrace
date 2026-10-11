@@ -4,12 +4,14 @@ from datetime import date, datetime
 from decimal import Decimal
 from unittest.mock import patch
 
+from django.db import IntegrityError
+
 import pandas as pd
 from django.test import SimpleTestCase, TestCase
 from django.utils import timezone
 
 from . import services
-from .models import DailyQuote, MinuteBar, Stock
+from .models import AlertEvent, DailyQuote, MinuteBar, PriceAlert, Stock
 from .serializers import DailyQuoteSerializer, DashboardStockSerializer
 
 
@@ -205,3 +207,35 @@ class DailyIsFinalTests(_NoSleep, TestCase):
     def test_next_day_fetch_final(self):
         self._fetch('2026-09-03 09:00:00')
         self.assertTrue(self._final(date(2026, 9, 2)))
+
+
+class AlertEventUniqueTests(TestCase):
+    """PERF-06：(alert, trade_date) 唯一，评估写入幂等。"""
+
+    def setUp(self):
+        self.stock = Stock.objects.create(code='600000', name='浦发银行')
+        self.alert = PriceAlert.objects.create(
+            stock=self.stock, rule_type=PriceAlert.PRICE_ABOVE, threshold=Decimal('1'))
+
+    def test_db_rejects_duplicate(self):
+        AlertEvent.objects.create(alert=self.alert, stock=self.stock, message='a',
+                                  trade_date=date(2026, 9, 2))
+        with self.assertRaises(IntegrityError):
+            AlertEvent.objects.create(alert=self.alert, stock=self.stock, message='b',
+                                      trade_date=date(2026, 9, 2))
+
+    def test_evaluate_one_idempotent_when_event_exists(self):
+        from . import alerts
+        AlertEvent.objects.create(alert=self.alert, stock=self.stock, message='a',
+                                  trade_date=date(2026, 9, 2))
+        with patch('stocks.alerts._current_price', return_value=(10.0, '现价')):
+            self.assertIsNone(alerts._evaluate_one(self.alert, date(2026, 9, 2)))
+            ev = alerts._evaluate_one(self.alert, date(2026, 9, 3))
+        self.assertIsNotNone(ev)
+        self.assertEqual(AlertEvent.objects.filter(alert=self.alert).count(), 2)
+
+    def test_evaluate_one_integrity_error_returns_none(self):
+        from . import alerts
+        with patch('stocks.alerts._current_price', return_value=(10.0, '现价')), \
+                patch.object(AlertEvent.objects, 'get_or_create', side_effect=IntegrityError):
+            self.assertIsNone(alerts._evaluate_one(self.alert, date(2026, 9, 2)))
