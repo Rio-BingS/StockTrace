@@ -6,6 +6,7 @@ import StockTable from '../components/StockTable.vue'
 import StockWatchlist from '../components/StockWatchlist.vue'
 import AlertPanel from '../components/AlertPanel.vue'
 import { errorMessage } from '../utils/errorMessage.js'
+import { confirmDialog, promptDialog, toastError } from '../stores/feedback.js'
 import { formatSigned, pctClass } from '../utils/format.js'
 import { usePolling } from '../composables/usePolling.js'
 import { createBurstScheduler, createSerialRunner } from '../utils/serialRunner.js'
@@ -44,35 +45,41 @@ const filteredData = computed(() => {
 const ungroupedCount = computed(() => dashboardData.value.filter(d => d.group_id == null).length)
 
 async function addGroup() {
-  const name = prompt('新分组名称：')
+  const name = await promptDialog({ title: '新建分组', placeholder: '分组名称' })
   if (!name || !name.trim()) return
   try {
     await groupApi.create(name.trim())
     await loadGroups()
   } catch (e) {
-    alert(errorMessage(e, '创建分组失败'))
+    toastError(errorMessage(e, '创建分组失败'))
   }
 }
 
 async function renameGroup(g) {
-  const name = prompt('修改分组名称：', g.name)
+  const name = await promptDialog({ title: '重命名分组', defaultValue: g.name, placeholder: '分组名称' })
   if (!name || !name.trim() || name.trim() === g.name) return
   try {
     await groupApi.update(g.id, { name: name.trim() })
     await Promise.all([loadGroups(), loadDashboard()])
   } catch (e) {
-    alert(errorMessage(e, '重命名失败'))
+    toastError(errorMessage(e, '重命名失败'))
   }
 }
 
 async function removeGroup(g) {
-  if (!confirm(`删除分组「${g.name}」？组内股票将变回未分组。`)) return
+  const ok = await confirmDialog({
+    title: '删除分组',
+    message: `删除分组「${g.name}」？组内股票将变回未分组。`,
+    confirmText: '删除',
+    danger: true,
+  })
+  if (!ok) return
   try {
     await groupApi.remove(g.id)
     if (activeGroup.value === g.id) activeGroup.value = 'all'
     await Promise.all([loadGroups(), loadDashboard()])
   } catch (e) {
-    alert(errorMessage(e, '删除分组失败'))
+    toastError(errorMessage(e, '删除分组失败'))
   }
 }
 
@@ -181,7 +188,7 @@ async function removeStock(item) {
     await stockApi.remove(item.id)
     loadDashboard()
   } catch (e) {
-    alert(errorMessage(e, '取消关注失败'))
+    toastError(errorMessage(e, '取消关注失败'))
   }
 }
 

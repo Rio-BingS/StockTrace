@@ -6,6 +6,7 @@ import { aiDisclaimer, aiErrorText, createAiTask, isCanceled } from '../utils/ai
 import { formatPct, formatNum, formatRate, pctClass } from '../utils/format.js'
 import { formatAmount, formatVolume } from '../utils/marketFormat.js'
 import { errorMessage } from '../utils/errorMessage.js'
+import { confirmDialog } from '../stores/feedback.js'
 import { buildConditions, conditionErrors, hasDetail, newCondition } from '../utils/screenerConditions.js'
 
 const router = useRouter()
@@ -266,7 +267,9 @@ function onPresetSelect(key) {
 async function deletePreset() {
   if (!selectedPreset.value || selectedPreset.value.startsWith('builtin:')) return
   const p = presets.value.find(x => presetKey(x) === selectedPreset.value)
-  if (!p || !confirm(`删除预设「${p.name}」？`)) return
+  if (!p) return
+  const ok = await confirmDialog({ title: '删除预设', message: `删除预设「${p.name}」？`, confirmText: '删除', danger: true })
+  if (!ok) return
   try {
     await presetApi.remove(p.id)
     selectedPreset.value = ''

@@ -9,6 +9,7 @@ import { detectorApi } from '../api/stocks.js'
 import { errorMessage, isCanceled } from '../utils/errorMessage.js'
 import { createRequestGuard } from '../utils/requestGuard.js'
 import { onActivateKey } from '../utils/a11y.js'
+import { toastError } from '../stores/feedback.js'
 
 const loading = ref(false), error = ref('')
 const data = ref(null)
@@ -119,7 +120,7 @@ async function toggleConfig() {
     } catch (e) {
       // 失败时收起面板并提示，下次点击可重试（FEF-07）
       showConfig.value = false
-      alert(errorMessage(e, '加载维度配置失败'))
+      toastError(errorMessage(e, '加载维度配置失败'))
     } finally {
       configLoading.value = false
     }

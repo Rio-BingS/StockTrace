@@ -11,9 +11,10 @@ const stack = []
  * - 背景 #app 设为 inert，读屏与 Tab 都进不去；对话框需 Teleport 到 body
  * - Tab 在对话框内循环，Esc 调用 onEscape
  * - 关闭后把焦点还给触发元素
- * open：控制显示的 ref；返回 { dialogRef, initialFocusRef } 绑到模板上
+ * open：控制显示的 ref；返回 { dialogRef, initialFocusRef, focusInitial } 绑到模板上；
+ * initialFocus：可选函数，返回打开时要聚焦的元素（优先于 initialFocusRef）
  */
-export function useDialog(open, { onEscape } = {}) {
+export function useDialog(open, { onEscape, initialFocus } = {}) {
   const dialogRef = ref(null)
   const initialFocusRef = ref(null)
   let opener = null
@@ -48,8 +49,13 @@ export function useDialog(open, { onEscape } = {}) {
     stack.push(token)
     setInert(document.getElementById('app'), true)
     document.addEventListener('keydown', onKeydown)
+    await focusInitial()
+  }
+
+  /** 聚焦初始元素；对话框内容切换（如排队的下一个确认框）时也可再次调用 */
+  async function focusInitial() {
     await nextTick()
-    const target = initialFocusRef.value || focusables()[0] || dialogRef.value
+    const target = initialFocus?.() || initialFocusRef.value || focusables()[0] || dialogRef.value
     target?.focus()
   }
 
@@ -68,5 +74,5 @@ export function useDialog(open, { onEscape } = {}) {
   watch(open, (v) => (v ? activate() : deactivate()), { immediate: true })
   onBeforeUnmount(deactivate)
 
-  return { dialogRef, initialFocusRef }
+  return { dialogRef, initialFocusRef, focusInitial }
 }

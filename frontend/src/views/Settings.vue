@@ -1,6 +1,7 @@
 <script setup>
 import { ref, onMounted } from 'vue'
 import { useDialog } from '../composables/useDialog.js'
+import { confirmDialog } from '../stores/feedback.js'
 import { aiApi } from '../api/stocks.js'
 import { aiErrorText, fieldErrorText } from '../utils/aiRequest.js'
 
@@ -81,7 +82,8 @@ async function save() {
 }
 
 async function remove(p) {
-  if (!confirm(`确定删除「${p.name}」？`)) return
+  const ok = await confirmDialog({ title: '删除服务商', message: `确定删除「${p.name}」？`, confirmText: '删除', danger: true })
+  if (!ok) return
   try {
     await aiApi.deleteProvider(p.id)
     await load()

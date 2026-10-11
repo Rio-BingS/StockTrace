@@ -3,6 +3,8 @@ import { ref } from 'vue'
 import { RouterView, useRouter } from 'vue-router'
 import NavBar from './components/NavBar.vue'
 import SiteDisclaimer from './components/SiteDisclaimer.vue'
+import ToastHost from './components/ToastHost.vue'
+import ConfirmDialog from './components/ConfirmDialog.vue'
 
 // KeepAlive 缓存名单来自路由 meta.keepAlive；页面组件用 defineOptions 显式声明同名，
 // 不依赖 SFC 文件名推断的组件名（FEF-15）
@@ -36,6 +38,9 @@ function openDisclaimer() {
       <a href="#" class="footer-link" @click.prevent="openDisclaimer">免责声明</a>
     </footer>
     <SiteDisclaimer ref="disclaimerRef" />
+    <!-- 全站提示与确认框宿主（FEX-06） -->
+    <ToastHost />
+    <ConfirmDialog />
   </div>
 </template>
 

@@ -4,6 +4,7 @@ import { alertApi } from '../api/stocks.js'
 import { formatDateTime } from '../utils/format.js'
 import { errorMessage } from '../utils/errorMessage.js'
 import { usePolling } from '../composables/usePolling.js'
+import { confirmDialog } from '../stores/feedback.js'
 
 // stocks：看板数据（用于添加规则的股票下拉）
 defineProps({
@@ -74,7 +75,13 @@ async function toggleRule(rule) {
 }
 
 async function removeRule(rule) {
-  if (!confirm(`删除「${rule.code} ${rule.rule_display} ${rule.threshold}」提醒？`)) return
+  const ok = await confirmDialog({
+    title: '删除提醒',
+    message: `删除「${rule.code} ${rule.rule_display} ${rule.threshold}」提醒？`,
+    confirmText: '删除',
+    danger: true,
+  })
+  if (!ok) return
   try {
     await alertApi.remove(rule.id)
     await load()

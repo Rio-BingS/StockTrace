@@ -4,6 +4,7 @@ import { stockApi } from '../api/stocks.js'
 import { errorMessage, isCanceled } from '../utils/errorMessage.js'
 import { createRequestGuard } from '../utils/requestGuard.js'
 import { moveHighlight, resolveEnter } from '../utils/combobox.js'
+import { toast, toastError } from '../stores/feedback.js'
 
 const emit = defineEmits(['refresh'])
 
@@ -86,9 +87,9 @@ async function addStock(code, name) {
     emit('refresh')
   } catch (e) {
     if (e.response?.data?.code) {
-      alert('该股票已在关注列表中')
+      toast('该股票已在关注列表中')
     } else {
-      alert(errorMessage(e, '添加失败'))
+      toastError(errorMessage(e, '添加失败'))
     }
   } finally {
     adding.value = false

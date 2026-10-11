@@ -3,6 +3,7 @@ import { computed, ref, watch } from 'vue'
 import { formatPct, formatNum, formatRate, formatSigned, pctClass } from '../utils/format.js'
 import { stockApi } from '../api/stocks.js'
 import { computePnl, syncDrafts, validateHolding } from '../utils/holding.js'
+import { confirmDialog, toastError } from '../stores/feedback.js'
 
 const props = defineProps({
   data: { type: Array, default: () => [] },
@@ -61,7 +62,7 @@ async function changeGroup(item, value) {
     await stockApi.update(item.id, { group_id: value === '' ? null : Number(value) })
     emit('refresh')
   } catch {
-    alert('修改分组失败，请重试')
+    toastError('修改分组失败，请重试')
   }
 }
 
@@ -79,7 +80,7 @@ async function saveCost(item) {
     if (d) costDrafts.value[item.code] = { ...d, dirty: false }
     emit('refresh')
   } catch {
-    alert('保存持仓失败，请重试')
+    toastError('保存持仓失败，请重试')
   } finally {
     savingIds.value.delete(item.code)
   }
@@ -97,7 +98,14 @@ function handleAi(e, item) {
 
 async function handleDelete(e, item) {
   e.stopPropagation()
-  if (!confirm(`确认取消关注 ${item.name || item.code}？`)) return
+  const ok = await confirmDialog({
+    title: '取消关注',
+    message: `确认取消关注 ${item.name || item.code}？`,
+    confirmText: '取消关注',
+    cancelText: '保留',
+    danger: true,
+  })
+  if (!ok) return
   emit('delete', item)
 }
 </script>
