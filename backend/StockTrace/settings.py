@@ -20,6 +20,12 @@ from django.core.exceptions import ImproperlyConfigured
 # Build paths inside the project like this: BASE_DIR / 'subdir'.
 BASE_DIR = Path(__file__).resolve().parent.parent
 
+# 应用版本号：唯一来源是仓库根目录的 VERSION 文件，发版时改它再打同名 tag
+try:
+    APP_VERSION = (BASE_DIR.parent / 'VERSION').read_text(encoding='utf-8').strip() or 'unknown'
+except OSError:
+    APP_VERSION = 'unknown'
+
 
 # Quick-start development settings - unsuitable for production
 # See https://docs.djangoproject.com/en/6.0/howto/deployment/checklist/
