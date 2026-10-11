@@ -230,7 +230,8 @@ def _comment_rows(codes):
         stock = stocks.get(code)
         if stock is None:
             continue
-        quote = stock.daily_quotes.order_by('-trade_date').first()
+        # 与选股执行口径一致，只用已收盘日线（DAT-13）
+        quote = stock.daily_quotes.filter(is_final=True).order_by('-trade_date').first()
         rows.append({
             'code': stock.code,
             'name': stock.name,

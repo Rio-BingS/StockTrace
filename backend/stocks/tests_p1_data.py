@@ -533,3 +533,42 @@ class BaoStockLoginFailureTests(SimpleTestCase):
             with self.assertRaises(RuntimeError):
                 services.BaoStockSource().fetch_daily('600000', '20260901', '20260901')
         query.assert_not_called()
+
+
+class FinalBarReadersTests(TestCase):
+    """DAT-13 收尾：探测器、选股、回看只读已收盘（is_final=True）的日线。"""
+
+    def setUp(self):
+        self.stock = Stock.objects.create(code='600000', name='浦发银行')
+
+    def _bar(self, d, close, change_pct=Decimal('1'), is_final=True):
+        return DailyQuote.objects.create(
+            stock=self.stock, trade_date=d,
+            open_price=Decimal('10'), close_price=Decimal(str(close)),
+            high_price=Decimal('11'), low_price=Decimal('9'),
+            open_close_diff=Decimal('0'), open_close_pct=Decimal('0'),
+            high_low_diff=Decimal('2'), high_low_pct=Decimal('22.2222'),
+            change_pct=change_pct, volume=100, turnover=Decimal('1000'),
+            is_final=is_final,
+        )
+
+    @patch('stocks.ai.valuation.fetch_valuation_map', new=lambda codes: {})
+    def test_screener_uses_latest_final_bar(self):
+        from .ai.screener import run_screener
+        self._bar(date(2026, 9, 3), 10, change_pct=Decimal('1'))
+        self._bar(date(2026, 9, 4), 11, change_pct=Decimal('9'), is_final=False)
+        hit = run_screener({'logic': 'all', 'conditions': [
+            {'field': 'change_pct', 'op': 'gt', 'value': 5},
+        ]})
+        self.assertEqual(hit, [])  # 盘中 9% 不得命中
+        rows = run_screener({'logic': 'all', 'conditions': [
+            {'field': 'change_pct', 'op': 'gt', 'value': 0},
+        ]})
+        self.assertEqual(rows[0]['trade_date'], '2026-09-03')
+
+    def test_screener_comment_rows_use_final_bar(self):
+        from .ai.views import _comment_rows
+        self._bar(date(2026, 9, 3), 10)
+        self._bar(date(2026, 9, 4), 11, is_final=False)
+        rows = _comment_rows(['600000'])
+        self.assertEqual(rows[0]['trade_date'], date(2026, 9, 3))

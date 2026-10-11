@@ -370,15 +370,21 @@ FIELDS = {
 }
 
 
+def _final_quotes(stock):
+    """只取已收盘的日线（DAT-13）：盘中拉到的当日 bar 价量都不完整，
+    混进来会让涨跌幅/均线/量比等条件按半天数据命中。"""
+    return stock.daily_quotes.filter(is_final=True)
+
+
 def _history_ctx(stock, quote):
     """组装字段计算上下文：最新日线 + 最近 ≤61 根（升序，尾元素最新）。"""
-    bars = list(stock.daily_quotes.order_by('-trade_date')[:MAX_LOOKBACK])
+    bars = list(_final_quotes(stock).order_by('-trade_date')[:MAX_LOOKBACK])
     bars.reverse()
     return {'stock': stock, 'quote': quote, 'bars': bars}
 
 
 def _latest_contexts():
-    """每只活跃股票的 (stock, 最新日线 ctx)；当日无行情的股票不参与。
+    """每只活跃股票的 (stock, 最新已收盘日线 ctx)；无收盘行情的股票不参与。
 
     估值快照（腾讯）对全部自选股一次批量拉取，随 ctx 分发。
     """
@@ -388,7 +394,7 @@ def _latest_contexts():
     stocks = list(Stock.objects.filter(is_active=True))
     val_map = fetch_valuation_map([s.code for s in stocks]) if stocks else {}
     for stock in stocks:
-        quote = stock.daily_quotes.order_by('-trade_date').first()
+        quote = _final_quotes(stock).order_by('-trade_date').first()
         if quote is None:
             continue
         ctx = _history_ctx(stock, quote)
