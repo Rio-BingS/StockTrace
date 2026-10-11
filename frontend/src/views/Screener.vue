@@ -5,6 +5,7 @@ import { aiApi, presetApi, stockApi } from '../api/stocks.js'
 import { aiDisclaimer, aiErrorText, createAiTask, isCanceled } from '../utils/aiRequest.js'
 import { formatPct, formatNum, pctClass } from '../utils/format.js'
 import { errorMessage } from '../utils/errorMessage.js'
+import { buildConditions, conditionErrors, hasDetail } from '../utils/screenerConditions.js'
 
 const router = useRouter()
 
@@ -185,18 +186,13 @@ function onFieldChange(c) {
   }
 }
 
+// 逐行校验：不完整的行标红并禁用"执行筛选"，不再静默丢弃（FEF-09）
+const condErrors = computed(() => conditionErrors(conditions.value, BOOL_FIELDS))
+const invalidCount = computed(() => condErrors.value.filter(Boolean).length)
+
 function buildSpec() {
-  const conds = conditions.value
-    .filter(c => c.value !== '' && c.value !== null && !Number.isNaN(Number(c.value)))
-    .map(c => ({
-      field: c.field,
-      op: c.op,
-      value: c.op === 'between'
-        ? [Number(c.value), Number(c.value2)]
-        : Number(c.value),
-    }))
-    .filter(c => c.op !== 'between' || (!Number.isNaN(c.value[0]) && !Number.isNaN(c.value[1])))
-  if (!conds.length) return null
+  const conds = buildConditions(conditions.value, BOOL_FIELDS)
+  if (!conds) return null
   const spec = { logic: logic.value, conditions: conds }
   if (orderBy.value) {
     spec.order_by = orderBy.value
@@ -225,7 +221,7 @@ async function savePreset() {
   const name = presetName.value.trim()
   const spec = buildSpec()
   if (!name || !spec) {
-    errorMsg.value = !name ? '请输入预设名称' : '请先填写至少一个完整条件'
+    errorMsg.value = !name ? '请输入预设名称' : '请先补全标红的条件'
     return
   }
   try {
@@ -288,7 +284,7 @@ async function runManual() {
   comment.value = ''
   const spec = buildSpec()
   if (!spec) {
-    errorMsg.value = '请至少填写一个完整条件'
+    errorMsg.value = '请先补全标红的条件'
     return
   }
   manualLoading.value = true
@@ -367,6 +363,8 @@ async function addToWatchlist(row) {
 }
 
 function goDetail(row) {
+  // 未入库的股票没有 stock_id，跳过去会是 /stock/undefined（FEF-09）
+  if (!hasDetail(row)) return
   router.push(`/stock/${row.stock_id}`)
 }
 
@@ -411,7 +409,10 @@ function fmtTurnover(v) {
     <div class="card">
       <h2>手动条件</h2>
       <div class="conds">
-        <div v-for="(c, i) in conditions" :key="i" class="cond-row">
+        <div
+          v-for="(c, i) in conditions" :key="i"
+          class="cond-row" :class="{ invalid: condErrors[i] }"
+        >
           <select v-model="c.field" @change="onFieldChange(c)">
             <option v-for="f in FIELDS" :key="f.key" :value="f.key">{{ f.label }}</option>
           </select>
@@ -429,6 +430,7 @@ function fmtTurnover(v) {
             <input v-model="c.value2" type="number" class="val" placeholder="上限" />
           </template>
           <button class="btn small" :disabled="conditions.length <= 1" @click="removeCondition(i)">删</button>
+          <span v-if="condErrors[i]" class="cond-error">{{ condErrors[i] }}</span>
         </div>
         <button class="btn small" @click="addCondition">+ 加条件</button>
       </div>
@@ -446,9 +448,14 @@ function fmtTurnover(v) {
           <option value="desc">降序</option>
           <option value="asc">升序</option>
         </select>
-        <button class="btn primary" :disabled="manualLoading" @click="runManual">
+        <button
+          class="btn primary" :disabled="manualLoading || invalidCount > 0"
+          :title="invalidCount ? `有 ${invalidCount} 个条件未填写完整` : ''"
+          @click="runManual"
+        >
           {{ manualLoading ? '筛选中…' : '执行筛选' }}
         </button>
+        <span v-if="invalidCount" class="cond-error">有 {{ invalidCount }} 个条件未填写完整</span>
       </div>
       <div class="preset-row">
         <label>策略 / 预设</label>
@@ -504,7 +511,7 @@ function fmtTurnover(v) {
             <td>{{ fmtTurnover(r.turnover) }}</td>
             <td>{{ r.trade_date }}</td>
             <td class="actions">
-              <button class="btn small" @click="goDetail(r)">详情</button>
+              <button v-if="hasDetail(r)" class="btn small" @click="goDetail(r)">详情</button>
               <button class="btn small" @click="addToWatchlist(r)">+自选</button>
             </td>
           </tr>
@@ -610,6 +617,14 @@ function fmtTurnover(v) {
 }
 .cond-row input.val {
   width: 120px;
+}
+.cond-row.invalid input,
+.cond-row.invalid select {
+  border-color: #ff5a6e;
+}
+.cond-error {
+  color: #ff8a96;
+  font-size: 12px;
 }
 .manual-meta {
   display: flex;
