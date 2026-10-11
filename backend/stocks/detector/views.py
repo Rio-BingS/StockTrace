@@ -9,7 +9,7 @@
 
 from __future__ import annotations
 
-from datetime import datetime, timedelta
+from datetime import timedelta
 
 from django.utils import timezone
 from rest_framework import status
@@ -17,6 +17,7 @@ from rest_framework.decorators import api_view
 from rest_framework.response import Response
 
 from ..common.pagination import paginate as _paginate
+from ..common.params import parse_bool, parse_date, positive_int
 from ..trading_calendar import expected_latest_date
 from ..models import DetectorDimConfig, DetectorRun, DetectorSignal
 from . import constants, registry
@@ -91,13 +92,6 @@ def _signal_row(sig):
     }
 
 
-def _parse_date(raw):
-    try:
-        return datetime.strptime(raw, '%Y-%m-%d').date()
-    except (TypeError, ValueError):
-        return None
-
-
 @api_view(['GET'])
 def detector_signals(request):
     """信号列表：默认返回最近一次扫描交易日的信号。
@@ -108,11 +102,12 @@ def detector_signals(request):
     """
     latest_run = _runs_brief().first()
 
-    all_dates = request.query_params.get('all_dates') in ('1', 'true')
+    # 只认小写 '1'/'true'，与改用 common/params 之前一致
+    all_dates = parse_bool(request.query_params.get('all_dates'), truthy=('1', 'true'), ignore_case=False)
     date_raw = request.query_params.get('date')
     trade_date = None
     if date_raw:
-        trade_date = _parse_date(date_raw)
+        trade_date = parse_date(date_raw)
         if trade_date is None:
             return Response({'detail': 'date 格式应为 YYYY-MM-DD'},
                             status=status.HTTP_400_BAD_REQUEST)
@@ -155,8 +150,9 @@ def detector_signals(request):
         rows.sort(key=lambda r: r['score'], reverse=True)
     items, pagination = _paginate(
         rows,
-        _positive_int(request, 'page', 1),
-        _page_size(request),
+        positive_int(request.query_params, 'page', 1),
+        # page_size 小于 1 钳到 1（不是回退 50），上限 100：保持接入前的口径
+        positive_int(request.query_params, 'page_size', 50, 100, clamp=True),
     )
 
     summary = {
@@ -178,30 +174,6 @@ def detector_signals(request):
         'pagination': pagination,
         'items': items,
     })
-
-
-def _page_size(request):
-    raw = request.query_params.get('page_size')
-    if raw in (None, ''):
-        return 50
-    try:
-        value = int(raw)
-    except (TypeError, ValueError):
-        return 50
-    return max(1, min(value, 100))
-
-
-def _positive_int(request, key, default, maximum=None):
-    raw = request.query_params.get(key)
-    if raw in (None, ''):
-        return default
-    try:
-        value = int(raw)
-    except (TypeError, ValueError):
-        return default
-    if value < 1:
-        return default
-    return min(value, maximum) if maximum else value
 
 
 def _run_brief(run):

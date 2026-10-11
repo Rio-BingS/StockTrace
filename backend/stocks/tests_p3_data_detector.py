@@ -6,7 +6,7 @@
 
 from unittest.mock import patch
 
-from django.test import SimpleTestCase
+from django.test import SimpleTestCase, TestCase
 
 
 def _ths_html(names, page_info):
@@ -102,3 +102,115 @@ class EmSectorRankRemovedTests(SimpleTestCase):
         with patch('stocks.market.sectors._ths_fund_flow_df', return_value=None) as ths:
             self.assertEqual(sectors.fetch_industry_fund_flow(), [])
         ths.assert_called_once_with('industry', 'ths_fund_flow_industry')
+
+
+def _legacy_page_size(raw):
+    """接入 common/params 前 detector/views._page_size 的原实现（对照用）。"""
+    if raw in (None, ''):
+        return 50
+    try:
+        value = int(raw)
+    except (TypeError, ValueError):
+        return 50
+    return max(1, min(value, 100))
+
+
+def _legacy_positive_int(raw, default, maximum=None):
+    """接入前 detector/views._positive_int 的原实现（对照用）。"""
+    if raw in (None, ''):
+        return default
+    try:
+        value = int(raw)
+    except (TypeError, ValueError):
+        return default
+    if value < 1:
+        return default
+    return min(value, maximum) if maximum else value
+
+
+_PARAM_INPUTS = [None, '', '0', '-5', '1', '2', '50', '99', '100', '101', '1000', 'abc', '1.5', ' 3 ']
+
+
+class DetectorParamsTests(SimpleTestCase):
+    """detector/views 分页参数接入 common/params：逐值与旧实现一致。"""
+
+    def test_page_size_matches_legacy_clamp(self):
+        from .common.params import positive_int
+
+        for raw in _PARAM_INPUTS:
+            with self.subTest(raw=raw):
+                params = {} if raw is None else {'page_size': raw}
+                self.assertEqual(
+                    positive_int(params, 'page_size', 50, 100, clamp=True), _legacy_page_size(raw),
+                )
+
+    def test_page_matches_legacy_fallback(self):
+        from .common.params import positive_int
+
+        for raw in _PARAM_INPUTS:
+            with self.subTest(raw=raw):
+                params = {} if raw is None else {'page': raw}
+                self.assertEqual(positive_int(params, 'page', 1), _legacy_positive_int(raw, 1))
+
+    def test_clamp_does_not_change_default_modes(self):
+        from .common.params import positive_int
+        from .errors import BadRequest
+
+        self.assertEqual(positive_int({'n': '0'}, 'n', 7), 7)
+        self.assertEqual(positive_int({'n': '0'}, 'n', 7, clamp=True), 1)
+        with self.assertRaises(BadRequest):
+            positive_int({'n': '0'}, 'n', 7, strict=True)
+        # clamp 只管小于 1 的整数；strict 下非整数仍是 400
+        self.assertEqual(positive_int({'n': '-3'}, 'n', 7, strict=True, clamp=True), 1)
+        with self.assertRaises(BadRequest):
+            positive_int({'n': 'x'}, 'n', 7, strict=True, clamp=True)
+
+    def test_legacy_helpers_removed(self):
+        from .detector import views as dv
+
+        for name in ('_page_size', '_positive_int', '_parse_date'):
+            self.assertFalse(hasattr(dv, name), name)
+
+
+@patch('stocks.detector.views.expected_latest_date', lambda *a, **k: None)
+class DetectorSignalsParamsApiTests(TestCase):
+    """信号列表接口的分页/日期/all_dates 参数对外行为不变。"""
+
+    def setUp(self):
+        from datetime import date
+
+        from .models import DetectorRun, DetectorSignal
+
+        self.day = date(2026, 10, 9)
+        DetectorRun.objects.create(trade_date=self.day, status='ok')
+        for i in range(3):
+            DetectorSignal.objects.create(
+                target_kind='index', target_code=f'sh00000{i}', target_name=f'指数{i}',
+                trade_date=self.day, direction='up', cycles=1, score=10 + i,
+            )
+
+    def _get(self, **params):
+        from django.urls import reverse
+
+        return self.client.get(reverse('detector-signals'), params)
+
+    def test_page_size_zero_and_negative_clamp_to_one(self):
+        for raw in ('0', '-5'):
+            with self.subTest(raw=raw):
+                body = self._get(page_size=raw).json()
+                self.assertEqual(body['pagination']['page_size'], 1)
+                self.assertEqual(len(body['items']), 1)
+
+    def test_bad_page_size_and_page_fall_back(self):
+        body = self._get(page_size='abc', page='0').json()
+        self.assertEqual(body['pagination']['page_size'], 50)
+        self.assertEqual(body['pagination']['page'], 1)
+        body = self._get(page_size='1000').json()
+        self.assertEqual(body['pagination']['page_size'], 100)
+
+    def test_date_and_all_dates_parsing(self):
+        self.assertEqual(self._get(date='2026/10/09').status_code, 400)
+        self.assertEqual(self._get(date='2026-10-09').json()['summary']['total'], 3)
+        # all_dates 只认小写 '1'/'true'：'TRUE' 视为未开启，按最新扫描日返回
+        body = self._get(all_dates='TRUE').json()
+        self.assertEqual(body['trade_date'], '2026-10-09')
