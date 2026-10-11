@@ -42,28 +42,22 @@ class CalmBaselineTests(TestCase):
         highs[-1] = 10.0 * 1.01045  # 当日振幅偏低（2.045%，与历史值都不同），应判平静
         return _price_ctx(volumes, closes, highs, lows)
 
-    def test_baselines_exclude_current_sample(self):
+    def test_baselines_exclude_current_window(self):
+        # regime 化（#2）后基线仍不含当前窗口（ALG-10）：下标 e 的基线止于 e−1
+        metric = [float(i) for i in range(30)]
+        self.assertEqual(calm._base(metric, 29, 60), metric[:29])
+        self.assertEqual(calm._base(metric, 29, 10), metric[19:29])
+        self.assertNotIn(metric[29], calm._base(metric, 29, 60))
+
+    def test_regime_uses_lagged_window_only(self):
+        # 此前平静只看止于 T−calm_lag 的窗口：近 3 日任意改动不改变 regime 判定
         ctx = self._calm_price_ctx()
-        seen = []
-        real = calm._percentile
-
-        def spy(vals, q):
-            seen.append(list(vals))
-            return real(vals, q)
-
-        with patch.object(calm, '_percentile', side_effect=spy):
-            ok, meta = calm.is_calm_price(ctx)
+        ctx['high'] = [10.1] * len(ctx['close'])  # 振幅恒定，回到「此前平静」
+        ok, meta = calm.is_calm_price(ctx)
         self.assertTrue(ok, meta)
-        cv_base, amp_base = seen
-        amp_now = (ctx['high'][-1] - ctx['low'][-1]) / ctx['close'][-2] * 100
-        self.assertNotIn(amp_now, amp_base)
-        self.assertEqual(len(amp_base), 43)  # 当日之前的全部振幅（共 44 根振幅，不足 lookback=60）
-        # 当前 5 日窗口的 CV 也不在 CV 基线里：基线最后一个窗口止于前一日
-        vols = ctx['volume']
-        last_base = vols[-6:-1]
-        m = sum(last_base) / 5
-        expected_last = calm._std(last_base) / m
-        self.assertAlmostEqual(cv_base[-1], expected_last)
+        ctx['volume'][-2] = 160.0  # T−1 温和放量：不进滞后窗口，RVOL 也在区间内
+        ok2, meta2 = calm.is_calm_price(ctx)
+        self.assertTrue(ok2, meta2)
 
     def test_missing_today_amplitude_is_not_calm(self):
         # 旧实现先丢 None 再取 amps[-1]，当日缺最高/最低价时拿前一天冒充当日
@@ -80,24 +74,87 @@ class CalmBaselineTests(TestCase):
         self.assertFalse(ok)
         self.assertIn('成交量历史不足', meta['reason'])
 
-    def test_sector_baselines_exclude_current_window(self):
-        nets = [3e8 if i % 2 == 0 else -3e8 for i in range(20)]
-        pcts = [0.3 + 0.01 * i if i % 2 == 0 else -0.3 for i in range(20)]
-        ctx = {'kind': 'industry', 'code': 'x', 'name': 'x', 'dates': _dates(20),
-               'net': nets, 'change_pct': pcts, 'as_of': _dates(20)[-1]}
-        seen = []
-        real = calm._percentile
+    def test_sector_recent_flow_rise_is_calm_but_spike_is_not(self):
+        # 近 3 日资金温和流入留给 big_order_net 去测（#2）；突增 10 倍才排除
+        mags = [2.0, 4.5, 3.0, 5.0, 2.5, 4.0, 3.5, 2.2, 4.8, 3.2]
+        nets = [(mags[i % 10] if i % 2 == 0 else -mags[i % 10]) * 1e8 for i in range(21)] + [1e8] * 3
+        pcts = [0.3 + 0.02 * (i % 5) if i % 2 == 0 else -0.3 for i in range(27)]
+        ctx = {'kind': 'industry', 'code': 'x', 'name': 'x', 'dates': _dates(27),
+               'net': nets + [3e8, 3.5e8, 4e8], 'change_pct': pcts, 'as_of': _dates(27)[-1]}
+        ok, meta = calm.is_calm_sector(ctx)
+        self.assertTrue(ok, meta)
+        ctx['net'] = nets + [30e8, 32e8, 31e8]
+        ok, meta = calm.is_calm_sector(ctx)
+        self.assertFalse(ok)
+        self.assertIn('净额', meta['reason'])
 
-        def spy(vals, q):
-            seen.append(list(vals))
-            return real(vals, q)
 
-        with patch.object(calm, '_percentile', side_effect=spy):
-            calm.is_calm_sector(ctx)
-        flow_base, std_base = seen
-        self.assertEqual(len(flow_base), 20 - 3)   # 不含末尾 3 日窗口
-        self.assertEqual(len(std_base), 20 - 5)    # 不含末尾 5 日窗口
-        self.assertNotIn(calm._std(pcts[-5:]), std_base)
+class CalmRegimeTests(TestCase):
+    """#2 平静闸门 regime 化：迟滞、TR 振幅、温和放量、价格已大动。"""
+
+    def _calm_ctx(self, n=60):
+        # 量能起伏与振幅都缓慢收窄：滞后窗口必然处在自身历史低位（此前平静）
+        volumes = [100 + (3 - i * 0.03) * (1 if i % 2 == 0 else -1) for i in range(n)]
+        closes = [10.0 * (1 + (0.004 if i % 2 == 0 else -0.004)) for i in range(n)]
+        highs = [c * (1.012 - i * 0.00005) for i, c in enumerate(closes)]
+        lows = [c * (0.988 + i * 0.00005) for i, c in enumerate(closes)]
+        return _price_ctx(volumes, closes, highs, lows)
+
+    def test_hysteresis_keeps_calm_inside_exit_band(self):
+        params = {'calm_lag': 0, 'lookback': 60, 'exit_pct': 0.6, 'hysteresis_days': 10,
+                  'regime_min_samples': 20}
+        base = [float(i % 10) for i in range(56)]
+        # 已平静（2 ≤ 40 分位）后出现 5（40~60 分位之间）：维持
+        state, streak, _r = calm._regime([('量能波动', base + [2, 2, 2, 5], 0.4)], 60, params)
+        self.assertTrue(state)
+        self.assertGreaterEqual(streak, 4)
+        # 从不平静（7）直接到 5：进入要 ≤ 40 分位，不平静
+        state, _s, reason = calm._regime([('量能波动', base + [7, 7, 7, 5], 0.4)], 60, params)
+        self.assertFalse(state)
+        self.assertIn('量能波动', reason)
+
+    def test_gap_counts_in_true_range(self):
+        # 跳空 2.9% 但日内窄幅 0.4%：旧 (H−L)/前收 算振幅低位；TR≈3.1% 高于历史
+        # 约 2.4% 的 90 分位，按剧烈波动排除（3 日累计仍未到「已大动」）
+        ctx = self._calm_ctx()
+        c = ctx['close'][-2] * 1.029
+        ctx['close'][-1] = ctx['open'][-1] = c
+        ctx['high'][-1], ctx['low'][-1] = c * 1.002, c * 0.998
+        ok, meta = calm.is_calm_price(ctx)
+        self.assertFalse(ok)
+        self.assertIn('真实波幅', meta['reason'])
+
+    def test_mild_volume_ramp_is_still_calm(self):
+        # 量先于价：近 3 日量能温和抬升（旧闸门 RVOL≤1.5 / 当日 CV 低位会拦下）
+        ctx = self._calm_ctx()
+        ctx['volume'][-3:] = [140.0, 170.0, 200.0]
+        ok, meta = calm.is_calm_price(ctx)
+        self.assertTrue(ok, meta)
+        self.assertGreater(meta['rvol'], 1.5)
+
+    def test_event_volume_spike_is_not_calm(self):
+        ctx = self._calm_ctx()
+        ctx['volume'][-1] = 400.0
+        ok, meta = calm.is_calm_price(ctx)
+        self.assertFalse(ok)
+        self.assertIn('RVOL', meta['reason'])
+
+    def test_price_already_moved_is_not_calm(self):
+        ctx = self._calm_ctx()
+        for i in (-3, -2, -1):
+            ctx['close'][i] = ctx['close'][i - 1] * 1.015  # σ≈0.8%，3 日 +4.6% > 2.5σ√3≈3.5%
+            ctx['high'][i], ctx['low'][i] = ctx['close'][i] * 1.01, ctx['close'][i] * 0.99
+        ok, meta = calm.is_calm_price(ctx)
+        self.assertFalse(ok)
+        self.assertIn('已大动', meta['reason'])
+
+    def test_adjusted_volume_is_preferred(self):
+        # #15 接口：送转校正量优先于原始量（原始量在送转日翻倍会被当成放量）
+        ctx = self._calm_ctx()
+        ctx['volume_adj'] = list(ctx['volume'])
+        ctx['volume'] = ctx['volume'][:-1] + [500.0]
+        ok, meta = calm.is_calm_price(ctx)
+        self.assertTrue(ok, meta)
 
 
 class SignValueBoundaryTests(TestCase):

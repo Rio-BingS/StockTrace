@@ -13,11 +13,17 @@ class DetectorConstantsTests(SimpleTestCase):
 
     def test_values_unchanged(self) -> None:
         # 逐项写死迁移前的数值：常量被误改时这里先失败
+        # 平静闸门 regime 化（#2）后的口径：滞后窗口 + 迟滞 + 价格尚未大动
         self.assertEqual(constants.PRICE_CALM_PARAMS, {
-            'rvol_window': 10, 'cv_window': 5, 'rvol_min': 0.7, 'rvol_max': 1.5,
-            'lookback': 60, 'vol_cv_pct': 0.4, 'amp_pct': 0.4,
+            'rvol_window': 10, 'cv_window': 5, 'rvol_min': 0.7, 'rvol_max': 2.5,
+            'lookback': 60, 'vol_cv_pct': 0.4, 'amp_pct': 0.4, 'exit_pct': 0.6,
+            'calm_lag': 3, 'hysteresis_days': 20, 'regime_min_samples': 20,
+            'move_z': 2.5, 'tr_spike_pct': 0.9,
         })
-        self.assertEqual(constants.SECTOR_CALM_PARAMS, {'window': 5, 'flow_pct': 0.5, 'chg_pct': 0.4})
+        self.assertEqual(constants.SECTOR_CALM_PARAMS, {
+            'window': 5, 'flow_pct': 0.5, 'chg_pct': 0.4, 'exit_pct': 0.6, 'calm_lag': 3,
+            'hysteresis_days': 15, 'regime_min_samples': 8, 'move_z': 2.5, 'flow_spike_pct': 0.95,
+        })
         self.assertEqual((constants.CALM_MIN_AMP_SAMPLES, constants.SECTOR_FLOW_DAYS), (10, 3))
         self.assertEqual(constants.VOTE_MIN_DIMS, 2)
         self.assertEqual(constants.SEVERITY_RULES, {'high_score': 55.0, 'medium_score': 40.0})
