@@ -25,13 +25,20 @@
 - 总开关 settings.DETECTOR_AUTO_TUNE，默认关闭：关闭时照常统计，显著的结论
   只写演练流水（DetectorTuneLog source=dry_run），不改 DetectorDimConfig；
 - 样本跨日累计：取 TUNE_WINDOW_DAYS 内已用 v2 口径判定、有基线的段首信号
-  （cycles == 2，同一段的后续日窗口重叠，不计入），按上面的规则聚类；
+  （同一段的后续日窗口重叠，不计入），按上面的规则聚类。段首 = 前一交易日
+  该对象没有同向的 active 及以后状态的信号行：周期按方向组状态回看后，首个
+  信号日就可能 cycles≥3，不能再用 cycles == 2 判段首；交易日历不可用时才
+  退回 cycles == SEGMENT_HEAD_CYCLES；
+- 归因：只算信号里 counted=True 的维度（投票分组后的计票代表）。强度组的
+  'up' 是「活跃度抬升」不是价格方向，同组未当代表的维度也没有贡献这一票；
+  没有 counted 键的旧行退回「维度方向 == 信号方向」；
 - 显著才调：Beta(1,1) 先验下 P(命中率 > 平均基线) ≥ TUNE_CONFIDENCE 才上调、
   ≤ 1−TUNE_CONFIDENCE 才下调；独立样本 < MIN_ADJ_SAMPLES 不调；
 - 调什么（假设写在这里）：旧实现调 min，但 min 被噪声闸门完全覆盖、改了不影响
   投票，是空操作；改为调真正决定「是否投票」的参数（TUNE_PARAMS，当前为
-  noise_pct），以及权重（目前只进入强度 score/分级；若投票汇总改为加权票数，
-  权重会直接起作用，参数名不变）。没有可调闸门参数的维度只调权重；
+  noise_pct），以及权重（分组投票后是组票权重，直接决定是否够 VOTE_MIN_WEIGHT、
+  对侧比例与 score）。没有可调闸门参数的维度只调权重：价格类维度（vol_compress、
+  ma_relation）的 z_lo/z_hi 由 σ 解析推导、对应名义假阳率，不做在线调参；
 - 怎么调：目标值是「默认值 + 有效超额的函数」，有效超额 = 超额 × n/(n+n0)
   向 0（即默认值）收缩，再夹到上下限。目标值只由窗口内样本决定、不在当前值上
   累乘，同样的证据重复评估不会把参数一路推到边界；
@@ -52,6 +59,7 @@ from ..models import DailyQuote, DetectorDimConfig, DetectorSignal, DetectorTune
 from ..trading_calendar import MAX_LOOKBACK_DAYS, recent_trading_days
 # 阈值数值集中在 constants.py（ARC-06），这里保留同名引用，review.X 旧路径照常可用
 from .constants import (
+    ACTIVE_MIN_CYCLES,
     BASELINE_DAYS,
     BENCHMARK_CODE,
     HIT_PCT,
@@ -518,6 +526,52 @@ def _prob_above(hits, n, p0):
     return 1.0 - _betainc(1.0 + hits, 1.0 + n - hits, min(max(p0, 0.0), 1.0))
 
 
+def _previous_trading_day(day, cache):
+    """day 之前最近一个交易日；交易日历给不出结论时返回 None（按进程内 cache 记忆）。"""
+    if day not in cache:
+        from .signals import _previous_trading_days
+
+        prev = _previous_trading_days(day, 1)
+        cache[day] = prev[0] if prev else None
+    return cache[day]
+
+
+def _segment_heads(rows, since):
+    """从已判定的 active 信号里挑出段首（见模块 docstring「样本跨日累计」）。
+
+    段首 = 前一交易日该对象没有同向、cycles ≥ ACTIVE_MIN_CYCLES 的信号行（watching
+    不回看，不算同一段已开始）；日历不可用的那一行退回 cycles == SEGMENT_HEAD_CYCLES。
+    """
+    rows = list(rows)
+    if not rows:
+        return []
+    active = set(
+        DetectorSignal.objects.filter(
+            cycles__gte=ACTIVE_MIN_CYCLES,
+            trade_date__gte=since - timedelta(days=REVIEW_MAX_AGE_DAYS),
+        ).values_list('target_kind', 'target_code', 'direction', 'trade_date')
+    )
+    cache, heads = {}, []
+    for sig in rows:
+        prev = _previous_trading_day(sig.trade_date, cache)
+        if prev is None:
+            if sig.cycles == _SEGMENT_HEAD_CYCLES:
+                heads.append(sig)
+            continue
+        if (sig.target_kind, sig.target_code, sig.direction, prev) not in active:
+            heads.append(sig)
+    return heads
+
+
+def _attributed(dim, direction):
+    """该维度是否参与了这条信号的计票（归因口径，见模块 docstring）。"""
+    if not isinstance(dim, dict) or not dim.get('available'):
+        return False
+    if 'counted' in dim:
+        return bool(dim['counted'])
+    return dim.get('direction') == direction
+
+
 def _dim_samples(scan_date):
     """跨日累计的调参样本：{dim_key: [(簇命中率, 簇平均基线), ...]}，每簇一个样本。"""
     since = scan_date - timedelta(days=_tune_window_days())
@@ -525,19 +579,18 @@ def _dim_samples(scan_date):
         review_version__gte=2,
         review_hit__isnull=False,
         review_baseline__isnull=False,
-        cycles=_SEGMENT_HEAD_CYCLES,
+        cycles__gte=ACTIVE_MIN_CYCLES,
         trade_date__gte=since,
         trade_date__lte=scan_date,
-    ).only('trade_date', 'direction', 'target_kind', 'review_hit', 'review_baseline', 'dimensions')
+    ).only('trade_date', 'direction', 'target_kind', 'target_code', 'cycles',
+           'review_hit', 'review_baseline', 'dimensions')
     clusters = {}  # (dim, cluster_key) -> [hits, base_sum, count]
-    for sig in rows:
+    for sig in _segment_heads(rows, since):
         ck = _cluster_key(sig)
         for key, dim in (sig.dimensions or {}).items():
-            # 只有同向投票的维度算（每个投票维度都拿整条信号的结果，归因仍有混淆，
+            # 只有计票的维度算（每个计票维度都拿整条信号的结果，归因仍有混淆，
             # 这是信号级复盘的固有局限，写在说明里）
-            if not isinstance(dim, dict):
-                continue
-            if dim.get('direction') != sig.direction or not dim.get('available'):
+            if not _attributed(dim, sig.direction):
                 continue
             acc = clusters.setdefault((key, ck), [0, 0.0, 0])
             acc[0] += 1 if sig.review_hit else 0

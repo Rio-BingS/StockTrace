@@ -132,7 +132,9 @@ TUNE_PARAMS = {
 }
 # 变动小于这个幅度不落库（窗口每天滚动，目标值会小幅抖动）
 TUNE_MIN_CHANGE = {'weight': 0.02, 'noise_pct': 0.005}
-# 段首 active 信号的周期数（周期 1 是 watching，2 是首个 active 日）
+# 段首 active 信号的周期数（周期 1 是 watching，2 是首个 active 日）。周期改按
+# 方向组状态回看后首个信号日可能 cycles≥3，段首改为「前一交易日无同向 active
+# 信号行」（review._segment_heads）；本值只在交易日历不可用时兜底
 SEGMENT_HEAD_CYCLES = 2
 
 # ============================================================

@@ -598,13 +598,18 @@ class ReviewProtocolTests(TestCase):
     @override_settings(DETECTOR_AUTO_TUNE=True)
     def test_only_segment_head_counts_for_tuning(self):
         from .detector import review, scan
-        from .models import DetectorDimConfig
+        from .models import DetectorDimConfig, DetectorSignal
 
         for i in range(review.MIN_ADJ_SAMPLES):
             code = f'6006{i}0'
             _s, base_date = self.seed._make_stock_with_moves(
                 code, [0.5, 1.2, 2.2, 2.5, 2.8], base_date=_TODAY - timedelta(days=10 + 2 * i))
-            self.seed._make_signal(code, base_date, cycles=3)  # 信号段中段，窗口与段首重叠
+            # 信号段中段：前一交易日已有同向 active 信号（段首按此判定，不再看 cycles==2；
+            # 段首行标成旧口径已判定，不进入本轮回看与 v2 样本），窗口与段首重叠
+            head = self.seed._make_signal(code, base_date - timedelta(days=1), cycles=2)
+            DetectorSignal.objects.filter(pk=head.pk).update(
+                status=DetectorSignal.STATUS_MISSED, review_hit=False)
+            self.seed._make_signal(code, base_date, cycles=3)
         configs = {c['key']: c for c in scan.load_configs()}
         summary = review.review_pending(_TODAY, configs)
         self.assertEqual(summary['reviewed'], review.MIN_ADJ_SAMPLES)

@@ -272,14 +272,18 @@ class AutoTuneTests(TestCase):
     def test_target_is_stateless_and_shrunk_toward_default(self):
         self.seed._seed_days('6105', self.HIT_MOVES)
         first = review.review_pending(_TODAY, _configs())
-        entry = next(a for a in first['adjustments'] if a['dim'] == 'ma_relation')
+        entry = next(a for a in first['adjustments'] if a['dim'] == 'vol_ratio_slope')
         n = entry['samples']
         eff = entry['excess'] * n / (n + review.TUNE_PRIOR_N)
-        cfg = DetectorDimConfig.objects.get(key='ma_relation')
+        cfg = DetectorDimConfig.objects.get(key='vol_ratio_slope')
         expected_w = round(min(max(math.exp(review.WEIGHT_GAIN * eff), 0.5), 2.0), 3)
         self.assertEqual(cfg.weight, expected_w)
         expected_np = round(min(max(0.8 - 0.5 * eff, 0.6), 0.95), 3)
         self.assertEqual(cfg.params['noise_pct'], expected_np)
+        # 价格类维度的 z 区间（#1）不在线调参：ma_relation 只调权重，不被塞回 noise_pct
+        ma = DetectorDimConfig.objects.get(key='ma_relation')
+        self.assertEqual(ma.weight, expected_w)
+        self.assertNotIn('noise_pct', ma.params or {})
         # 同样的证据再评估一次：目标值不变，不会被一路推到边界
         again, _stats = review.tune_dims(_TODAY, _configs())
         self.assertEqual(again, [])
@@ -419,3 +423,68 @@ class ReviewApiTests(TestCase):
             data = self.client.get(reverse('detector-config')).json()
         self.assertTrue(data['review_rules']['auto_tune'])
         self.assertNotIn('已关闭', data['meta']['disclaimer'])
+
+
+@patch('stocks.detector.review._benchmark_bars', lambda cache: {})
+@patch('stocks.trading_calendar.is_trading_day', _always_trading)
+class SegmentHeadAndAttributionTests(TestCase):
+    """集成：段首不再用 cycles == 2，归因只算 counted 的计票维度（calm-vote #2/#4）。"""
+
+    HIT_MOVES = [0.5, 1.2, 2.2, 2.5, 2.8]
+
+    def setUp(self):
+        self.seed = _seeder()
+
+    def _dims(self):
+        # 价格组代表 ma_relation 计票；同组 vol_compress 同向但未当代表；量能 up 是强度确认
+        return {
+            'ma_relation': {'name': '均线', 'value': 40, 'direction': 'up', 'weight': 1.0,
+                            'available': True, 'note': '', 'counted': True},
+            'vol_compress': {'name': '压缩', 'value': 30, 'direction': 'up', 'weight': 1.0,
+                             'available': True, 'note': '', 'counted': False},
+            'vol_ratio_slope': {'name': '量比斜率', 'value': 30, 'direction': 'up', 'weight': 1.0,
+                                'available': True, 'note': '', 'counted': True},
+        }
+
+    def test_first_signal_with_streak_cycles_is_segment_head(self):
+        # 状态回看让首个信号日即 cycles=4：旧口径 cycles == 2 会把整段漏掉
+        for i in range(review.MIN_ADJ_SAMPLES):
+            code = f'6201{i:02d}'
+            base_date = _TODAY - timedelta(days=10 + 2 * i)
+            self.seed._make_stock_with_moves(code, self.HIT_MOVES, base_date=base_date)
+            self.seed._make_signal(code, base_date, dims=self._dims(), cycles=4)
+        review.review_pending(_TODAY, _configs())
+        samples = review._dim_samples(_TODAY)
+        self.assertEqual(len(samples['ma_relation']), review.MIN_ADJ_SAMPLES)
+
+    def test_continuation_day_is_not_a_segment_head(self):
+        base_date = _TODAY - timedelta(days=12)
+        self.seed._make_stock_with_moves('620200', self.HIT_MOVES, base_date=base_date)
+        self.seed._make_signal('620200', base_date - timedelta(days=1), dims=self._dims(), cycles=2)
+        head = self.seed._make_signal('620200', base_date, dims=self._dims(), cycles=3)
+        rows = DetectorSignal.objects.filter(pk=head.pk)
+        self.assertEqual(review._segment_heads(rows, _TODAY - timedelta(days=60)), [])
+        # 前一交易日只有 watching（周期 1，不回看）时，当天仍是段首
+        DetectorSignal.objects.filter(trade_date=base_date - timedelta(days=1)).update(cycles=1)
+        self.assertEqual(review._segment_heads(rows, _TODAY - timedelta(days=60)), [head])
+
+    def test_only_counted_dimensions_are_attributed(self):
+        for i in range(review.MIN_ADJ_SAMPLES):
+            code = f'6203{i:02d}'
+            base_date = _TODAY - timedelta(days=10 + 2 * i)
+            self.seed._make_stock_with_moves(code, self.HIT_MOVES, base_date=base_date)
+            self.seed._make_signal(code, base_date, dims=self._dims())
+        review.review_pending(_TODAY, _configs())
+        samples = review._dim_samples(_TODAY)
+        self.assertIn('ma_relation', samples)
+        self.assertIn('vol_ratio_slope', samples)
+        self.assertNotIn('vol_compress', samples)
+
+    def test_calendar_unavailable_falls_back_to_cycles_two(self):
+        base_date = _TODAY - timedelta(days=12)
+        a = self.seed._make_signal('620400', base_date, dims=self._dims(), cycles=2)
+        b = self.seed._make_signal('620401', base_date, dims=self._dims(), cycles=3)
+        rows = DetectorSignal.objects.filter(pk__in=[a.pk, b.pk]).order_by('target_code')
+        with patch('stocks.trading_calendar.is_trading_day', lambda day=None: None):
+            heads = review._segment_heads(rows, _TODAY - timedelta(days=60))
+        self.assertEqual(heads, [a])
