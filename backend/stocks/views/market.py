@@ -93,7 +93,8 @@ def market_trend(request):
             return get_market_trend(days=days)
         window = resolve_period(
             params.get, list(_TREND_PERIOD_DAYS) + ['ytd'], default='3m',
-            max_days=1100, custom_default_days=90, messages=_TREND_PERIOD_MESSAGES,
+            max_days=1100, allow_future_end=False, custom_default_days=90,
+            messages=_TREND_PERIOD_MESSAGES,
         )
         if window.preset == 'custom':
             return get_market_trend(start=window.start.isoformat(), end=window.end.isoformat())

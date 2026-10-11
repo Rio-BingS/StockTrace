@@ -606,6 +606,16 @@ class TrendPeriodEndpointTests(SimpleTestCase):
         response = self.client.get('/api/market/trend/?period=ytd')
         self.assertEqual(response.status_code, 200)
 
+    @patch('django.utils.timezone.localdate', return_value=date(2026, 9, 4))
+    @patch('stocks.views.market.get_market_trend', return_value={'series': []})
+    def test_trend_custom_end_after_today_returns_400(self, trend_mock, _today):
+        response = self.client.get('/api/market/trend/?start=2026-08-01&end=2026-09-05')
+        self.assertEqual(response.status_code, 400)
+        self.assertEqual(response.json()['detail'], 'end 不能晚于今天')
+        trend_mock.assert_not_called()
+        ok = self.client.get('/api/market/trend/?start=2026-08-01&end=2026-09-04')
+        self.assertEqual(ok.status_code, 200)
+
 
 class StockEndpointDbTests(TestCase):
     """带数据库的日线/分钟端点行为。"""
