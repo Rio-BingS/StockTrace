@@ -30,7 +30,6 @@ use([
 
 const props = defineProps({
   data: { type: Array, default: () => [] },
-  code: { type: String, default: '' },
 })
 
 const emit = defineEmits(['date-click'])
@@ -55,13 +54,6 @@ const chartOption = computed(() => {
     Number(d.high_price),
   ])
   const volumes = sorted.map(d => d.volume || 0)
-
-  // 找最高最低点索引
-  let maxIdx = 0, minIdx = 0
-  sorted.forEach((d, i) => {
-    if (Number(d.high_price) > Number(sorted[maxIdx].high_price)) maxIdx = i
-    if (Number(d.low_price) < Number(sorted[minIdx].low_price)) minIdx = i
-  })
 
   return {
     backgroundColor: '#16213e',
@@ -169,10 +161,12 @@ const chartOption = computed(() => {
           borderColor: '#e94560', // 阳线边框
           borderColor0: '#00c853', // 阴线边框
         },
+        // 蜡烛图默认按收盘价维度取极值，需显式指定最高/最低价维度（FEF-12）
         markPoint: {
           data: [
             {
               type: 'max',
+              valueDim: 'highest',
               name: '最高',
               symbol: 'pin',
               symbolSize: 40,
@@ -181,6 +175,7 @@ const chartOption = computed(() => {
             },
             {
               type: 'min',
+              valueDim: 'lowest',
               name: '最低',
               symbol: 'pin',
               symbolSize: 40,

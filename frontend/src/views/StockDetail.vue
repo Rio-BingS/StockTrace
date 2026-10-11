@@ -218,7 +218,6 @@ watch(code, (c) => {
       </div>
       <KlineChart
         :data="dailyData"
-        :code="code || stockId"
         @date-click="onKlineDateClick"
       />
     </div>
