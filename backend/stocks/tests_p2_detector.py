@@ -124,3 +124,163 @@ class SignValueBoundaryTests(TestCase):
             self.assertIsNone(direction, params)
             self.assertIsNone(value, params)
             self.assertIn('参数非法', note)
+
+
+def _random_walk_ctx(rng, n=70, sigma=0.015):
+    """随机游走个股序列：日收益 N(0, sigma)，振幅 1%~3%，成交量对数正态 σ=0.3。"""
+    import math
+
+    p, closes, highs, lows, vols = 10.0, [], [], [], []
+    for _ in range(n):
+        pc = p
+        p *= 1 + rng.gauss(0, sigma)
+        closes.append(p)
+        amp = abs(rng.gauss(0, 0.012)) + 0.01
+        highs.append(max(p, pc) * (1 + amp / 2))
+        lows.append(min(p, pc) * (1 - amp / 2))
+        vols.append(1e6 * math.exp(rng.gauss(0, 0.3)))
+    ctx = _price_ctx(vols, closes, highs, lows)
+    ctx['dates'] = [str(i) for i in range(n)]
+    ctx['as_of'] = ctx['dates'][-1]
+    return ctx
+
+
+def _random_sector_ctx(rng, n=45):
+    dates = [str(i) for i in range(n)]
+    return {'kind': 'industry', 'code': 'x', 'name': 'x', 'dates': dates,
+            'net': [rng.gauss(0, 3e8) for _ in range(n)],
+            'change_pct': [rng.gauss(0, 1.2) for _ in range(n)], 'as_of': dates[-1]}
+
+
+class RandomWalkNoiseTests(TestCase):
+    """ALG-04：纯噪声（随机游走）下，默认参数的信号率必须 < 5%。
+
+    修复前用同样的模拟：平静个股约 31%、平静板块约 37% 出「≥2 维同向」信号。
+    固定随机种子，结果确定，不会抖动。
+    """
+
+    def _rates(self, kind, gen, n, overrides=None):
+        import random
+
+        from .detector import registry
+
+        rng = random.Random(7)
+        specs = [s for s in registry.DIMENSIONS if s['enabled'] and kind in s['targets']]
+        fired = fired_calm = calm_n = 0
+        for _ in range(n):
+            ctx = gen(rng)
+            up = down = 0
+            for spec in specs:
+                params = {**spec['defaults'], **(overrides or {})}
+                res = spec['evaluate'](ctx, params)
+                up += res['direction'] == 'up'
+                down += res['direction'] == 'down'
+            fire = (up >= 2 and down == 0) or (down >= 2 and up == 0)
+            fired += fire
+            ok, _meta = calm.is_calm(ctx)
+            if ok:
+                calm_n += 1
+                fired_calm += fire
+        return fired / n, (fired_calm / calm_n if calm_n else 0.0), calm_n
+
+    def test_stock_noise_signal_rate_below_5pct_across_volatility(self):
+        for sigma in (0.008, 0.015, 0.025):
+            overall, given_calm, calm_n = self._rates(
+                'stock', lambda r, s=sigma: _random_walk_ctx(r, sigma=s), 800)
+            self.assertGreater(calm_n, 50, sigma)
+            self.assertLess(overall, 0.05, sigma)
+            self.assertLess(given_calm, 0.05, sigma)
+
+    def test_sector_noise_signal_rate_below_5pct(self):
+        overall, given_calm, calm_n = self._rates('industry', _random_sector_ctx, 1500)
+        self.assertGreater(calm_n, 100)
+        self.assertLess(overall, 0.05)
+        self.assertLess(given_calm, 0.05)
+
+    def test_without_noise_gate_the_simulation_does_catch_noise(self):
+        # 守护测试本身的灵敏度：关掉噪声闸门（旧口径）时模拟必须能测出大量噪声信号
+        overall, _given_calm, _n = self._rates(
+            'stock', _random_walk_ctx, 300, overrides={'noise_pct': 0})
+        self.assertGreater(overall, 0.2)
+
+
+class VolCompressTests(TestCase):
+    """ALG-04/DET-18：压缩按自身历史分位判定，宽度用涨跌幅而不是振幅。"""
+
+    def _ctx(self, pcts):
+        n = len(pcts)
+        closes, p = [], 10.0
+        for x in pcts:
+            p *= 1 + x / 100
+            closes.append(p)
+        return _price_ctx([1e6] * n, closes)
+
+    def test_single_point_narrowing_is_not_compression(self):
+        from .detector.dimensions import eval_vol_compress
+        from .detector.registry import DIMENSION_MAP
+
+        # 历史窗口宽度都很低，末段只比 3 天前略窄：旧口径（widths[-1] < widths[-4]）判压缩
+        base = [0.05, -0.05] * 20
+        tail = [1.0, -1.0, 1.2, -0.8, 1.1, 0.9, -0.9, 1.0, -1.0, 1.0]
+        res = eval_vol_compress(self._ctx(base + tail), dict(DIMENSION_MAP['vol_compress']['defaults']))
+        self.assertTrue(res['available'], res)
+        self.assertIsNone(res['direction'])
+        self.assertIn('未压缩', res['note'])
+
+    def test_amplitude_does_not_drive_compression(self):
+        from .detector.dimensions import eval_vol_compress
+        from .detector.registry import DIMENSION_MAP
+
+        pcts = [0.8, -0.7, 0.9, -1.0, 0.6] * 8 + [0.3, 0.35, 0.32, 0.36, 0.34]
+        ctx = self._ctx(pcts)
+        params = dict(DIMENSION_MAP['vol_compress']['defaults'])
+        first = eval_vol_compress(ctx, params)
+        # 振幅随便改，结论不变（宽度只看涨跌幅）
+        ctx['high'] = [c * 1.05 for c in ctx['close']]
+        second = eval_vol_compress(ctx, params)
+        self.assertEqual(first['direction'], 'up', first)
+        self.assertEqual(first['direction'], second['direction'])
+
+    def test_compressed_but_insignificant_drift_does_not_vote(self):
+        from .detector.dimensions import eval_vol_compress
+        from .detector.registry import DIMENSION_MAP
+
+        pcts = [0.8, -0.7, 0.9, -1.0, 0.6] * 8 + [0.3, -0.1, 0.25, -0.05, 0.2]
+        res = eval_vol_compress(self._ctx(pcts), dict(DIMENSION_MAP['vol_compress']['defaults']))
+        self.assertIsNone(res['direction'], res)
+        self.assertIn('不显著', res['note'])
+
+
+class NoiseGateTests(TestCase):
+    """ALG-04：噪声闸门与 OLS 斜率的基本行为。"""
+
+    def test_ols_slope(self):
+        from .detector.dimensions import _ols_slope
+
+        self.assertAlmostEqual(_ols_slope([1.0, 2.0, 3.0, 4.0]), 1.0)
+        # 末端单日尖峰：OLS 只按权重计入，远小于两端点差分 (5-1)/3
+        self.assertLess(_ols_slope([1.0, 1.0, 1.0, 5.0]), (5.0 - 1.0) / 3)
+        self.assertIsNone(_ols_slope([1.0, None, 2.0]))
+
+    def test_gate_blocks_raw_inside_own_noise_band(self):
+        from .detector.dimensions import _gated
+
+        params = {'mild': 1.0, 'min': 0.01, 'max': 5.0,
+                  'noise_pct': 0.8, 'noise_window': 60, 'noise_min': 15}
+        history = [0.5, -0.5] * 10
+        _v, direction, note = _gated(0.3, history, params)
+        self.assertIsNone(direction)
+        self.assertIn('分位', note)
+        _v, direction, _n = _gated(0.9, history, params)
+        self.assertEqual(direction, 'up')
+
+    def test_gate_requires_enough_history_and_can_be_disabled(self):
+        from .detector.dimensions import _gated
+
+        params = {'mild': 1.0, 'min': 0.01, 'max': 5.0,
+                  'noise_pct': 0.8, 'noise_window': 60, 'noise_min': 15}
+        _v, direction, note = _gated(0.9, [0.1] * 5, params)
+        self.assertIsNone(direction)
+        self.assertIn('样本不足', note)
+        _v, direction, _n = _gated(0.9, [0.1] * 5, {**params, 'noise_pct': 0})
+        self.assertEqual(direction, 'up')

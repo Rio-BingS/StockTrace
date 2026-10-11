@@ -13,12 +13,24 @@ params 约定：
 - mild  温和带上限的归一化基准（value = raw/mild×50）；
 - max   突变上限：超过它说明已不是「早期迹象」，如实不投票；
 - 迭代优化（review.py）只微调 min（灵敏度）与权重，min 的调整边界是
-  [0.5×, 2×] 默认值，权重边界 [0.5, 2.0]，防止自动调参失控。
+  [0.5×, 2×] 默认值，权重边界 [0.5, 2.0]，防止自动调参失控；
+- noise_pct / noise_window / noise_min  噪声闸门（ALG-04）：|原始漂移| 还须
+  超过自身近 noise_window 个历史漂移绝对值的 noise_pct 分位才投票，历史不足
+  noise_min 个不投票。min 是跨品种绝对常数，单靠它在随机游走上也会大量出
+  信号；噪声闸门不参与自动调参，noise_pct 置 0 即关闭；
+- compress_pct / drift_z  波动率压缩专用：当前宽度 ≤ 自身历史 compress_pct
+  分位才算压缩，压缩期漂移的 t 值 ≥ drift_z 才投票（2.13≈自由度 4 的双侧 10%）。
+
+校准依据：backend/stocks/tests_p2_detector.py 的随机游走回归测试——默认参数
+下平静对象的噪声信号率须 < 5%（修复前约 31%）。
 """
 
 from __future__ import annotations
 
 from . import dimensions as _dims
+
+# 噪声闸门默认值（各价量维度共用，见模块 docstring）
+_NOISE = {'noise_pct': 0.8, 'noise_window': 60, 'noise_min': 15}
 
 DIMENSIONS = [
     {
@@ -27,7 +39,7 @@ DIMENSIONS = [
         'targets': ('index', 'industry', 'concept'),
         'enabled': True,
         'note': '指数为本站大盘快照超大单+大单合计，板块为主力净额；均来自收盘后日度快照积累。',
-        'defaults': {'window': 15, 'mean_days': 6, 'mild': 0.5, 'min': 0.08, 'max': 2.0},
+        'defaults': {'window': 15, 'mean_days': 6, 'mild': 0.5, 'min': 0.08, 'max': 2.0, **_NOISE},
         'evaluate': _dims.eval_big_order_net,
     },
     {
@@ -35,8 +47,8 @@ DIMENSIONS = [
         'name': '量比斜率',
         'targets': ('index', 'stock'),
         'enabled': True,
-        'note': 'RVOL=当日量/前10日均量，取其3日日均漂移；平静期量比温和抬升是资金回流的最早形态。',
-        'defaults': {'window': 10, 'slope_days': 3, 'mild': 0.15, 'min': 0.02, 'max': 0.5},
+        'note': 'RVOL=当日量/前10日均量，取近4点最小二乘斜率；平静期量比温和抬升是资金回流的最早形态。',
+        'defaults': {'window': 10, 'slope_days': 3, 'mild': 0.15, 'min': 0.02, 'max': 0.5, **_NOISE},
         'evaluate': _dims.eval_vol_ratio_slope,
     },
     {
@@ -44,8 +56,13 @@ DIMENSIONS = [
         'name': '波动率压缩',
         'targets': ('index', 'stock', 'industry', 'concept'),
         'enabled': True,
-        'note': '近5日振幅（板块为涨跌幅）标准差收窄，方向取压缩期内价格漂移；未压缩不投票。',
-        'defaults': {'window': 5, 'mild': 2.0, 'min': 0.2, 'max': 6.0},
+        'note': (
+            '近5日涨跌幅标准差 ≤ 自身历史 25 分位才算压缩，方向取压缩期内价格漂移且须'
+            '相对窗口波动显著（t≥2.13）；未压缩不投票。'
+        ),
+        'defaults': {'window': 5, 'mild': 2.0, 'min': 0.2, 'max': 6.0,
+                     'compress_pct': 0.25, 'drift_z': 2.13,
+                     'noise_window': _NOISE['noise_window'], 'noise_min': _NOISE['noise_min']},
         'evaluate': _dims.eval_vol_compress,
     },
     {
@@ -58,7 +75,7 @@ DIMENSIONS = [
             '指数无股本概念，为活跃度代理。分位从低位缓升（不热）/高位缓降（不死）才投票。'
         ),
         'defaults': {'window': 60, 'delta_days': 5, 'mild': 30.0, 'min': 8.0, 'max': 60.0,
-                     'pos_cap': 70.0, 'pos_floor': 30.0},
+                     'pos_cap': 70.0, 'pos_floor': 30.0, **_NOISE},
         'evaluate': _dims.eval_turnover_pct,
     },
     {
@@ -68,9 +85,9 @@ DIMENSIONS = [
         'enabled': True,
         'note': (
             '仅融资余额口径（北向自 2024-08 停止逐日披露，如实缺席）；'
-            '数据为交易所官方 T+1 披露、经本站日度快照积累，上线初期约需一周凑齐窗口。'
+            '数据为交易所官方 T+1 披露、经本站日度快照积累；噪声闸门需约 21 个交易日的积累才投票。'
         ),
-        'defaults': {'mild': 0.5, 'min': 0.06, 'max': 2.0},
+        'defaults': {'mild': 0.5, 'min': 0.06, 'max': 2.0, **_NOISE},
         'evaluate': _dims.eval_margin_north,
     },
     {
@@ -83,7 +100,7 @@ DIMENSIONS = [
             '距均线过远（趋势已展开）如实不投票。'
         ),
         'defaults': {'ma': 20, 'slope_days': 3, 'mild': 0.6, 'min': 0.08, 'max': 3.0,
-                     'max_dist': 4.0},
+                     'max_dist': 4.0, **_NOISE},
         'evaluate': _dims.eval_ma_relation,
     },
     {
