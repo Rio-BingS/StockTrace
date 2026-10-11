@@ -1,7 +1,7 @@
 <script setup>
 // 探测器一级页面：信号列表（可按严重程度筛选）+ 信号详情（维度曲线）+ 板块微变热力图。
 // 数据来自本站日度扫描（每交易日 17:15 自动执行），页面只读，不触发扫描。
-import { reactive, ref, onMounted, onUnmounted } from 'vue'
+import { computed, reactive, ref, onMounted, onUnmounted } from 'vue'
 import MarketDataStatus from '../components/MarketDataStatus.vue'
 import DetectorSignalDetail from '../components/DetectorSignalDetail.vue'
 import DetectorHeatmap from '../components/DetectorHeatmap.vue'
@@ -11,6 +11,13 @@ import { createRequestGuard } from '../utils/requestGuard.js'
 import { onActivateKey } from '../utils/a11y.js'
 import { toastError } from '../stores/feedback.js'
 import { SEVERITY_LABEL, STATUS_LABEL } from '../constants/labels.js'
+import {
+  baseText,
+  fmtChanges,
+  fmtRate,
+  runReviewCells,
+  TUNE_SOURCE_LABEL,
+} from '../utils/detectorReview.js'
 
 const loading = ref(false),
   error = ref('')
@@ -55,6 +62,9 @@ const showConfig = ref(false)
 const configLoading = ref(false)
 
 const selectedSignalId = ref(null)
+
+// 最近一次扫描的复盘四件套；旧记录缺字段时显示「-」
+const latestReview = computed(() => runReviewCells(data.value?.latest_run))
 
 async function load() {
   loading.value = true
@@ -193,11 +203,18 @@ onUnmounted(() => {
       <div>
         <label>维持中(周期≥2)</label><b class="hl">{{ data.latest_run.signals_sustained }}</b>
       </div>
-      <div>
-        <label>5日回看命中率</label
-        ><b>{{
-          data.latest_run.hit_rate != null ? (data.latest_run.hit_rate * 100).toFixed(0) + '%' : '-'
-        }}</b>
+      <!-- 命中率必须和基线一起看（#7）：零假设下绝对命中率本身就有约 20% -->
+      <div :title="'本次回看 ' + latestReview.reviewed + ' 条维持信号'">
+        <label>5日回看命中</label><b>{{ latestReview.hit }}</b>
+      </div>
+      <div title="同标的历史任意起点按同规则的兑现率">
+        <label>基线</label><b>{{ latestReview.baseline }}</b>
+      </div>
+      <div title="命中率 − 基线（百分点）">
+        <label>超额</label><b :class="latestReview.excessClass">{{ latestReview.excess }}</b>
+      </div>
+      <div title="同日同方向同类对象（板块/指数/自选股）的信号计为一个样本">
+        <label>独立样本</label><b>{{ latestReview.samples }}</b>
       </div>
     </div>
     <div v-else-if="data && !loadingSignals" class="empty-hint">
@@ -352,6 +369,7 @@ onUnmounted(() => {
                 <th>适用对象</th>
                 <th>权重</th>
                 <th>投票门槛(min)</th>
+                <th>噪声分位</th>
                 <th>状态</th>
                 <th>口径说明</th>
               </tr>
@@ -372,6 +390,7 @@ onUnmounted(() => {
                 </td>
                 <td>{{ dim.weight?.toFixed?.(2) }}</td>
                 <td>{{ dim.params?.min ?? '-' }}</td>
+                <td>{{ dim.params?.noise_pct ?? '-' }}</td>
                 <td>
                   <span v-if="dim.enabled" class="status active">启用</span>
                   <span v-else class="status missed" :title="dim.disabled_reason">停用</span>
@@ -382,14 +401,34 @@ onUnmounted(() => {
           </table>
         </div>
         <p class="hint">
-          迭代规则：每交易日回看
+          回看规则：每交易日回看
           {{ config.review_rules.lookback_days }}
-          个交易日前的维持信号（后续交易日凑齐才判定；以次日开盘为基期， 方向上先达到
-          {{ config.review_rules.hit_sigma_k }}×σ20 且不利波动未先触及同等幅度记为兑现，σ 不可得时按
-          {{ config.review_rules.hit_pct }}%）， 命中率与同标的历史基线比较，明显跑赢/跑输的维度权重
-          ×1.05 / ÷1.05（边界 [{{ config.review_rules.weight_bounds[0] }},
-          {{ config.review_rules.weight_bounds[1] }}]），
-          投票门槛有界微调；每次调整都记录在扫描日志里。
+          个交易日前的维持信号，后续交易日凑齐才判定。基期：指数/自选股为{{
+            baseText(config.review_rules.base, 'stock')
+          }}，板块（快照没有开盘价）为{{ baseText(config.review_rules.base, 'industry') }}、
+          因此板块晚一个交易日判定。其后 {{ config.review_rules.lookback_days }} 个收盘内先达到
+          {{ config.review_rules.hit_sigma_k }}×σ20×√{{
+            config.review_rules.lookback_days
+          }}
+          且不利波动未先触及同等幅度记为兑现（σ 不可得时按 σ={{ config.review_rules.hit_pct }}%）；
+          同时记录相对沪深300 的 {{ config.review_rules.lookback_days }} 日超额收益。
+          命中率与同标的历史基线比较，同日同类信号按一个独立样本计。
+        </p>
+        <p class="hint">
+          <template v-if="config.review_rules.auto_tune">
+            自动调参已开启：近 {{ config.review_rules.tune_window_days }} 天累计的独立样本不少于
+            {{ config.review_rules.min_samples }} 个、且命中率显著（后验概率 ≥
+            {{
+              fmtRate(config.review_rules.confidence)
+            }}）跑赢/跑输基线时，按收缩后的超额有界调整权重（[{{
+              config.review_rules.weight_bounds[0]
+            }}, {{ config.review_rules.weight_bounds[1] }}]）与噪声闸门分位。
+          </template>
+          <template v-else>
+            自动调参已关闭（默认）：维度参数固定，复盘只统计；显著的结论记为「演练」流水供人工判断。
+          </template>
+          口径于 v{{ config.review_rules.version }} 调整（阈值 ×√5、板块改 T+1
+          收盘基期），此前的命中率与之后不可直接比较。
         </p>
         <div v-if="config.runs.length" class="table-wrap">
           <table>
@@ -400,7 +439,10 @@ onUnmounted(() => {
                 <th>扫描/平静</th>
                 <th>新增/维持</th>
                 <th>回看</th>
-                <th>命中率</th>
+                <th>命中</th>
+                <th>基线</th>
+                <th>超额</th>
+                <th>独立样本</th>
                 <th>备注</th>
               </tr>
             </thead>
@@ -415,8 +457,38 @@ onUnmounted(() => {
                 <td>{{ run.targets_scanned }} / {{ run.calm_count }}</td>
                 <td>{{ run.signals_new }} / {{ run.signals_sustained }}</td>
                 <td>{{ run.reviewed_count }}</td>
-                <td>{{ run.hit_rate != null ? (run.hit_rate * 100).toFixed(0) + '%' : '-' }}</td>
+                <td>{{ runReviewCells(run).hit }}</td>
+                <td>{{ runReviewCells(run).baseline }}</td>
+                <td :class="runReviewCells(run).excessClass">{{ runReviewCells(run).excess }}</td>
+                <td>{{ runReviewCells(run).samples }}</td>
                 <td class="note-cell">{{ run.message || '-' }}</td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+        <!-- 调参流水（#16）：独立表永久保留，不随扫描记录清理 -->
+        <div v-if="config.tune_log?.length" class="table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th>扫描日</th>
+                <th>维度</th>
+                <th>状态</th>
+                <th>参数变更</th>
+                <th>依据</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr v-for="(log, i) in config.tune_log" :key="log.trade_date + log.dim_key + i">
+                <td>{{ log.trade_date }}</td>
+                <td>{{ log.dim_key }}</td>
+                <td>
+                  <span class="status" :class="log.applied ? 'active' : 'watching'">{{
+                    TUNE_SOURCE_LABEL[log.source] || log.source
+                  }}</span>
+                </td>
+                <td>{{ fmtChanges(log.changes) }}</td>
+                <td class="note-cell">{{ log.reason || '-' }}</td>
               </tr>
             </tbody>
           </table>
@@ -492,7 +564,7 @@ onUnmounted(() => {
 
 .run-grid {
   display: grid;
-  grid-template-columns: repeat(5, 1fr);
+  grid-template-columns: repeat(8, 1fr);
   gap: 9px;
   margin: 10px 0;
 }
@@ -698,6 +770,11 @@ tbody tr.selected {
   max-width: 420px;
 }
 
+@media (max-width: 1280px) {
+  .run-grid {
+    grid-template-columns: repeat(4, 1fr);
+  }
+}
 @media (max-width: 1000px) {
   .run-grid {
     grid-template-columns: repeat(2, 1fr);
