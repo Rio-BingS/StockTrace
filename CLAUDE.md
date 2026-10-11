@@ -57,7 +57,7 @@ npm run lint && npm run build   # eslint（vue essential 档）+ 产物到 dist/
 | 端点 | 区间能力 | 数据深度/边界 |
 |---|---|---|
 | `market/trend/` | period（交易日 5/22/66/130/260）+ 旧 `days=` + 自定义≤3年 | 新浪日线，深度足够 |
-| `market/sectors/?board=&period=` | `day/5d/10d/20d`（**无 3d**） | 当日=同花顺自实现抓取（东财板块路径对境外 502）；5d/10d 快照优先、东财原生排行兜底；20d 仅快照供数 |
+| `market/sectors/?board=&period=` | `day/5d/10d/20d`（**无 3d**） | 当日=同花顺自实现抓取（东财板块路径对境外 502，翻页按板块名稳定排序）；5d/10d/20d 只由日度快照累加供数，窗口不齐如实不可用 |
 | `market/national-etf/flow/?period=` 或 start/end | `1d/3d/5d` 按交易日 + `1w~6m/ytd` 自然日 + 自定义 | push2his 约 120 交易日（境外被掐时 push2delay 兜底仅当日一根），超出标 `coverage_start`+`truncated` |
 | `market/market-flow/` | 全档 + 自定义 | 同上（secid 1.000001 大盘；另有日度快照兜底） |
 | `market/northbound/` | 全档 + 自定义 | 北向净买额历史切片 |
