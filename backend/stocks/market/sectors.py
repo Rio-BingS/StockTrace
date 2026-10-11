@@ -4,7 +4,10 @@ from __future__ import annotations
 
 import logging
 import re
+import threading
+import time
 from io import StringIO
+from pathlib import Path
 
 import akshare as ak
 import pandas as pd
@@ -144,20 +147,41 @@ _THS_COLUMNS = {
 _THS_MAX_PAGES = 50
 
 
-def _ths_token_headers(referer):
-    """同花顺 hexin-v 反爬 token：复用 akshare 自带 ths.js 生成。"""
-    import py_mini_racer
-    from akshare.stock_feature.stock_fund_flow import _get_file_content_ths
+# ths.js 已 vendoring 到仓库（DAT-17）：不再依赖 akshare 私有函数 _get_file_content_ths，
+# 来源与更新方式见 vendor/README.md
+_THS_JS_PATH = Path(__file__).resolve().parent / 'vendor' / 'ths.js'
+# hexin-v 按分钟复用：每次都起 MiniRacer 执行 40KB 脚本，在 1H2G 上开销不小
+_THS_TOKEN_TTL = 60
+_ths_token = {'v': None, 'at': 0.0}
+_ths_token_lock = threading.Lock()
+# 分页请求间隔（秒）：连续翻 50 页容易触发同花顺反爬封禁
+_THS_PAGE_INTERVAL = 0.5
 
-    js_code = py_mini_racer.MiniRacer()
-    js_code.eval(_get_file_content_ths('ths.js'))
+
+def _ths_hexin_v():
+    """生成（或复用一分钟内的）同花顺 hexin-v token。"""
+    with _ths_token_lock:
+        now = time.time()
+        if _ths_token['v'] and now - _ths_token['at'] < _THS_TOKEN_TTL:
+            return _ths_token['v']
+        import py_mini_racer
+
+        js_code = py_mini_racer.MiniRacer()
+        js_code.eval(_THS_JS_PATH.read_text(encoding='utf-8'))
+        _ths_token['v'] = js_code.call('v')
+        _ths_token['at'] = now
+        return _ths_token['v']
+
+
+def _ths_token_headers(referer):
+    """同花顺请求头（含 hexin-v 反爬 token）。"""
     return {
         'Accept': 'text/html, */*; q=0.01',
         'Accept-Encoding': 'gzip, deflate',
         'Accept-Language': 'zh-CN,zh;q=0.9,en;q=0.8',
         'Cache-Control': 'no-cache',
         'Connection': 'keep-alive',
-        'hexin-v': js_code.call('v'),
+        'hexin-v': _ths_hexin_v(),
         'Referer': referer,
         'User-Agent': (
             'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 '
@@ -196,6 +220,7 @@ def _ths_fund_flow(board):
     m = re.search(r'class="page_info"[^>]*>\s*\d+/(\d+)', html1)
     page_num = min(int(m.group(1)) if m else 1, _THS_MAX_PAGES)
     for page in range(2, page_num + 1):
+        time.sleep(_THS_PAGE_INTERVAL)
         frames.append(_parse(_page_html(page), page))
     df = pd.concat(frames, ignore_index=True)
     if '序号' in df.columns:

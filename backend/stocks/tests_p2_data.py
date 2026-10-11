@@ -113,3 +113,44 @@ class InstitutionQuarterTests(SimpleTestCase):
         dates = [c.kwargs['date'] for c in chg.call_args_list]
         self.assertEqual(dates[0], '20250930')
         self.assertTrue(all(d <= '20250930' for d in dates))
+
+
+class ThsVendoredTokenTests(SimpleTestCase):
+    """DAT-17：hexin-v 由仓库内 ths.js 生成并按分钟复用；分页之间有间隔。"""
+
+    def test_token_from_vendored_js_and_reused(self):
+        from .market import sectors
+
+        self.assertTrue(sectors._THS_JS_PATH.is_file())
+        with patch('py_mini_racer.MiniRacer', wraps=__import__('py_mini_racer').MiniRacer) as racer:
+            first = sectors._ths_hexin_v()
+            second = sectors._ths_hexin_v()
+        self.assertTrue(first)
+        self.assertEqual(first, second)
+        self.assertEqual(racer.call_count, 1)
+
+    def test_no_private_akshare_import(self):
+        import inspect
+
+        from .market import sectors
+
+        self.assertNotIn('akshare.stock_feature', inspect.getsource(sectors))
+
+    def test_sleep_between_pages(self):
+        from .market import sectors
+
+        def html(page_info):
+            cells = ['1', '半导体', '1000', '4.36%', '30', '14', '16.02', '50', '某股', '10.05%', '9.9']
+            row = '<tr>' + ''.join(f'<td>{c}</td>' for c in cells) + '</tr>'
+            return (f'<html><body><span class="page_info">{page_info}</span>'
+                    f'<table>{row}</table></body></html>')
+
+        pages = [html('1/3'), html('2/3'), html('3/3')]
+        resp = lambda text: type('R', (), {'text': text, 'raise_for_status': lambda self: None})()  # noqa: E731
+        with patch('stocks.market.sectors._ths_token_headers', return_value={}), \
+                patch('stocks.market.sectors.requests.get', side_effect=lambda *a, **k: resp(pages.pop(0))), \
+                patch('stocks.market.sectors.time.sleep') as sleep:
+            df = sectors._ths_fund_flow('industry')
+        self.assertEqual(len(df), 3)
+        self.assertEqual(sleep.call_count, 2)
+        sleep.assert_called_with(sectors._THS_PAGE_INTERVAL)

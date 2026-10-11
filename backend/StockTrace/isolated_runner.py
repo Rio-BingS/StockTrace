@@ -183,6 +183,7 @@ _CACHE_RESETS = [
     ('stocks.services', '_trade_calendar_expires', ('set', 0)),
     ('stocks.services', '_calendar_fail_until', {'sina': 0, 'baostock': 0}),
     ('stocks.ai.valuation', '_last_fail_at', ('set', 0.0)),
+    ('stocks.market.sectors', '_ths_token', {'v': None, 'at': 0.0}),
 ]
 
 
