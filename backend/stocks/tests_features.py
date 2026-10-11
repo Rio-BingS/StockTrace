@@ -610,7 +610,7 @@ class MultiSourceRouterTests(SimpleTestCase):
 
 
 class SectorSnapshotFirstTests(TestCase):
-    """5d/10d 快照优先：窗口齐全不碰东财；不足时退回东财原生排行。"""
+    """5d/10d 只由快照供数：窗口齐全才可用，不足时如实不可用（DAT-15）。"""
 
     def test_5d_prefers_snapshot_when_window_complete(self):
         for offset in range(5):
@@ -631,40 +631,28 @@ class SectorSnapshotFirstTests(TestCase):
         self.assertEqual(result['items'][0]['net'], 50.0)
         self.assertIn('MarketDailySnapshot', result['meta']['source'])
 
-    def test_5d_falls_back_to_upstream_when_snapshot_insufficient(self):
-        upstream = [
-            {'name': '半导体', 'net': 100.0, 'inflow': None, 'outflow': None,
-             'change_pct': 1.0, 'leader': None, 'leader_pct': None},
-        ]
+    def test_5d_unavailable_when_snapshot_insufficient(self):
+        """快照不足时如实不可用，不再退回东财原生排行（DAT-15：口径固定）。"""
         with patch('stocks.services.is_trading_day', _trading_true), patch(
             'stocks.market.snapshots._expected_latest_date', return_value=_BASE,
         ), patch(
             'stocks.market.sectors.fetch_industry_fund_flow',
-            return_value=upstream,
         ) as fetch_flow:
             result = market.get_sector_rotation(board='industry', period='5d')
 
-        fetch_flow.assert_called_once_with(period='5d')
-        self.assertTrue(result['available'])
-        self.assertIn('stock_sector_fund_flow_rank', result['meta']['source'])
+        fetch_flow.assert_not_called()
+        self.assertFalse(result['available'])
+        self.assertEqual(result['basis'], 'ths_snapshot')
+        self.assertIn('快照积累不足', result['message'])
 
-    def test_5d_upstream_used_for_non_net_sort(self):
-        upstream = [
-            {'name': '半导体', 'net': 100.0, 'inflow': None, 'outflow': None,
-             'change_pct': 1.0, 'leader': None, 'leader_pct': None},
-        ]
-        with patch('stocks.services.is_trading_day', _trading_true), patch(
-            'stocks.market.snapshots._expected_latest_date', return_value=_BASE,
-        ), patch(
+    def test_5d_rejects_non_net_sort(self):
+        with patch(
             'stocks.market.sectors.fetch_industry_fund_flow',
-            return_value=upstream,
-        ) as fetch_flow:
-            result = market.get_sector_rotation(
+        ) as fetch_flow, self.assertRaisesMessage(ValueError, '仅支持按净额排序'):
+            market.get_sector_rotation(
                 board='industry', period='5d', sort='change_pct', order='desc',
             )
-
-        fetch_flow.assert_called_once_with(period='5d')
-        self.assertTrue(result['available'])
+        fetch_flow.assert_not_called()
 
 
 @patch('stocks.market.etf.fetch_holder_structure', new=_no_holders)

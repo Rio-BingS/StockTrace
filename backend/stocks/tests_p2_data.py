@@ -50,3 +50,21 @@ class EtfHistoryAdjustTests(SimpleTestCase):
         self.assertEqual(data['history']['end_date'], '2026-08-31')
         self.assertEqual(data['history']['adjust'], 'none')
         self.assertIn('不复权', data['history']['meta']['disclaimer'])
+
+
+class SectorBasisTests(SimpleTestCase):
+    """DAT-15：当日 meta 如实标注同花顺自抓；多日口径固定为快照。"""
+
+    @patch('stocks.market.sectors.fetch_concept_fund_flow', return_value=[
+        {'name': '算力', 'net': 1.0, 'inflow': None, 'outflow': None, 'change_pct': 1.0,
+         'index_value': None, 'company_count': None, 'leader': None, 'leader_pct': None},
+    ])
+    def test_day_meta_source_is_ths(self, _flow):
+        data = market.get_sector_rotation(board='concept', period='day')
+        self.assertEqual(data['basis'], 'ths_day')
+        self.assertIn('10jqka.com.cn/funds/gnzjl', data['meta']['source'])
+        self.assertNotIn('akshare', data['meta']['source'])
+
+    def test_10d_non_net_sort_rejected(self):
+        with self.assertRaisesMessage(ValueError, '仅支持按净额排序'):
+            market.get_sector_rotation(board='industry', period='10d', sort='leader_pct')

@@ -21,7 +21,8 @@ const data = ref(null)
 const board = ref(route.query.board === 'concept' ? 'concept' : 'industry')
 const period = ref(['5d', '10d', '20d'].includes(route.query.period) ? route.query.period : 'day')
 const q = ref(route.query.q || '')
-const sort = ref(route.query.sort || 'net')
+// 多日轮动只由日度快照供数，只能按净额排序（DAT-15）
+const sort = ref(period.value === 'day' ? route.query.sort || 'net' : 'net')
 const order = ref(route.query.order === 'asc' ? 'asc' : 'desc')
 const page = ref(Number(route.query.page) || 1)
 
@@ -87,6 +88,7 @@ function switchBoard(value) {
 function switchPeriod(value) {
   if (period.value === value) return
   period.value = value
+  if (value !== 'day') sort.value = 'net'
   load(true, { fromUser: true })
 }
 
@@ -96,7 +98,7 @@ function changePage(delta) {
 }
 
 function sortBy(field) {
-  if (period.value === '20d' && field !== 'net') return
+  if (period.value !== 'day' && field !== 'net') return
   if (sort.value === field) order.value = order.value === 'desc' ? 'asc' : 'desc'
   else {
     sort.value = field
@@ -149,7 +151,7 @@ onUnmounted(() => guard.abort())
           @update:model-value="switchPeriod"
         />
         <small class="period-note">
-          {{ period === 'day' ? '当日横截面' : period === '20d' ? '20 日累计（本站日度快照）' : '多日累计（快照优先，东财兜底）' }}
+          {{ period === 'day' ? '当日横截面' : '多日累计（本站日度快照）' }}
           · 1月/3月/1年待日度快照积累后开放
         </small>
       </div>
@@ -159,7 +161,7 @@ onUnmounted(() => guard.abort())
       </form>
     </section>
 
-    <div v-if="period === '20d' && data?.message" class="snapshot-note">{{ data.message }}</div>
+    <div v-if="period !== 'day' && data?.message" class="snapshot-note">{{ data.message }}</div>
 
     <section class='snapshot-strip' aria-label='资金概览'>
       <div><span>板块样本</span><strong>{{ summary.sample_count ?? '-' }}</strong></div>
@@ -184,7 +186,7 @@ onUnmounted(() => guard.abort())
     <section class='table-card'>
       <div class='table-title'>
         <div><h2>{{ board === 'industry' ? '行业' : '概念' }}完整明细</h2><span>{{ pagination.total }} 条</span></div>
-        <small>{{ period === 'day' ? '当日资金快照' : period === '5d' ? '5日累计（快照优先）' : period === '10d' ? '10日累计（快照优先）' : '20日累计（日度快照）' }}</small>
+        <small>{{ period === 'day' ? '当日资金快照' : `${period.replace('d', '')}日累计（日度快照）` }}</small>
       </div>
       <div class='table-wrap'>
         <table>

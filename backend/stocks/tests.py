@@ -119,15 +119,13 @@ class MarketParsingTests(SimpleTestCase):
         self.assertIsNone(items[0]['inflow'])
 
     @patch('stocks.market.sectors.fetch_industry_fund_flow')
-    def test_sector_rotation_supports_native_multi_day_periods(self, fetch_flow):
-        fetch_flow.return_value = [
-            {'name': '半导体', 'net': 100.0, 'inflow': None, 'outflow': None,
-             'change_pct': 1.0, 'leader': None, 'leader_pct': None},
-        ]
+    def test_sector_rotation_multi_day_periods_use_snapshots_only(self, fetch_flow):
+        # 多日口径固定为日度快照（DAT-15），不再调用东财原生 5日排行
         data = market.get_sector_rotation(board='industry', period='5d')
 
-        fetch_flow.assert_called_once_with(period='5d')
+        fetch_flow.assert_not_called()
         self.assertEqual(data['period'], '5d')
+        self.assertEqual(data['basis'], 'ths_snapshot')
         self.assertIn('5d', data['supported_periods'])
 
     @patch('stocks.market.etf_flow.flow_history')

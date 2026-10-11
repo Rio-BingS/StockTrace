@@ -24,11 +24,18 @@ _SECTOR_SORT_FIELDS = {
     'leader_pct': 'leader_pct',
 }
 
-# 5d/10d 有两条路径：日度快照优先（不依赖东财），快照不足时退回东财原生排行；
-# 20d 无上游可退，只能由快照供数。东财 rank/hist 接口（push2）近年限流频繁。
+# 多日（5d/10d/20d）轮动口径固定为「本站日度快照（同花顺当日净额）累加」，窗口
+# 不齐就如实不可用（DAT-15）：不再退回东财原生 5日/10日排行——那是另一套主力
+# 口径和行业名单，随快照积累程度来回切换会让同一页面前后不可比。
+# 下面的东财排行指标只保留给 fetch_*_fund_flow(period=...) 的直接调用方。
 _SECTOR_RANK_INDICATORS = {'5d': '5日', '10d': '10日'}
 _SECTOR_PERIODS = ('day', '5d', '10d', '20d')
 _SNAPSHOT_PERIOD_DAYS = {'5d': 5, '10d': 10, '20d': 20}
+# 当日横截面实际来源：自抓同花顺资金流页面（非 akshare 封装）
+_THS_DAY_SOURCE = {
+    'industry': '同花顺 data.10jqka.com.cn/funds/hyzjl（自抓）',
+    'concept': '同花顺 data.10jqka.com.cn/funds/gnzjl（自抓）',
+}
 
 
 def _parse_sector_rank_table(df):
@@ -316,19 +323,13 @@ def get_sector_rotation(board='industry', period='day', q='', sort='net', order=
     if order not in ('asc', 'desc'):
         raise ValueError('order 必须是 asc 或 desc')
 
-    if period in _SNAPSHOT_PERIOD_DAYS and sort != 'net':
-        # 快照只含净额；5d/10d 可退回东财原生排行（含涨跌幅），20d 无上游可退
-        if period == '20d':
-            raise ValueError('20d 轮动由日度快照供数，仅支持按净额排序')
-
-    if period in _SNAPSHOT_PERIOD_DAYS and sort == 'net':
-        # 快照优先：窗口齐全就不碰东财 push2（限流/502 高发）
-        snapshot_result = _snapshot_rotation(
+    if period in _SNAPSHOT_PERIOD_DAYS:
+        # 多日轮动只由日度快照供数（DAT-15）；快照只含净额，其他排序字段无值可排
+        if sort != 'net':
+            raise ValueError(f'{period} 轮动由日度快照供数，仅支持按净额排序')
+        return _snapshot_rotation(
             board, period, q=q, order=order, page=page, page_size=page_size,
         )
-        if snapshot_result['available'] or period == '20d':
-            return snapshot_result
-        # 5d/10d 快照不足 → 落到下方东财原生排行兜底
 
     if board == 'industry':
         loader = fetch_industry_fund_flow
@@ -342,11 +343,11 @@ def get_sector_rotation(board='industry', period='day', q='', sort='net', order=
     )
     return {
         'updated_at': _now_str(),
+        'basis': 'ths_day',
         'meta': _cache_meta(
             cache_key,
             180,
-            f'akshare.stock_fund_flow_{board}' if period == 'day'
-            else f'akshare.stock_sector_fund_flow_rank({period})',
+            _THS_DAY_SOURCE[board],
             payload['available'],
             disclaimer=payload['methodology'],
         ),
@@ -355,7 +356,7 @@ def get_sector_rotation(board='industry', period='day', q='', sort='net', order=
 
 
 def _snapshot_rotation(board, period, q='', order='desc', page=1, page_size=50):
-    """20 日（等）轮动：由日度快照的当日净额累加得到，窗口不齐则如实不可用。"""
+    """5/10/20 日轮动：由日度快照的当日净额累加得到，窗口不齐则如实不可用。"""
     from . import snapshots
     from ..models import MarketDailySnapshot
 
@@ -387,8 +388,9 @@ def _snapshot_rotation(board, period, q='', order='desc', page=1, page_size=50):
     )
     return {
         'updated_at': _now_str(),
+        'basis': 'ths_snapshot',
         'meta': snapshots.snapshot_meta(
-            f'MarketDailySnapshot({kind}) n={n}',
+            f'MarketDailySnapshot({kind}) n={n}（同花顺当日净额逐日累加）',
             bool(items),
             latest=latest,
             message=message,
