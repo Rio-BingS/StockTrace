@@ -609,3 +609,29 @@ class DetectorRunDeferTests(TestCase):
             for sql in selects:
                 self.assertNotIn('"matrix"', sql, name)
                 self.assertNotIn('"adjustments"', sql, name)
+
+
+@patch('stocks.services.is_trading_day', _always_trading)
+class ConfigSingleSourceTests(TestCase):
+    """ALG-15：配置页展示的回看/平静/分级规则直接来自实现常量，没有副本。"""
+
+    def test_review_rules_follow_review_constants(self):
+        from django.urls import reverse
+
+        from .detector import review
+
+        with patch.object(review, 'MIN_ADJ_SAMPLES', 42), patch.object(review, 'HIT_PCT', 9.9):
+            data = self.client.get(reverse('detector-config')).json()
+        self.assertEqual(data['review_rules']['min_samples'], 42)
+        self.assertEqual(data['review_rules']['hit_pct'], 9.9)
+        self.assertEqual(data['review_rules']['lookback_days'], review.REVIEW_LOOKBACK)
+        self.assertEqual(data['calm_rules']['price'], calm.PRICE_CALM_PARAMS)
+        self.assertIn('severity', data['vote_rules'])
+
+    def test_rvol_window_comes_from_calm_params(self):
+        volumes = [100.0] * 30 + [300.0] * 5 + [100.0] * 15
+        ctx = _price_ctx(volumes, [10.0] * 50)
+        ok, meta = calm.is_calm_price(ctx, {'rvol_window': 20})
+        # 前 20 日均量 = (15*100 + 5*300)/20 = 150 → RVOL = 0.667 < 0.7，不平静
+        self.assertFalse(ok)
+        self.assertIn('RVOL=0.67', meta['reason'])

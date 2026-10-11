@@ -18,6 +18,8 @@ from .dimensions import _mean, _percentile, _std
 
 # 指数/个股：成交量口径的平静判定参数
 PRICE_CALM_PARAMS = {
+    'rvol_window': 10,   # RVOL 基期：前 N 日均量
+    'cv_window': 5,      # 量能波动收窄的「周尺度」窗口
     'rvol_min': 0.7,     # 当日量 / 前10日均量 下限
     'rvol_max': 1.5,     # 上限：超过 1.5 已经「不平静」
     'lookback': 60,      # 自身历史分位的取样窗口
@@ -58,15 +60,15 @@ def is_calm_price(ctx, params=None):
     params = {**PRICE_CALM_PARAMS, **(params or {})}
     volumes, reasons = ctx.get('volume') or [], []
 
-    rvol = _rvol(volumes, len(volumes) - 1)
+    rvol = _rvol(volumes, len(volumes) - 1, params['rvol_window'])
     if rvol is None:
         return False, {'reason': '成交量历史不足，无法判定平静'}
     if not (params['rvol_min'] <= rvol <= params['rvol_max']):
         reasons.append(f'RVOL={rvol:.2f} 超出平静区间')
 
     # 量能波动收窄：近5日量的变异系数(CV) 对比自身滚动 CV 的分位
-    # （5 日窗口是「周尺度波动」的固定口径，与维度参数无关，故不进 params）
-    k = 5
+    # （5 日窗口是「周尺度波动」的固定口径，与维度参数无关，集中在 PRICE_CALM_PARAMS）
+    k = params['cv_window']
     n = len(volumes)
     lookback = params['lookback']
     cvs = []
