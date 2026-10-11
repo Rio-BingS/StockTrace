@@ -13,8 +13,8 @@ import time
 
 import requests
 
-from ..market._cache import _cache_set, _is_fresh, _stale_or
-from ..services import _to_shsz_prefix
+from ..common.codes import exchange_prefix
+from ..market._cache import cache_set, is_fresh, stale_or
 
 logger = logging.getLogger(__name__)
 
@@ -55,7 +55,7 @@ def _parse_row(parts):
 
 
 def _fetch_raw(codes):
-    symbols = ','.join(_to_shsz_prefix(c) for c in codes)
+    symbols = ','.join(exchange_prefix(c) for c in codes)
     url = f'https://qt.gtimg.cn/q={symbols}'
     resp = requests.get(url, timeout=_REQUEST_TIMEOUT)
     resp.raise_for_status()
@@ -89,12 +89,12 @@ def fetch_valuation_map(codes):
     now = time.time()
     entries = {
         code: entry
-        for code, entry in (_stale_or('stock_valuation', None) or {}).items()
+        for code, entry in (stale_or('stock_valuation', None) or {}).items()
         if now - entry['ts'] <= _ENTRY_MAX_AGE  # 久未请求的条目顺手清掉
     }
     fresh = {
         code: entries[code]['row'] for code in wanted
-        if code in entries and _is_fresh(entries[code]['ts'], _VALUATION_TTL)
+        if code in entries and is_fresh(entries[code]['ts'], _VALUATION_TTL)
     }
     missing = [c for c in wanted if c not in fresh]
     if missing and (now - _last_fail_at) > _FAIL_RETRY_SEC:
@@ -103,7 +103,7 @@ def fetch_valuation_map(codes):
             for code, row in fetched.items():
                 entries[code] = {'ts': now, 'row': row}
                 fresh[code] = row
-            _cache_set('stock_valuation', entries)
+            cache_set('stock_valuation', entries)
         except Exception as e:
             logger.warning(f"腾讯估值快照拉取失败（字段按 None 处理）: {e}")
             globals()['_last_fail_at'] = time.time()

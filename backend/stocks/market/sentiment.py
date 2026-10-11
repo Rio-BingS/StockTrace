@@ -7,6 +7,7 @@ from datetime import date as _date, timedelta
 
 import akshare as ak
 import pandas as pd
+from django.utils import timezone
 
 from ._cache import _cache_get, _cache_meta, _cache_set, _stale_or, _to_float
 from ._sources import _safe_df_call
@@ -64,7 +65,7 @@ def fetch_zt_sentiment(ttl=600, force=False):
         if cached is not None:
             return cached
 
-    today = _date.today()
+    today = timezone.localdate()
     chosen = None
     zt_df = dt_df = zb_df = None
     for d in _recent_day_candidates(4, today):
@@ -123,8 +124,8 @@ def _sh_margin_rows():
     """沪市两融近况：{yyyymmdd: {rz, rq, total}}（元 → 亿）。"""
     df = _safe_df_call(
         ak.stock_margin_sse,
-        start_date=(_date.today() - timedelta(days=_MARGIN_LOOKBACK_DAYS)).strftime('%Y%m%d'),
-        end_date=_date.today().strftime('%Y%m%d'),
+        start_date=(timezone.localdate() - timedelta(days=_MARGIN_LOOKBACK_DAYS)).strftime('%Y%m%d'),
+        end_date=timezone.localdate().strftime('%Y%m%d'),
         source_name='sse_margin',
     )
     if df is None or df.empty or '信用交易日期' not in df.columns or '融资融券余额' not in df.columns:

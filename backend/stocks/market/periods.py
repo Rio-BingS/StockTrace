@@ -11,9 +11,11 @@
 
 from __future__ import annotations
 
-from datetime import datetime, timedelta
+from datetime import date, datetime, timedelta
 
 from django.utils import timezone
+
+from ..errors import BadRequest
 
 PERIOD_LABELS = {
     '1d': '当日',
@@ -61,47 +63,73 @@ class PeriodWindow:
         return bool(date_str) and self.start.isoformat() <= date_str[:10] <= self.end.isoformat()
 
 
-def resolve_period(params_get, allowed, default='1m', allow_custom=True,
-                   max_span_days=400, today=None):
-    """从查询参数解析区间窗口；非法输入抛 ValueError（视图层转 400）。
+# 校验失败文案；各接口可经 messages 覆盖为自己的历史文案（前端直接展示 detail）
+DEFAULT_MESSAGES = {
+    'no_custom': '该数据不支持自定义区间',
+    'bad_period': 'period 仅支持 {allowed}',
+    'bad_date': '{key} 格式应为 YYYY-MM-DD',
+    'start_after_end': 'start 不能晚于 end',
+    'future_end': 'end 不能晚于今天',
+    'too_long': '自定义区间最长 {max_days} 天',
+}
 
-    params_get: callable(key, default='')，通常为 request.query_params.get
+
+def resolve_period(params_get, allowed, default='1m', allow_custom=True,
+                   max_span_days=400, today=None, *, max_days=None,
+                   allow_future_end=True, custom_default_days=30, messages=None):
+    """从查询参数解析区间窗口；非法输入抛 BadRequest（视图层转 400）。
+
+    params_get: callable(key)，通常为 request.query_params.get
+    max_days: 自定义区间最大跨度（天），缺省沿用旧参数 max_span_days（ARC-04）
+    allow_future_end: False 时自定义 end 晚于今天报错（缺省 True，保持旧行为）
+    custom_default_days: 自定义区间只给 end 时，start 取 end 往前这么多天
+    messages: 覆盖 DEFAULT_MESSAGES 中的文案，保持各接口原有的 400 提示
     """
     today = today or timezone.localdate()
+    msg = {**DEFAULT_MESSAGES, **(messages or {})}
+    max_days = max_span_days if max_days is None else max_days
     preset = (params_get('period') or '').strip() or default
     start_raw = (params_get('start') or '').strip()
     end_raw = (params_get('end') or '').strip()
 
+    def bad_period():
+        return BadRequest(msg['bad_period'].format(allowed='/'.join(allowed or [])))
+
     if preset == 'custom' or start_raw or end_raw:
         if not allow_custom:
-            raise ValueError('该数据不支持自定义区间')
+            raise BadRequest(msg['no_custom'])
         if preset != 'custom' and preset not in (allowed or []):
-            raise ValueError(f'period 仅支持 {"/".join(allowed)}')
-        return _custom_window(params_get, today, max_span_days)
+            raise bad_period()
+        return _custom_window(start_raw, end_raw, today, max_days, allow_future_end,
+                              custom_default_days, msg)
 
     if preset not in allowed:
-        raise ValueError(f'period 仅支持 {"/".join(allowed)}')
+        raise bad_period()
+    if preset == 'ytd':
+        # 旧实现 _PRESET_DAYS 缺 ytd，FULL_PRESETS 声明支持却抛 KeyError（→502）
+        return PeriodWindow(preset, date(today.year, 1, 1), today)
     days = _PRESET_DAYS[preset]
     start = today if days == 1 else today - timedelta(days=days - 1)
     return PeriodWindow(preset, start, today)
 
 
-def _custom_window(params_get, today, max_span_days):
+def _custom_window(start_raw, end_raw, today, max_days, allow_future_end, default_days, msg):
     def _parse(raw, key, fallback):
-        raw = (raw or '').strip()
         if not raw:
             return fallback
         try:
             return datetime.strptime(raw, '%Y-%m-%d').date()
         except ValueError as e:
-            raise ValueError(f'{key} 格式应为 YYYY-MM-DD') from e
+            raise BadRequest(msg['bad_date'].format(key=key)) from e
 
-    end = _parse(params_get('end'), 'end', today)
-    start = _parse(params_get('start'), 'start', end - timedelta(days=30))
+    end = _parse(end_raw, 'end', today)
+    start = _parse(start_raw, 'start', end - timedelta(days=default_days))
     if start > end:
-        raise ValueError('start 不能晚于 end')
-    if (end - start).days > max_span_days:
-        raise ValueError(f'自定义区间最长 {max_span_days} 天')
+        raise BadRequest(msg['start_after_end'])
+    if not allow_future_end and end > today:
+        raise BadRequest(msg['future_end'])
+    if (end - start).days > max_days:
+        raise BadRequest(msg['too_long'].format(max_days=max_days))
     return PeriodWindow('custom', start, end)
 
 

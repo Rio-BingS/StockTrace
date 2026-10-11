@@ -20,7 +20,7 @@ class UpstreamErrorNoEchoTests(TestCase):
 
     def test_market_overview_hides_exception_text(self):
         secret = 'http://10.0.0.5/internal 上游原文'
-        with mock.patch('stocks.views.get_market_overview', side_effect=RuntimeError(secret)), \
+        with mock.patch('stocks.views.market.get_market_overview', side_effect=RuntimeError(secret)), \
                 self.assertLogs('stocks.views', level='ERROR') as logs:
             resp = self.client.get('/api/market/')
         self._assert_generic(resp, secret)
@@ -29,14 +29,14 @@ class UpstreamErrorNoEchoTests(TestCase):
 
     def test_bad_request_wrapper_hides_exception_text(self):
         secret = 'Traceback /opt/stocktrace/secret.py'
-        with mock.patch('stocks.views.get_sector_rotation', side_effect=KeyError(secret)), \
+        with mock.patch('stocks.views.market.get_sector_rotation', side_effect=KeyError(secret)), \
                 self.assertLogs('stocks.views', level='ERROR'):
             resp = self.client.get('/api/market/sectors/')
         self._assert_generic(resp, secret)
 
     def test_institutions_hides_exception_text(self):
         secret = 'upstream body <html>'
-        with mock.patch('stocks.views.get_institution_holdings', side_effect=RuntimeError(secret)), \
+        with mock.patch('stocks.views.market.get_institution_holdings', side_effect=RuntimeError(secret)), \
                 self.assertLogs('stocks.views', level='ERROR'):
             resp = self.client.get('/api/market/institutions/')
         self._assert_generic(resp, secret)
@@ -52,7 +52,7 @@ class StockCodeValidationTests(TestCase):
 
     def setUp(self):
         self.client = APIClient()
-        patcher = mock.patch('stocks.views._initial_fetch', return_value={'status': 'started'})
+        patcher = mock.patch('stocks.views.watchlist._initial_fetch', return_value={'status': 'started'})
         patcher.start()
         self.addCleanup(patcher.stop)
 
@@ -90,8 +90,8 @@ class StockCodeValidationTests(TestCase):
         self.assertEqual(resp.status_code, 400)
 
     def test_margin_and_etf_routes_validate_code(self):
-        with mock.patch('stocks.views.fetch_stock_margin') as margin, \
-                mock.patch('stocks.views.get_etf_detail') as etf:
+        with mock.patch('stocks.views.market.fetch_stock_margin') as margin, \
+                mock.patch('stocks.views.market.get_etf_detail') as etf:
             self.assertEqual(self.client.get('/api/market/stock-margin/abc/').status_code, 400)
             self.assertEqual(self.client.get('/api/market/etfs/51030/').status_code, 400)
             margin.assert_not_called()
@@ -379,7 +379,7 @@ class SchedulerStepIsolationTests(TestCase):
     def test_daily_summary_failure_does_not_skip_later_steps(self):
         from stocks import scheduler
         calls = []
-        with mock.patch('stocks.services.fetch_daily_summary', side_effect=RuntimeError('x')), \
+        with mock.patch('stocks.jobs.fetch_daily_summary', side_effect=RuntimeError('x')), \
                 mock.patch.object(scheduler, '_evaluate_alerts', lambda: calls.append('alerts')), \
                 mock.patch.object(scheduler, '_cleanup_ai_logs', lambda: calls.append('ai')), \
                 mock.patch.object(scheduler, '_cleanup_market_snapshots',
@@ -393,7 +393,7 @@ class SchedulerStepIsolationTests(TestCase):
     def test_intraday_failure_still_evaluates_alerts(self):
         from stocks import scheduler
         calls = []
-        with mock.patch('stocks.services.fetch_intraday_update', side_effect=RuntimeError('x')), \
+        with mock.patch('stocks.jobs.fetch_intraday_update', side_effect=RuntimeError('x')), \
                 mock.patch.object(scheduler, '_evaluate_alerts', lambda: calls.append('alerts')), \
                 self.assertLogs('stocks.scheduler', level='ERROR'):
             scheduler._intraday_job()

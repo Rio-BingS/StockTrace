@@ -120,7 +120,7 @@ def _finish(run_id, **kwargs):
 
 def _do_one(run_id, stock_id, light):
     from .models import Stock
-    from .services import fetch_stock_all_data
+    from .jobs import fetch_stock_all_data
 
     stock = Stock.objects.get(pk=stock_id)
     _set(run_id, code=stock.code)
@@ -129,7 +129,7 @@ def _do_one(run_id, stock_id, light):
 
 
 def _do_all(run_id, light):
-    from .services import fetch_all_active_stocks
+    from .jobs import fetch_all_active_stocks
 
     return fetch_all_active_stocks(light=light)
 

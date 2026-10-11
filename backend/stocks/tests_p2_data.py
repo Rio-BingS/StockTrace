@@ -173,7 +173,7 @@ class LocalDateTests(SimpleTestCase):
         from . import services
 
         with patch('django.utils.timezone.now', return_value=self._UTC_NIGHT), \
-                patch('stocks.services.DailyQuote.objects') as qs:
+                patch('stocks.ingest.DailyQuote.objects') as qs:
             qs.filter.return_value.order_by.return_value.values_list.return_value.first.return_value = None
             start = services._daily_start_date(object(), bootstrap_days=1)
         self.assertEqual(start, '20261011')  # 本地 10-12 往前 1 天；UTC 口径会是 10-10
@@ -500,7 +500,7 @@ class SourceChainTests(SimpleTestCase):
             def fetch_daily(self, *a):
                 return pd.DataFrame({'日期': ['2026-09-01']})
 
-        with patch('stocks.services.time.sleep') as sleep:
+        with patch('stocks.datasources.chain.time.sleep') as sleep:
             for _ in range(3):
                 source, df = services._try_sources(
                     'fetch_daily', '600000', '20260901', '20260901', sources=[Bad(), Good()])

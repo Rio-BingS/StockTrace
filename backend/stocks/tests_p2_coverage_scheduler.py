@@ -30,11 +30,11 @@ class JobGuardTests(SimpleTestCase):
     def test_preopen_skips_unless_trading_day(self):
         for flag in (False, None):
             with patch('stocks.trading_calendar.is_trading_day', return_value=flag), \
-                    patch('stocks.services.fetch_incremental_daily_all') as inc:
+                    patch('stocks.jobs.fetch_incremental_daily_all') as inc:
                 sch._preopen_incremental_job()
             inc.assert_not_called()
         with patch('stocks.trading_calendar.is_trading_day', return_value=True), \
-                patch('stocks.services.fetch_incremental_daily_all') as inc:
+                patch('stocks.jobs.fetch_incremental_daily_all') as inc:
             sch._preopen_incremental_job()
         inc.assert_called_once()
 
@@ -77,12 +77,12 @@ class JobGuardTests(SimpleTestCase):
             scan.assert_called_once()
 
     def test_intraday_and_daily_jobs_chain(self):
-        with patch('stocks.services.fetch_intraday_update') as intraday, \
+        with patch('stocks.jobs.fetch_intraday_update') as intraday, \
                 patch('stocks.alerts.evaluate_alerts') as alerts:
             sch._intraday_job()
         intraday.assert_called_once()
         alerts.assert_called_once()
-        with patch('stocks.services.fetch_daily_summary') as summary, \
+        with patch('stocks.jobs.fetch_daily_summary') as summary, \
                 patch('stocks.alerts.evaluate_alerts', side_effect=RuntimeError('x')), \
                 patch.object(sch, '_cleanup_ai_logs') as ai, \
                 patch.object(sch, '_cleanup_market_snapshots') as snaps, \

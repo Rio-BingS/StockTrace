@@ -379,7 +379,7 @@ class LoggingConfigTests(SimpleTestCase):
 
         from rest_framework.test import APIRequestFactory
 
-        from stocks import views
+        from stocks.views import market as views
 
         req = APIRequestFactory().get('/api/market/')
         with mock.patch.object(views, 'get_market_overview', side_effect=RuntimeError('upstream down')), \

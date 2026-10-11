@@ -6,3 +6,10 @@ extend-exclude = ["migrations"]
 # 默认规则集（E4/E7/E9/F）：只抓未用导入/未用变量/语法与真实错误，
 # 不做风格化重构，避免大面积无意义 diff。
 select = ["E4", "E7", "E9", "F"]
+
+# 类型注解（ARC-07）：ANN 只对新文件启用，旧文件整体豁免，避免大面积改动。
+# 下面是取反匹配：不在花括号列表里的文件都忽略 ANN；新建的文件加进列表即可。
+extend-select = ["ANN"]
+
+[lint.per-file-ignores]
+"!{stocks/ai/serializers.py,stocks/detector/constants.py,stocks/screener/*.py,stocks/tests_arc2_detector_ai.py}" = ["ANN"]

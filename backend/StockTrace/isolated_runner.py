@@ -177,7 +177,7 @@ _guard = _NetworkGuard()
 _CACHE_RESETS = [
     ('stocks.market._cache', '_cache', None),
     ('stocks.market._sources', '_source_state', None),
-    ('stocks.services', '_stock_list_cache', {'df': None, 'expires': 0}),
+    ('stocks.search', '_stock_list_cache', {'df': None, 'expires': 0}),
     ('stocks.trading_calendar', '_trade_day_cache', None),
     ('stocks.trading_calendar', '_trade_calendar_set', ('set', None)),
     ('stocks.trading_calendar', '_trade_calendar_range', ('set', None)),

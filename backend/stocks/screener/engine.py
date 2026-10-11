@@ -25,9 +25,17 @@ DSL 示例：
 最新一根就是 as_of 的股票参与筛选；停牌/拉取失败而停在更早日期的股票不再拿
 旧行情混进同一张榜，列入 excluded 并告知用户（见 run_screener_with_meta）。
 """
+from collections.abc import Callable
 from dataclasses import dataclass
+from decimal import Decimal
+from typing import Any
 
 from ..models import Stock
+
+# 单只股票的筛选上下文：quote=最新日线，bars=升序日线列表，val=估值快照，ind=指标缓存
+Ctx = dict[str, Any]
+# 字段取值函数：输入 ctx，返回数值；取不到时为 None（如实的「未知」）
+Getter = Callable[[Ctx], float | None]
 
 # 计算多日指标所需的最大回看根数（MACD 的 EMA26+DEA9 收敛需要较长预热）
 MAX_LOOKBACK = 140
@@ -49,15 +57,15 @@ OPS = {'gt', 'gte', 'lt', 'lte', 'eq', 'between'}
 class ConditionError(Exception):
     message: str
 
-    def __str__(self):
+    def __str__(self) -> str:
         return self.message
 
 
-def _f(dec):
+def _f(dec: Decimal | float | None) -> float | None:
     return float(dec) if dec is not None else None
 
 
-def _closes(ctx, n):
+def _closes(ctx: Ctx, n: int) -> list[float] | None:
     """最近 n 根收盘价（float 列表，升序，尾元素最新）；根数不足或含缺失返回 None。"""
     bars = ctx['bars'][-n:]
     if len(bars) < n:
@@ -68,9 +76,9 @@ def _closes(ctx, n):
     return closes
 
 
-def _pct_n(n):
+def _pct_n(n: int) -> Getter:
     """区间涨跌幅：最新收盘 / n 根前收盘 - 1。"""
-    def getter(ctx):
+    def getter(ctx: Ctx) -> float | None:
         closes = _closes(ctx, n + 1)
         if not closes or closes[0] == 0:
             return None
@@ -78,9 +86,9 @@ def _pct_n(n):
     return getter
 
 
-def _above_ma(n):
+def _above_ma(n: int) -> Getter:
     """收盘价站上 n 日均线（>=）。"""
-    def getter(ctx):
+    def getter(ctx: Ctx) -> float | None:
         closes = _closes(ctx, n)
         if not closes:
             return None
@@ -89,9 +97,9 @@ def _above_ma(n):
     return getter
 
 
-def _ma_gt(short, long):
+def _ma_gt(short: int, long: int) -> Getter:
     """短均线严格在长均线上方。"""
-    def getter(ctx):
+    def getter(ctx: Ctx) -> float | None:
         closes = _closes(ctx, long)
         if not closes:
             return None
@@ -101,13 +109,13 @@ def _ma_gt(short, long):
     return getter
 
 
-def _new_extreme(n, high):
+def _new_extreme(n: int, high: bool) -> Getter:
     """当日最高价/最低价创最近 n 根（含当日）的新高/新低（ALG-12）。
 
     行情软件的「创 N 日新高」看最高价而不是收盘价；并列不算新高（必须严格
     高于此前 n-1 根的最高价，新低对称）。
     """
-    def getter(ctx):
+    def getter(ctx: Ctx) -> float | None:
         bars = ctx['bars'][-n:]
         if len(bars) < n:
             return None
@@ -121,19 +129,24 @@ def _new_extreme(n, high):
     return getter
 
 
-def _volume_ratio(ctx):
+# 量比基期：前 N 根均量（字段说明「今量/5日均量」与此一致）
+_VOLUME_RATIO_BASE = 5
+
+
+def _volume_ratio(ctx: Ctx) -> float | None:
     """量比：今日成交量 / 前 5 根均量。"""
     bars = ctx['bars']
-    if len(bars) < 6:
+    n = _VOLUME_RATIO_BASE
+    if len(bars) < n + 1:
         return None
     today = _f(bars[-1].volume)
-    base = [_f(b.volume) for b in bars[-6:-1]]
+    base = [_f(b.volume) for b in bars[-(n + 1):-1]]
     if not today or any(v is None or v == 0 for v in base):
         return None
-    return today / (sum(base) / 5)
+    return today / (sum(base) / n)
 
 
-def _turnover_5d_avg(ctx):
+def _turnover_5d_avg(ctx: Ctx) -> float | None:
     """近 5 根（含最新）日均成交额（元）。"""
     bars = ctx['bars']
     if len(bars) < 5:
@@ -144,7 +157,7 @@ def _turnover_5d_avg(ctx):
     return sum(vals) / 5
 
 
-def _pct_from_high_20d(ctx):
+def _pct_from_high_20d(ctx: Ctx) -> float | None:
     """距最近 20 根最高收盘的回撤（≤0，0 表示正在新高）。"""
     closes = _closes(ctx, 20)
     if not closes:
@@ -155,7 +168,7 @@ def _pct_from_high_20d(ctx):
     return (closes[-1] / peak - 1) * 100
 
 
-def _up_days(ctx):
+def _up_days(ctx: Ctx) -> int | None:
     """连续上涨天数：从最新一根往前数收盘连涨（相等即断）。"""
     bars = ctx['bars']
     if len(bars) < 2:
@@ -183,14 +196,19 @@ def _up_days(ctx):
 # MACD 预热（ALG-12）：EMA 以首值为种子，35 根时 EMA26 的种子残差仍约 7%，
 # 金叉/零轴判定可能与行情软件不一致；120 根时残差 < 0.01%
 _MACD_MIN_BARS = 120
+_MACD_FAST, _MACD_SLOW, _MACD_SIGNAL = 12, 26, 9
 _KDJ_MIN_BARS = 12    # RSV9 + K/D 递推预热
+_KDJ_N = 9            # RSV 周期
+_KDJ_M = 3            # K/D 平滑：SMA(X, 3, 1)
+_KDJ_SEED = 50.0      # K/D 递推种子；最高=最低时 RSV 也取这个值
 _BOLL_N = 20
+_BOLL_K = 2           # 上下轨 = 中轨 ± K 倍标准差
 # BOLL 标准差口径（ALG-12）：ddof=1 即样本标准差（除以 N-1），
 # 与通达信 STD 函数口径一致；改口径只需改这里
 _BOLL_DDOF = 1
 
 
-def _ema_series(values, n):
+def _ema_series(values: list[float], n: int) -> list[float]:
     """EMA（首值作种子，α=2/(n+1)）。"""
     alpha = 2.0 / (n + 1)
     out = [values[0]]
@@ -201,7 +219,7 @@ def _ema_series(values, n):
     return out
 
 
-def _indicators(ctx):
+def _indicators(ctx: Ctx) -> dict[str, float | None]:
     """一次性算好全部技术指标并记忆在 ctx['ind']；返回 dict（可能部分为 None）。"""
     if ctx.get('ind') is not None:
         return ctx['ind']
@@ -213,10 +231,10 @@ def _indicators(ctx):
 
     # ---- MACD(12, 26, 9)，柱 = 2*(DIF-DEA)（国内口径） ----
     if len(closes) >= _MACD_MIN_BARS and None not in closes:
-        ema12 = _ema_series(closes, 12)
-        ema26 = _ema_series(closes, 26)
+        ema12 = _ema_series(closes, _MACD_FAST)
+        ema26 = _ema_series(closes, _MACD_SLOW)
         dif = [a - b for a, b in zip(ema12, ema26)]
-        dea = _ema_series(dif, 9)
+        dea = _ema_series(dif, _MACD_SIGNAL)
         ind['macd_dif'] = dif[-1]
         ind['macd_dea'] = dea[-1]
         ind['macd_hist'] = 2 * (dif[-1] - dea[-1])
@@ -234,24 +252,24 @@ def _indicators(ctx):
     # ---- KDJ(9, 3, 3)，SMA(X,3,1) 递推，K/D 种子 50 ----
     if len(closes) >= _KDJ_MIN_BARS and None not in closes \
             and None not in highs and None not in lows:
-        k, d = 50.0, 50.0
+        k, d = _KDJ_SEED, _KDJ_SEED
         for i in range(len(bars)):
-            hh = max(highs[max(0, i - 8):i + 1])
-            ll = min(lows[max(0, i - 8):i + 1])
-            rsv = 50.0 if hh == ll else (closes[i] - ll) / (hh - ll) * 100
-            k = (2 * k + rsv) / 3
-            d = (2 * d + k) / 3
+            hh = max(highs[max(0, i - (_KDJ_N - 1)):i + 1])
+            ll = min(lows[max(0, i - (_KDJ_N - 1)):i + 1])
+            rsv = _KDJ_SEED if hh == ll else (closes[i] - ll) / (hh - ll) * 100
+            k = ((_KDJ_M - 1) * k + rsv) / _KDJ_M
+            d = ((_KDJ_M - 1) * d + k) / _KDJ_M
         ind['kdj_k'] = k
         ind['kdj_d'] = d
         ind['kdj_j'] = 3 * k - 2 * d
         # 金叉/死叉用倒数第二根状态
-        k2, d2 = 50.0, 50.0
+        k2, d2 = _KDJ_SEED, _KDJ_SEED
         for i in range(len(bars) - 1):
-            hh = max(highs[max(0, i - 8):i + 1])
-            ll = min(lows[max(0, i - 8):i + 1])
-            rsv = 50.0 if hh == ll else (closes[i] - ll) / (hh - ll) * 100
-            k2 = (2 * k2 + rsv) / 3
-            d2 = (2 * d2 + k2) / 3
+            hh = max(highs[max(0, i - (_KDJ_N - 1)):i + 1])
+            ll = min(lows[max(0, i - (_KDJ_N - 1)):i + 1])
+            rsv = _KDJ_SEED if hh == ll else (closes[i] - ll) / (hh - ll) * 100
+            k2 = ((_KDJ_M - 1) * k2 + rsv) / _KDJ_M
+            d2 = ((_KDJ_M - 1) * d2 + k2) / _KDJ_M
         ind['kdj_golden_cross'] = 1 if k >= d and k2 < d2 else 0
         ind['kdj_dead_cross'] = 1 if k <= d and k2 > d2 else 0
     else:
@@ -260,7 +278,7 @@ def _indicators(ctx):
         )})
 
     # ---- RSI(6 / 14)，Wilder 平滑 ----
-    def _rsi(n):
+    def _rsi(n: int) -> float | None:
         if len(closes) < n + 1:
             return None
         gains, losses = 0.0, 0.0
@@ -286,8 +304,8 @@ def _indicators(ctx):
         std = (sum((c - mid) ** 2 for c in boll_closes) / (_BOLL_N - _BOLL_DDOF)) ** 0.5
         last = closes[-1]
         ind['above_boll_mid'] = 1 if last >= mid else 0
-        ind['above_boll_upper'] = 1 if last >= mid + 2 * std else 0
-        ind['below_boll_lower'] = 1 if last <= mid - 2 * std else 0
+        ind['above_boll_upper'] = 1 if last >= mid + _BOLL_K * std else 0
+        ind['below_boll_lower'] = 1 if last <= mid - _BOLL_K * std else 0
     else:
         ind.update({k: None for k in (
             'above_boll_mid', 'above_boll_upper', 'below_boll_lower',
@@ -297,33 +315,33 @@ def _indicators(ctx):
     return ind
 
 
-def _macd(field):
-    def getter(ctx):
+def _macd(field: str) -> Getter:
+    def getter(ctx: Ctx) -> float | None:
         return _indicators(ctx).get(field)
     return getter
 
 
-def _kdj(field):
-    def getter(ctx):
+def _kdj(field: str) -> Getter:
+    def getter(ctx: Ctx) -> float | None:
         return _indicators(ctx).get(field)
     return getter
 
 
-def _rsi(field):
-    def getter(ctx):
+def _rsi(field: str) -> Getter:
+    def getter(ctx: Ctx) -> float | None:
         return _indicators(ctx).get(field)
     return getter
 
 
-def _boll(field):
-    def getter(ctx):
+def _boll(field: str) -> Getter:
+    def getter(ctx: Ctx) -> float | None:
         return _indicators(ctx).get(field)
     return getter
 
 
-def _valuation(field):
+def _valuation(field: str) -> Getter:
     """估值字段：来自腾讯实时快照（ctx['val']），上游不可用即 None。"""
-    def getter(ctx):
+    def getter(ctx: Ctx) -> float | None:
         val = ctx.get('val') or {}
         return val.get(field)
     return getter
@@ -389,7 +407,7 @@ FIELDS = {
 }
 
 
-def _latest_contexts():
+def _latest_contexts() -> tuple[list[tuple[Stock, Ctx]], dict[str, Any]]:
     """参与筛选的 (stock, ctx) 列表与横截面元信息。
 
     返回 (contexts, meta)：meta = {'as_of': date|None, 'excluded': [...]}。
@@ -447,7 +465,7 @@ def _latest_contexts():
     return result, meta
 
 
-def _match(op, value, target):
+def _match(op: str, value: float | list | tuple, target: float) -> bool:
     if op == 'between':
         if not isinstance(value, (list, tuple)) or len(value) != 2:
             raise ConditionError('between 操作符的 value 必须是 [下限, 上限]')
@@ -466,7 +484,7 @@ def _match(op, value, target):
     raise ConditionError(f'不支持的操作符：{op}')
 
 
-def _validate(spec):
+def _validate(spec: object) -> None:
     if not isinstance(spec, dict):
         raise ConditionError('筛选条件必须是 JSON 对象')
     logic = spec.get('logic', 'all')
@@ -498,18 +516,18 @@ def _validate(spec):
         raise ConditionError(f'排序字段不支持：{order_by}')
 
 
-def run_screener(spec):
+def run_screener(spec: dict[str, Any]) -> list[dict[str, Any]]:
     """执行筛选，返回结果列表（含股票信息与命中的字段值）"""
     rows, _meta = run_screener_with_meta(spec)
     return rows
 
 
-def _sort_key(order_by, desc):
+def _sort_key(order_by: str, desc: bool) -> Callable[[dict[str, Any]], tuple[int, float]]:
     """排序键：无值的行无论升序降序都排在最后（ALG-12）。
 
     旧实现用 -inf 代替 None，升序时无值的股票排在最前面。
     """
-    def key(row):
+    def key(row: dict[str, Any]) -> tuple[int, float]:
         v = row.get(order_by)
         if v is None:
             return (1, 0.0)
@@ -517,7 +535,7 @@ def _sort_key(order_by, desc):
     return key
 
 
-def run_screener_with_meta(spec):
+def run_screener_with_meta(spec: dict[str, Any]) -> tuple[list[dict[str, Any]], dict[str, Any]]:
     """执行筛选，返回 (rows, meta)；meta 含 as_of 与未参与股票列表（excluded）。"""
     _validate(spec)
     logic = spec.get('logic', 'all')

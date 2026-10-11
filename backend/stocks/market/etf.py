@@ -7,6 +7,8 @@ from datetime import datetime, timedelta
 import akshare as ak
 from django.utils import timezone
 
+from ..common.envelope import envelope
+from ..errors import BadRequest
 from ._cache import _cache_get, _cache_meta, _cache_set, _now_str, _stale_or, _to_float
 from .holders import fetch_holder_structure
 from ._query import _paginate, _sort_items
@@ -151,13 +153,13 @@ def get_etf_share_radar(
     min_turnover=None, page=1, page_size=50, ttl=180, force=False,
 ):
     if scope not in ('equity_broad', 'all'):
-        raise ValueError('scope 必须是 equity_broad 或 all')
+        raise BadRequest('scope 必须是 equity_broad 或 all')
     if rank not in _ETF_RANK_SORT:
-        raise ValueError('不支持的 ETF 排行维度')
+        raise BadRequest('不支持的 ETF 排行维度')
     if sort is not None and sort not in _ETF_SORT_FIELDS:
-        raise ValueError('不支持的 ETF 排序字段')
+        raise BadRequest('不支持的 ETF 排序字段')
     if order is not None and order not in ('asc', 'desc'):
-        raise ValueError('order 必须是 asc 或 desc')
+        raise BadRequest('order 必须是 asc 或 desc')
 
     if force:
         _fetch_etf_spot_df(ttl=ttl, force=True)
@@ -186,10 +188,10 @@ def get_etf_share_radar(
     total_turnover = sum(item['turnover'] for item in scoped_items if item.get('turnover') is not None)
     data_dates = [item['data_date'] for item in scoped_items if item.get('data_date')]
 
-    return {
-        'updated_at': _now_str(),
-        'available': bool(all_items),
-        'meta': _cache_meta(
+    return envelope(
+        page_items,
+        pagination,
+        _cache_meta(
             'etf_spot_df',
             ttl,
             'akshare.fund_etf_spot_em',
@@ -197,13 +199,16 @@ def get_etf_share_radar(
             source_data_date=max(data_dates) if data_dates else None,
             disclaimer='最新份额与资金流为市场源当前快照；股票/宽基范围为研究用规则筛选，非基金官方分类。',
         ),
-        'scope': {
+        key_order=_ETF_RADAR_KEY_ORDER,
+        updated_at=_now_str(),
+        available=bool(all_items),
+        scope={
             'active': scope,
             'rule_version': _ETF_SCOPE_RULE_VERSION,
             'all_count': len(all_items),
             'equity_broad_count': sum(1 for item in all_items if item['scope_match']),
         },
-        'summary': {
+        summary={
             'count': len(scoped_items),
             'share_available_count': sum(1 for item in scoped_items if item.get('share') is not None),
             'positive_main_net_count': sum(1 for item in scoped_items if (item.get('main_net') or 0) > 0),
@@ -211,12 +216,10 @@ def get_etf_share_radar(
             'total_main_net': total_main,
             'total_turnover': total_turnover,
         },
-        'rank': rank,
-        'sort': sort_field,
-        'order': sort_order,
-        'pagination': pagination,
-        'items': page_items,
-        'supported_metrics': {
+        rank=rank,
+        sort=sort_field,
+        order=sort_order,
+        supported_metrics={
             'share_change_1d': share_chg_maps[1] is not None,
             'share_change_5d': share_chg_maps[5] is not None,
             'share_change_20d': share_chg_maps[20] is not None,
@@ -225,8 +228,15 @@ def get_etf_share_radar(
                 '快照积累齐全后自动开放。'
             ),
         },
-        'message': '' if all_items else 'ETF 行情暂不可用',
-    }
+        message='' if all_items else 'ETF 行情暂不可用',
+    )
+
+
+# ETF 雷达已上线的 JSON 键顺序（envelope 按此输出，保证响应逐字节不变，ARC-04）
+_ETF_RADAR_KEY_ORDER = (
+    'updated_at', 'available', 'meta', 'scope', 'summary', 'rank', 'sort', 'order',
+    'pagination', 'items', 'supported_metrics', 'message',
+)
 
 
 def _etf_sina_symbol(code):
@@ -342,7 +352,7 @@ def _parse_range_date(value, label):
     try:
         return datetime.strptime(str(value), '%Y-%m-%d').date()
     except ValueError:
-        raise ValueError(f'{label} 必须是 YYYY-MM-DD 格式日期')
+        raise BadRequest(f'{label} 必须是 YYYY-MM-DD 格式日期')
 
 
 def _window_stats(history):
@@ -364,28 +374,28 @@ def _window_stats(history):
 
 def get_etf_detail(code, range_name='3m', start_date=None, end_date=None):
     if not (str(code).isdigit() and len(str(code)) == 6):
-        raise ValueError('ETF 代码必须是 6 位数字')
+        raise BadRequest('ETF 代码必须是 6 位数字')
     if range_name not in ('1w', '1m', '3m', '6m', '1y', 'custom'):
-        raise ValueError('range 必须是 1w、1m、3m、6m、1y 或 custom')
+        raise BadRequest('range 必须是 1w、1m、3m、6m、1y 或 custom')
     start = end = None
     if range_name == 'custom':
         if not start_date:
-            raise ValueError('自定义区间必须提供 start_date')
+            raise BadRequest('自定义区间必须提供 start_date')
         start = _parse_range_date(start_date, 'start_date')
         end = _parse_range_date(end_date, 'end_date') if end_date else None
         if end is None:
             end = timezone.localdate()
         if start > end:
-            raise ValueError('start_date 不能晚于 end_date')
+            raise BadRequest('start_date 不能晚于 end_date')
         if (end - start).days > _CUSTOM_MAX_SPAN_DAYS:
-            raise ValueError(f'自定义区间最长 {_CUSTOM_MAX_SPAN_DAYS} 天（约 3 年）')
+            raise BadRequest(f'自定义区间最长 {_CUSTOM_MAX_SPAN_DAYS} 天（约 3 年）')
     else:
         end = timezone.localdate()
         start = end - timedelta(days=_RANGE_LOOKBACK_DAYS[range_name])
 
     quote = next((item for item in _normalized_etf_items() if item['code'] == code), None)
     if quote is None:
-        raise ValueError('未在 ETF 行情中找到该代码')
+        raise BadRequest('未在 ETF 行情中找到该代码')
     chg_maps = {n: snapshots.share_change_map(n)[0] for n in (1, 5, 20)}
     has_chg = any(m is not None for m in chg_maps.values())
     if has_chg:

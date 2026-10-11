@@ -15,22 +15,18 @@ from __future__ import annotations
 from datetime import date as _date, timedelta
 
 from ..models import DetectorSignal
-
-# 同向投票的最少维度数与「零反向票」约束（见模块 docstring 的取舍说明）
-VOTE_MIN_DIMS = 2
-
-# 严重程度分级阈值：score 是同侧维度 |value| 的加权平均（0-100），
-# 55/40 两条线让「多维度共振+多周期维持」显著高于「勉强两票」。
-SEVERITY_RULES = {'high_score': 55.0, 'medium_score': 40.0}
+from .constants import (
+    ACTIVE_MIN_CYCLES,
+    CYCLE_LOOKBACK as _CYCLE_LOOKBACK,
+    HIGH_SEVERITY_MIN_VOTES,
+    SEVERITY_RULES,
+    VOTE_MIN_DIMS,
+)
 
 
 def _as_date(value):
     """ctx['as_of'] 是 ISO 字符串（序列里带出来的），周期回看需要 date 运算。"""
     return _date.fromisoformat(value) if isinstance(value, str) else value
-
-
-# 周期计数最多回看的交易日数（与旧实现的 20 次循环同一上限）
-_CYCLE_LOOKBACK = 20
 
 
 def _previous_trading_days(before_date, n):
@@ -39,7 +35,7 @@ def _previous_trading_days(before_date, n):
     is_trading_day 是三态：None（未知）或抛异常都视为「日历不可用」——旧实现在
     这种情况下把自然日当交易日推进（ALG-15），节假日会被当成「当天没信号」而断链。
     """
-    from ..services import is_trading_day
+    from ..trading_calendar import is_trading_day
 
     days = []
     day = before_date
@@ -91,9 +87,10 @@ def _count_cycles(target_kind, target_code, direction, before_date):
 
 def _severity(score, cycles, vote_count):
     """分级：高=多维度共振且已维持；中=维持或共振一项突出；低=刚观察。"""
-    if cycles >= 2 and vote_count >= 3 and score >= SEVERITY_RULES['high_score']:
+    if (cycles >= ACTIVE_MIN_CYCLES and vote_count >= HIGH_SEVERITY_MIN_VOTES
+            and score >= SEVERITY_RULES['high_score']):
         return DetectorSignal.SEVERITY_HIGH
-    if cycles >= 2 or score >= SEVERITY_RULES['medium_score']:
+    if cycles >= ACTIVE_MIN_CYCLES or score >= SEVERITY_RULES['medium_score']:
         return DetectorSignal.SEVERITY_MEDIUM
     return DetectorSignal.SEVERITY_LOW
 
@@ -161,7 +158,7 @@ def evaluate_target(ctx, configs):
         'score': score,
         'severity': _severity(score, cycles, len(votes)),
         'status': (
-            DetectorSignal.STATUS_ACTIVE if cycles >= 2
+            DetectorSignal.STATUS_ACTIVE if cycles >= ACTIVE_MIN_CYCLES
             else DetectorSignal.STATUS_WATCHING
         ),
         'cycles_unknown': prev_cycles is None,

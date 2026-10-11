@@ -47,7 +47,7 @@ def _make_quote(stock, d, close=10, **kw):
 
 class _NoSleep:
     def setUp(self):
-        p = patch('stocks.services.time.sleep')
+        p = patch('stocks.datasources.chain.time.sleep')
         p.start()
         self.addCleanup(p.stop)
         super().setUp()
@@ -68,7 +68,7 @@ class SinaMinuteDateFilterTests(_NoSleep, TestCase):
         })
 
     def _run(self, sources):
-        with patch('stocks.services.DATA_SOURCES', sources):
+        with patch('stocks.datasources.chain.DATA_SOURCES', sources):
             return services.fetch_minute_data(self.stock, trade_date='2026-09-02')
 
     def test_sina_fallback_uses_only_requested_day(self):
@@ -163,7 +163,7 @@ class MinuteBulkUpsertTests(_NoSleep, TestCase):
 
     def _fetch(self, bars):
         df = _sina_minute_df({'2026-09-02': bars})
-        with patch('stocks.services.DATA_SOURCES', [services.SinaSource()]), \
+        with patch('stocks.datasources.chain.DATA_SOURCES', [services.SinaSource()]), \
                 patch('akshare.stock_zh_a_minute', return_value=df):
             return services.fetch_minute_data(self.stock, trade_date='2026-09-02')
 
@@ -198,7 +198,7 @@ class MinuteBulkUpsertTests(_NoSleep, TestCase):
             {'日期': '2026-09-02', '开盘': 9.9, '收盘': 10.0, '最高': 10.2, '最低': 9.8,
              '成交量': 200, '成交额': 2000},
         ])
-        with patch('stocks.services._try_sources', return_value=(services.SinaSource(), df)):
+        with patch('stocks.ingest._try_sources', return_value=(services.SinaSource(), df)):
             n = services.fetch_daily_data(self.stock, start_date='20260901', end_date='20260902')
         self.assertEqual(n, 2)
         q.refresh_from_db()
@@ -215,7 +215,7 @@ class VolumeUnitTests(_NoSleep, TestCase):
         self.stock = Stock.objects.create(code='000001', name='平安银行')
 
     def _daily(self, source):
-        with patch('stocks.services.DATA_SOURCES', [source]):
+        with patch('stocks.datasources.chain.DATA_SOURCES', [source]):
             services.fetch_daily_data(self.stock, start_date='20260901', end_date='20260901')
         return DailyQuote.objects.get(stock=self.stock, trade_date=date(2026, 9, 1))
 
@@ -251,7 +251,7 @@ class VolumeUnitTests(_NoSleep, TestCase):
         _make_quote(self.stock, date(2026, 9, 2))
         em_df = pd.DataFrame([{'时间': '2026-09-02 09:31:00', '开盘': 10, '收盘': 10,
                                '最高': 10.1, '最低': 9.9, '成交量': 12, '成交额': 12000.0}])
-        with patch('stocks.services.DATA_SOURCES', [services.EastMoneySource()]), \
+        with patch('stocks.datasources.chain.DATA_SOURCES', [services.EastMoneySource()]), \
                 patch('akshare.stock_zh_a_hist_min_em', return_value=em_df):
             services.fetch_minute_data(self.stock, trade_date='2026-09-02')
         bar = MinuteBar.objects.get(stock=self.stock)
@@ -259,7 +259,7 @@ class VolumeUnitTests(_NoSleep, TestCase):
                          (1200, Decimal('12000.00'), 'eastmoney', 1))
 
         sina_df = _sina_minute_df({'2026-09-02': [('09:31', 10.1, 9.9)]})
-        with patch('stocks.services.DATA_SOURCES', [services.SinaSource()]), \
+        with patch('stocks.datasources.chain.DATA_SOURCES', [services.SinaSource()]), \
                 patch('akshare.stock_zh_a_minute', return_value=sina_df):
             services.fetch_minute_data(self.stock, trade_date='2026-09-02')
         bar.refresh_from_db()
@@ -287,7 +287,7 @@ class MinuteFreqTests(_NoSleep, TestCase):
             ])
 
     def _fetch(self, source, patcher=None):
-        with patch('stocks.services.DATA_SOURCES', [source]):
+        with patch('stocks.datasources.chain.DATA_SOURCES', [source]):
             if patcher:
                 with patcher:
                     return services.fetch_minute_data(self.stock, trade_date='2026-09-02')
@@ -344,14 +344,14 @@ class AdjustBasisChangeTests(_NoSleep, TestCase):
 
     def test_unchanged_basis_stays_incremental(self):
         fake, calls = self._fake_try(1.0)
-        with patch('stocks.services._try_sources', side_effect=fake):
+        with patch('stocks.ingest._try_sources', side_effect=fake):
             services.fetch_daily_data(self.stock)
         self.assertEqual(len(calls), 1)
 
     def test_dividend_triggers_full_refetch_and_recomputes_prev_close(self):
         fake, calls = self._fake_try(0.97)  # 分红 3%：历史整体下调
-        with self.assertLogs('stocks.services', level='WARNING') as logs:
-            with patch('stocks.services._try_sources', side_effect=fake):
+        with self.assertLogs('stocks.ingest', level='WARNING') as logs:
+            with patch('stocks.ingest._try_sources', side_effect=fake):
                 services.fetch_daily_data(self.stock)
         self.assertEqual(len(calls), 2)
         self.assertLessEqual(datetime.strptime(calls[1], '%Y%m%d').date(), self.days[0])
@@ -379,7 +379,7 @@ class AdjustBasisChangeTests(_NoSleep, TestCase):
             if state['n'] == 1:
                 return services.SinaSource(), self._df(self.days[-3:] + [self.today], 0.9)
             return None, None
-        with patch('stocks.services._try_sources', side_effect=fake):
+        with patch('stocks.ingest._try_sources', side_effect=fake):
             self.assertEqual(services.fetch_daily_data(self.stock), 0)
         last = DailyQuote.objects.get(stock=self.stock, trade_date=self.days[-1])
         self.assertEqual(last.close_price, Decimal('10.90'))  # 旧值未被新基准覆盖
@@ -387,7 +387,7 @@ class AdjustBasisChangeTests(_NoSleep, TestCase):
 
     def test_command_full_daily_single_source(self):
         fake, calls = self._fake_try(1.0)
-        with patch('stocks.services._try_sources', side_effect=fake) as ts:
+        with patch('stocks.ingest._try_sources', side_effect=fake) as ts:
             call_command('fetch_stock_data', '000001', '--full-daily', '--source', 'sina',
                          stdout=StringIO())
         sources = ts.call_args.kwargs['sources']
@@ -422,7 +422,7 @@ class TradeCalendarTests(SimpleTestCase):
             self.assertTrue(services.is_trading_day(date(2027, 1, 4)))
         bs.assert_called_once()
         # TTL 过期后重新查询
-        with patch('stocks.services.time.time', return_value=time.time() + trading_calendar._TRADE_DAY_TTL + 10), \
+        with patch('stocks.trading_calendar.time.time', return_value=time.time() + trading_calendar._TRADE_DAY_TTL + 10), \
                 patch('akshare.tool_trade_date_hist_sina', return_value=self.cal), \
                 patch('stocks.trading_calendar._baostock_is_trading_day', return_value=False) as bs2:
             self.assertFalse(services.is_trading_day(date(2027, 1, 4)))
@@ -436,7 +436,7 @@ class TradeCalendarTests(SimpleTestCase):
         self.assertEqual(cal.call_count, 1)
         self.assertEqual(bs.call_count, 1)
         # 冷却期过后恢复：不再沿用「未知」，也没有永久缓存旧的猜测
-        with patch('stocks.services.time.time', return_value=time.time() + trading_calendar._CALENDAR_FAIL_TTL + 1), \
+        with patch('stocks.trading_calendar.time.time', return_value=time.time() + trading_calendar._CALENDAR_FAIL_TTL + 1), \
                 patch('akshare.tool_trade_date_hist_sina', return_value=self.cal):
             self.assertFalse(services.is_trading_day(date(2026, 10, 8)))
             self.assertTrue(services.is_trading_day(date(2026, 10, 9)))
@@ -444,7 +444,7 @@ class TradeCalendarTests(SimpleTestCase):
     def test_refresh_failure_keeps_stale_table(self):
         with patch('akshare.tool_trade_date_hist_sina', return_value=self.cal):
             self.assertTrue(services.is_trading_day(date(2026, 10, 9)))
-        with patch('stocks.services.time.time', return_value=time.time() + trading_calendar._TRADE_CAL_TTL + 10), \
+        with patch('stocks.trading_calendar.time.time', return_value=time.time() + trading_calendar._TRADE_CAL_TTL + 10), \
                 patch('akshare.tool_trade_date_hist_sina', side_effect=RuntimeError('down')):
             self.assertTrue(services.is_trading_day(date(2026, 10, 9)))
             self.assertFalse(services.is_trading_day(date(2026, 10, 1)))

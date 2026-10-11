@@ -21,7 +21,7 @@ def _aware(s):
 
 class _NoSleep:
     def setUp(self):
-        p = patch('stocks.services.time.sleep')
+        p = patch('stocks.datasources.chain.time.sleep')
         p.start()
         self.addCleanup(p.stop)
         super().setUp()
@@ -41,7 +41,7 @@ class PricePrecisionTests(_NoSleep, TestCase):
             {'日期': '2026-09-02', '开盘': 1.234, '收盘': 1.237, '最高': 1.238, '最低': 1.233,
              '成交量': 100, '成交额': 123.7},
         ])
-        with patch('stocks.services._try_sources', return_value=(services.EastMoneySource(), df)):
+        with patch('stocks.ingest._try_sources', return_value=(services.EastMoneySource(), df)):
             services.fetch_daily_data(self.stock, start_date='20260901', end_date='20260902')
         q = DailyQuote.objects.get(stock=self.stock, trade_date=date(2026, 9, 1))
         self.assertEqual(q.close_price, Decimal('1.234'))
@@ -182,10 +182,10 @@ class DailyIsFinalTests(_NoSleep, TestCase):
 
     def _fetch(self, now_str):
         now = _aware(now_str)
-        with patch('stocks.services._try_sources',
+        with patch('stocks.ingest._try_sources',
                    return_value=(services.SinaSource(), self.df)), \
-                patch('stocks.services.timezone.now', return_value=now), \
-                patch('stocks.services.timezone.localdate', return_value=now.date()):
+                patch('stocks.ingest.timezone.now', return_value=now), \
+                patch('stocks.ingest.timezone.localdate', return_value=now.date()):
             services.fetch_daily_data(self.stock, start_date='20260901', end_date='20260902')
 
     def _final(self, d):
@@ -256,7 +256,7 @@ class AlertEventUniqueTests(TestCase):
                                   content_type='application/json')
         self.assertEqual(r.status_code, 409)
         with patch('stocks.serializers.StockSerializer.save', side_effect=IntegrityError), \
-                patch('stocks.views.start_fetch_one') as fetch:
+                patch('stocks.views.watchlist.start_fetch_one') as fetch:
             r = self.client.post('/api/stocks/', {'code': '000001'},
                                  content_type='application/json')
         self.assertEqual(r.status_code, 409)
@@ -573,7 +573,7 @@ class FinalBarReadersTests(TestCase):
 
     @patch('stocks.ai.valuation.fetch_valuation_map', new=lambda codes: {})
     def test_screener_uses_latest_final_bar(self):
-        from .ai.screener import run_screener
+        from .screener.engine import run_screener
         self._bar(date(2026, 9, 3), 10, change_pct=Decimal('1'))
         self._bar(date(2026, 9, 4), 11, change_pct=Decimal('9'), is_final=False)
         hit = run_screener({'logic': 'all', 'conditions': [

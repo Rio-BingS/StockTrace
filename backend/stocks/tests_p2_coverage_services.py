@@ -197,7 +197,7 @@ class _Src(services.DataSource):
         return self._ret()
 
 
-@patch('stocks.services.time.sleep')
+@patch('stocks.datasources.chain.time.sleep')
 class TrySourcesTests(SimpleTestCase):
     """多源 failover：异常/空结果切下一个源，退避节奏 1s,1s,2s（DAT-03 / ARC-03 现状锁定）"""
 
@@ -226,9 +226,9 @@ class TrySourcesTests(SimpleTestCase):
         self.assertEqual(len(res), 1)
 
     def test_fetch_stock_info_falls_back_to_code(self, _sleep):
-        with patch('stocks.services.NAME_SOURCES', [_Src('a', None)]):
+        with patch('stocks.ingest.NAME_SOURCES', [_Src('a', None)]):
             self.assertEqual(services.fetch_stock_info('000001'), '000001')
-        with patch('stocks.services.NAME_SOURCES', [_Src('a', '平安银行')]):
+        with patch('stocks.ingest.NAME_SOURCES', [_Src('a', '平安银行')]):
             self.assertEqual(services.fetch_stock_info('000001'), '平安银行')
 
 
@@ -236,7 +236,7 @@ def _daily_df(rows):
     return pd.DataFrame(rows, columns=['日期', '开盘', '收盘', '最高', '最低', '成交量', '成交额'])
 
 
-@patch('stocks.services.time.sleep')
+@patch('stocks.datasources.chain.time.sleep')
 class FetchDailyDataTests(TestCase):
     def setUp(self):
         self.stock = Stock.objects.create(code='600000', name='浦发银行')
@@ -244,7 +244,7 @@ class FetchDailyDataTests(TestCase):
         self.src.name = 'sina'
 
     def test_all_sources_down_returns_zero(self, _sleep):
-        with patch('stocks.services._try_sources', return_value=(None, None)):
+        with patch('stocks.ingest._try_sources', return_value=(None, None)):
             self.assertEqual(services.fetch_daily_data(self.stock), 0)
         self.assertFalse(DailyQuote.objects.exists())
 
@@ -254,7 +254,7 @@ class FetchDailyDataTests(TestCase):
             ['2026-09-08', 10.0, 11.0, 11.5, 9.8, None, None],
             ['2026-09-04', float('nan'), 9.0, 9.5, 8.5, 1, 1.0],  # 价格缺失跳过
         ])
-        with patch('stocks.services._try_sources', return_value=(self.src, df)):
+        with patch('stocks.ingest._try_sources', return_value=(self.src, df)):
             n = services.fetch_daily_data(self.stock, start_date='20260901', end_date='20260908')
         self.assertEqual(n, 2)
         q7 = DailyQuote.objects.get(trade_date=date(2026, 9, 7))
@@ -272,7 +272,7 @@ class FetchDailyDataTests(TestCase):
             open_price=8, close_price=8, high_price=8, low_price=8,
             open_close_diff=0, open_close_pct=0, high_low_diff=0, high_low_pct=0)
         df = _daily_df([['2026-09-08', 10.0, 8.8, 11.0, 9.0, 1, 1.0]])
-        with patch('stocks.services._try_sources', return_value=(self.src, df)):
+        with patch('stocks.ingest._try_sources', return_value=(self.src, df)):
             services.fetch_daily_data(self.stock, start_date='20260908', end_date='20260908')
         q = DailyQuote.objects.get(trade_date=date(2026, 9, 8))
         self.assertEqual(q.prev_close, Decimal('8.000'))
@@ -284,7 +284,7 @@ class FetchDailyDataTests(TestCase):
             open_price=8, close_price=8, high_price=8, low_price=8,
             open_close_diff=0, open_close_pct=0, high_low_diff=0, high_low_pct=0)
         df = _daily_df([['2026-09-08', 10.0, 10.0, 10.0, 10.0, 1, 1.0]])
-        with patch('stocks.services._try_sources', return_value=(self.src, df)) as ts:
+        with patch('stocks.ingest._try_sources', return_value=(self.src, df)) as ts:
             services.fetch_daily_data(self.stock, full=True)
         self.assertEqual(ts.call_args.args[2], '20200102')
 
@@ -321,7 +321,7 @@ class SaveMinuteBarsTests(TestCase):
         self.assertEqual(services._save_minute_bars(self.stock, df, D), 0)
 
 
-@patch('stocks.services.time.sleep')
+@patch('stocks.datasources.chain.time.sleep')
 class FetchMinuteDataTests(TestCase):
     def setUp(self):
         self.stock = Stock.objects.create(code='600000', name='浦发银行')
@@ -342,7 +342,7 @@ class FetchMinuteDataTests(TestCase):
             ['2026-09-08 10:15:00', 10, 10, 10.9, 9.9, 1, 1],
             ['2026-09-08 14:00:00', 10, 10, 10.2, 9.1, 1, 1],
         ])
-        with patch('stocks.services._try_sources', return_value=(self.src, df)):
+        with patch('stocks.ingest._try_sources', return_value=(self.src, df)):
             res = services.fetch_minute_data(self.stock, trade_date='2026-09-08')
         self.assertEqual(res['high_price'], Decimal('10.9'))
         self.assertEqual(res['low_price'], Decimal('9.1'))
@@ -351,10 +351,10 @@ class FetchMinuteDataTests(TestCase):
         self.assertEqual(timezone.localtime(q.low_time).time().hour, 14)
 
     def test_no_data_or_other_day_only_returns_none(self, _sleep):
-        with patch('stocks.services._try_sources', return_value=(None, None)):
+        with patch('stocks.ingest._try_sources', return_value=(None, None)):
             self.assertIsNone(services.fetch_minute_data(self.stock, trade_date='2026-09-08'))
         df = self._df([['2026-09-07 10:00:00', 10, 10, 11, 9, 1, 1]])
-        with patch('stocks.services._try_sources', return_value=(self.src, df)):
+        with patch('stocks.ingest._try_sources', return_value=(self.src, df)):
             self.assertIsNone(services.fetch_minute_data(self.stock, trade_date='2026-09-08'))
 
     def test_coarse_source_keeps_existing_one_minute_times(self, _sleep):
@@ -362,28 +362,28 @@ class FetchMinuteDataTests(TestCase):
             [pd.Timestamp('2026-09-08 09:31:00'), 10, 10, 10.5, 9.5, 1, 1]]), D, 'em', 1)
         bs = services.BaoStockSource()
         df = self._df([['2026-09-08 09:35:00', 10, 10, 12, 8, 1, 1]])
-        with patch('stocks.services._try_sources', return_value=(bs, df)):
+        with patch('stocks.ingest._try_sources', return_value=(bs, df)):
             self.assertIsNone(services.fetch_minute_data(self.stock, trade_date='2026-09-08'))
         self.assertIsNone(DailyQuote.objects.get(trade_date=D).high_time)
 
     def test_missing_daily_row_still_returns_times(self, _sleep):
         DailyQuote.objects.all().delete()
         df = self._df([['2026-09-08 09:31:00', 10, 10, 10.5, 9.5, 1, 1]])
-        with patch('stocks.services._try_sources', return_value=(self.src, df)):
+        with patch('stocks.ingest._try_sources', return_value=(self.src, df)):
             res = services.fetch_minute_data(self.stock, trade_date='2026-09-08')
         self.assertIsNotNone(res['high_time'])
 
 
-@patch('stocks.services.time.sleep')
+@patch('stocks.jobs.time.sleep')
 class FetchOrchestrationTests(TestCase):
     def setUp(self):
         self.stock = Stock.objects.create(code='600000', name='600000')
 
     def test_all_data_fills_name_and_skips_non_trading_days(self, _sleep):
         today = date(2026, 10, 12)  # 周一；10/10、10/11 为周末
-        with patch('stocks.services.fetch_stock_info', return_value='浦发银行'), \
-                patch('stocks.services.fetch_daily_data', return_value=3) as daily, \
-                patch('stocks.services.fetch_minute_data') as minute, \
+        with patch('stocks.jobs.fetch_stock_info', return_value='浦发银行'), \
+                patch('stocks.jobs.fetch_daily_data', return_value=3) as daily, \
+                patch('stocks.jobs.fetch_minute_data') as minute, \
                 patch('stocks.trading_calendar.is_trading_day', side_effect=lambda d=None: d.weekday() < 5), \
                 patch('django.utils.timezone.localdate', return_value=today):
             n = services.fetch_stock_all_data(self.stock, light=True)
@@ -403,7 +403,7 @@ class FetchOrchestrationTests(TestCase):
                 raise RuntimeError('boom')
             return 7
 
-        with patch('stocks.services.fetch_stock_all_data', side_effect=fake):
+        with patch('stocks.jobs.fetch_stock_all_data', side_effect=fake):
             for fn in (services.fetch_all_active_stocks, services.fetch_keep_fresh):
                 res = {r['code']: r for r in fn()}
                 self.assertEqual(set(res), {'600000', '000001'})
@@ -412,34 +412,34 @@ class FetchOrchestrationTests(TestCase):
 
     def test_incremental_daily_counts_ok_and_fail(self, _sleep):
         Stock.objects.create(code='000001', name='平安银行')
-        with patch('stocks.services.fetch_daily_data', side_effect=[5, RuntimeError('x')]):
+        with patch('stocks.jobs.fetch_daily_data', side_effect=[5, RuntimeError('x')]):
             self.assertEqual(services.fetch_incremental_daily_all(), {'ok': 1, 'fail': 1})
 
     def test_intraday_update_guards(self, _sleep):
-        with patch('stocks.services.is_trading_time', return_value=False), \
-                patch('stocks.services.fetch_minute_data') as minute:
+        with patch('stocks.trading_calendar.is_trading_time', return_value=False), \
+                patch('stocks.jobs.fetch_minute_data') as minute:
             services.fetch_intraday_update()
         minute.assert_not_called()
         # 日历未知（None）时写库任务保守跳过
-        with patch('stocks.services.is_trading_time', return_value=True), \
+        with patch('stocks.trading_calendar.is_trading_time', return_value=True), \
                 patch('stocks.trading_calendar.is_trading_day', return_value=None), \
-                patch('stocks.services.fetch_minute_data') as minute:
+                patch('stocks.jobs.fetch_minute_data') as minute:
             services.fetch_intraday_update()
         minute.assert_not_called()
-        with patch('stocks.services.is_trading_time', return_value=True), \
+        with patch('stocks.trading_calendar.is_trading_time', return_value=True), \
                 patch('stocks.trading_calendar.is_trading_day', return_value=True), \
-                patch('stocks.services.fetch_minute_data', side_effect=RuntimeError('x')) as minute:
+                patch('stocks.jobs.fetch_minute_data', side_effect=RuntimeError('x')) as minute:
             services.fetch_intraday_update()  # 单只失败不抛
         minute.assert_called_once()
 
     def test_daily_summary_guard_and_window(self, _sleep):
         with patch('stocks.trading_calendar.is_trading_day', return_value=False), \
-                patch('stocks.services.fetch_daily_data') as daily:
+                patch('stocks.jobs.fetch_daily_data') as daily:
             services.fetch_daily_summary()
         daily.assert_not_called()
         with patch('stocks.trading_calendar.is_trading_day', return_value=True), \
-                patch('stocks.services.fetch_daily_data') as daily, \
-                patch('stocks.services.fetch_minute_data') as minute:
+                patch('stocks.jobs.fetch_daily_data') as daily, \
+                patch('stocks.jobs.fetch_minute_data') as minute:
             services.fetch_daily_summary()
         start = datetime.strptime(daily.call_args.kwargs['start_date'], '%Y%m%d').date()
         end = datetime.strptime(daily.call_args.kwargs['end_date'], '%Y%m%d').date()

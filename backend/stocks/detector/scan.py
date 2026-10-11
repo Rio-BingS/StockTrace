@@ -183,7 +183,7 @@ def run_scan(trade_date=None):
     trade_date = trade_date or timezone.localdate()
 
     # ---- 守卫（与快照落库同一时纪律）----
-    from ..services import is_trading_day
+    from ..trading_calendar import is_trading_day
 
     if not is_trading_day(trade_date):
         return {'skipped': 'non_trading_day', 'date': trade_date.isoformat()}

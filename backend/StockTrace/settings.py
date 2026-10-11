@@ -290,6 +290,8 @@ REST_FRAMEWORK = {
     ],
     'DEFAULT_PAGINATION_CLASS': 'rest_framework.pagination.PageNumberPagination',
     'PAGE_SIZE': 100,
+    # BadRequest→400（原文案）、UpstreamError→502/503/504、兜底 500；不回显异常原文（ARC-05）
+    'EXCEPTION_HANDLER': 'stocks.common.exception_handler.exception_handler',
 }
 
 # APScheduler：是否在 Web 进程内启动由 STOCKTRACE_SCHEDULER / STOCKTRACE_RUN_SCHEDULER_IN_WEB

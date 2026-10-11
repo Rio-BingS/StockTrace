@@ -8,6 +8,7 @@ import akshare as ak
 import pandas as pd
 from django.utils import timezone
 
+from ..errors import BadRequest
 from ._cache import _cache_get, _cache_set, _now_str, _stale_or, _to_float
 from ._sources import _safe_df_call, get_source_health
 
@@ -62,18 +63,18 @@ def _quarter_label(code):
 
 
 def _normalize_quarter(raw):
-    """'2026Q1' 或 '20261' -> '20261'；非法输入抛 ValueError。"""
+    """'2026Q1' 或 '20261' -> '20261'；非法输入抛 BadRequest（views 转 400）。"""
     s = str(raw).strip().upper().replace('Q', '')
     if len(s) == 5 and s[:4].isdigit() and s[4] in '1234':
         return s
-    raise ValueError('quarter 格式应为 YYYYQn（如 2026Q1）')
+    raise BadRequest('quarter 格式应为 YYYYQn（如 2026Q1）')
 
 
 def _ensure_stock_code(code):
     """code 是用户可控输入，且直接拼进缓存 key 与上游请求；
-    只放行 6 位数字，非法输入抛 ValueError（views 转 400）。"""
+    只放行 6 位数字，非法输入抛 BadRequest（views 转 400）。"""
     if not (str(code).isdigit() and len(str(code)) == 6):
-        raise ValueError('股票代码必须是 6 位数字')
+        raise BadRequest('股票代码必须是 6 位数字')
 
 
 def fetch_institute_hold_stocks(limit=40, ttl=600, quarter=None):

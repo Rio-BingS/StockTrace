@@ -2,6 +2,11 @@
 
 from __future__ import annotations
 
+from ..common.pagination import paginate
+
+# 旧私有名保留一版（ARC-01），新代码请用 stocks.common.pagination.paginate
+_paginate = paginate
+
 
 def _sort_items(items, field, order):
     """数值字段排序；同值使用代码/名称兜底，保证分页结果稳定。"""
@@ -15,16 +20,3 @@ def _sort_items(items, field, order):
     present.sort(key=lambda item: item[field], reverse=order == 'desc')
     missing.sort(key=tie_key)
     return present + missing
-
-
-def _paginate(items, page, page_size):
-    total = len(items)
-    total_pages = max(1, (total + page_size - 1) // page_size)
-    page = min(page, total_pages)
-    start = (page - 1) * page_size
-    return items[start:start + page_size], {
-        'page': page,
-        'page_size': page_size,
-        'total': total,
-        'total_pages': total_pages,
-    }

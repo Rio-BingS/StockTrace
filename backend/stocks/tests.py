@@ -614,7 +614,7 @@ class InstitutionCodeValidationTests(SimpleTestCase):
 class TrendPeriodEndpointTests(SimpleTestCase):
     """走势端点各档位不应因视图层缺陷 500/502。"""
 
-    @patch('stocks.views.get_market_trend', return_value={'series': []})
+    @patch('stocks.views.market.get_market_trend', return_value={'series': []})
     def test_trend_ytd_period_no_longer_502(self, _trend_mock):
         response = self.client.get('/api/market/trend/?period=ytd')
         self.assertEqual(response.status_code, 200)
