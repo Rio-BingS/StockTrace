@@ -275,7 +275,7 @@ sudo systemctl stop stocktrace-scheduler
 | 项 | 建议 |
 |----|------|
 | 自选数量 | 尽量 ≤ 20，盘中任务按股串行 |
-| Gunicorn workers | 保持 1；内存仍紧再降 threads。AI 分析的后台任务队列与结果存在 Web 进程内存里（`/api/ai/jobs/<id>/`），多 worker 时轮询可能打到别的 worker 而 404，进程重启会丢失排队中的任务 |
+| Gunicorn workers | 1H2G 保持 1（省内存）；内存仍紧再降 threads。AI 后台任务（个股分析、AI 选股翻译/点评，`/api/ai/jobs/<id>/`）已落库到 `AiJob`，不再要求单 worker：加 worker 时任务由各 worker 的后台线程从库里抢占执行、不会重复，轮询打到任一 worker 都能查到；重启后排队中的任务继续执行，执行中被打断的标为失败（需重新发起）。AI 并发上限 `STOCKTRACE_AI_MAX_CONCURRENCY` 对后台任务跨 worker 生效，对同步接口仍是每进程 |
 | 调度进程 | `stocktrace-scheduler` 单独计内存（`MemoryMax=700M`），与 Web 互不拖累 |
 | 勿在 VPS 上 `npm run dev` | 只用 `dist` |
 | 勿提交 | `db.sqlite3`、`.env`、htpasswd（含用户名）、真实 SECRET_KEY |
