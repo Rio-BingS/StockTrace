@@ -1,7 +1,7 @@
 """P2 修复回归测试：安全 / AI / 运维方向（sec-ai-ops）。"""
 from unittest import mock
 
-from django.test import TestCase
+from django.test import TestCase, TransactionTestCase
 from rest_framework.test import APIClient
 
 
@@ -506,3 +506,133 @@ class RuntimeVersionDeclTests(TestCase):
             cwd=settings.BASE_DIR, env=env, capture_output=True, text=True, timeout=60,
         )
         self.assertEqual(out.stdout.strip(), '/srv/st-static', out.stderr[-500:])
+
+
+class _DeferredExecutor:
+    """替身执行器：submit 只记录，run_all() 时在当前线程执行（TestCase 事务内可见数据）。"""
+
+    def __init__(self):
+        self.calls = []
+
+    def submit(self, fn, *args):
+        self.calls.append((fn, args))
+
+    def run_all(self):
+        while self.calls:
+            fn, args = self.calls.pop(0)
+            fn(*args)
+
+
+class AiAsyncJobTests(TestCase):
+    """P1 遗留：个股 AI 分析异步化（202 + job_id + 轮询），默认仍同步。"""
+
+    def setUp(self):
+        from stocks.ai import jobs
+        self.provider, self.stock = _ai_fixtures()
+        self.post = _ai_patches(self)
+        self.client = APIClient()
+        self.executor = _DeferredExecutor()
+        patcher = mock.patch.object(jobs, '_get_executor', return_value=self.executor)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        jobs._jobs.clear()
+        self.addCleanup(jobs._jobs.clear)
+        # 后台线程里会关连接；测试里在主线程执行，别关掉 TestCase 的事务连接
+        close = mock.patch.object(jobs, 'close_old_connections')
+        close.start()
+        self.addCleanup(close.stop)
+
+    def _url(self):
+        return f'/api/stocks/{self.stock.id}/ai-analysis/'
+
+    def test_async_returns_job_and_result_via_polling(self):
+        from stocks.models import AiCallLog
+        from stocks.tests_p1_ai import _ok
+        self.post.return_value = _ok('异步分析')
+        r = self.client.post(self._url() + '?async=1')
+        self.assertEqual(r.status_code, 202)
+        job_id = r.data['job_id']
+        self.assertEqual(r.data['status'], 'queued')
+        self.post.assert_not_called()
+        # 额度在提交时就已预占：同股立即再发被冷却挡住
+        self.assertEqual(AiCallLog.objects.count(), 1)
+        self.assertEqual(self.client.post(self._url() + '?async=1').status_code, 429)
+        poll = self.client.get(f'/api/ai/jobs/{job_id}/')
+        self.assertEqual(poll.data['status'], 'queued')
+        self.assertEqual(poll.data['queued_ahead'], 0)
+        self.executor.run_all()
+        poll = self.client.get(f'/api/ai/jobs/{job_id}/')
+        self.assertEqual(poll.data['status'], 'done')
+        self.assertEqual(poll.data['http_status'], 200)
+        self.assertEqual(poll.data['result']['analysis'], '异步分析')
+        self.assertTrue(poll.data['result']['disclaimer'])
+        self.assertTrue(AiCallLog.objects.get().success)
+
+    def test_async_failure_reported_in_job(self):
+        from stocks.tests_ai import _fake_response
+        self.post.return_value = _fake_response(401, text='secret')
+        r = self.client.post(self._url(), {'async': True}, format='json')
+        self.assertEqual(r.status_code, 202)
+        self.executor.run_all()
+        poll = self.client.get(f"/api/ai/jobs/{r.data['job_id']}/")
+        self.assertEqual(poll.data['status'], 'failed')
+        self.assertEqual(poll.data['http_status'], 502)
+        self.assertEqual(poll.data['result']['error'], 'auth')
+        self.assertNotIn('secret', str(poll.data))
+
+    def test_job_waits_for_slot_instead_of_busy(self):
+        from stocks.ai import llm
+        from stocks.tests_p1_ai import _ok
+        self.post.return_value = _ok('ok')
+        # 后台任务持有名额时，内部 chat 不再抢名额；同步请求照旧立即 429
+        with llm.hold_ai_slot(1):
+            text, _ = llm.LlmClient(self.provider).chat([{'role': 'user', 'content': 'x'}])
+            self.assertEqual(text, 'ok')
+        with llm._AiSlot():
+            r = self.client.post(self._url())
+            self.assertEqual(r.status_code, 429)
+            with self.assertRaises(llm.LlmError) as ctx:
+                with llm.hold_ai_slot(0.01):
+                    pass
+            self.assertEqual(ctx.exception.kind, 'busy')
+
+    def test_unknown_job_404_and_sync_default(self):
+        from stocks.tests_p1_ai import _ok
+        self.assertEqual(self.client.get('/api/ai/jobs/nope/').status_code, 404)
+        self.post.return_value = _ok('同步')
+        r = self.client.post(self._url())
+        self.assertEqual(r.status_code, 200)
+        self.assertEqual(r.data['analysis'], '同步')
+
+    def test_finished_jobs_pruned(self):
+        import time
+        from stocks.ai import jobs
+        jobs._jobs['old'] = {'job_id': 'old', 'kind': 'analysis', 'status': 'done',
+                             'created_at': time.time() - 7200, 'finished_at': time.time() - 7200,
+                             'meta': {}}
+        jobs.submit('analysis', lambda: (200, {}))
+        self.assertIsNone(jobs.get('old'))
+
+
+class AiAsyncJobThreadTests(TransactionTestCase):
+    """真实后台线程跑一遍：结果可轮询，流水在后台线程里回填。"""
+
+    def test_real_executor(self):
+        import time
+        from stocks.ai import jobs
+        from stocks.models import AiCallLog
+        from stocks.tests_p1_ai import _ok
+        provider, stock = _ai_fixtures()
+        post = _ai_patches(self)
+        post.return_value = _ok('线程结果')
+        r = APIClient().post(f'/api/stocks/{stock.id}/ai-analysis/?async=1')
+        self.assertEqual(r.status_code, 202)
+        deadline = time.time() + 10
+        while time.time() < deadline:
+            job = jobs.get(r.data['job_id'])
+            if job['status'] in ('done', 'failed'):
+                break
+            time.sleep(0.05)
+        self.assertEqual(job['status'], 'done', job)
+        self.assertEqual(job['result']['analysis'], '线程结果')
+        self.assertTrue(AiCallLog.objects.get().success)

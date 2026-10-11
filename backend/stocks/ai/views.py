@@ -14,7 +14,10 @@ from ..ai_serializers import (
     ScreenerCommentInputSerializer,
     first_error_text,
 )
-from .llm import LlmClient, LlmError, can_fallback, enabled_providers, provider_ordering
+from . import jobs as ai_jobs
+from .llm import (
+    LlmClient, LlmError, can_fallback, enabled_providers, hold_ai_slot, provider_ordering,
+)
 from .prompts import (
     DISCLAIMER,
     build_analysis_messages,
@@ -160,13 +163,8 @@ def _active_clients():
     return clients, None
 
 
-def _run_llm(purpose, invoke, stock=None):
-    """预占额度后按顺序调用服务商，可回退的错误换下一个（AIX-07）。
-
-    invoke(client) 返回 (结果, usage)。返回 (结果, None) 或 (None, 错误 Response)。
-    整个请求只占一条流水与一次额度；回退只发生在上游明确未产出结果、
-    且耗时未超过总时长三分之一时，避免超过 gunicorn/nginx 超时。
-    """
+def _prepare_llm(purpose, stock=None):
+    """取可用服务商并预占额度。返回 ((clients, call_log), None) 或 (None, 错误 Response)。"""
     clients, err = _active_clients()
     if err:
         return None, Response({'detail': err}, status=status.HTTP_400_BAD_REQUEST)
@@ -174,7 +172,25 @@ def _run_llm(purpose, invoke, stock=None):
     call_log, reason = reserve_call(purpose, provider=clients[0].provider, stock=stock)
     if call_log is None:
         return None, Response({'detail': reason}, status=status.HTTP_429_TOO_MANY_REQUESTS)
+    return (clients, call_log), None
 
+
+def _run_llm(purpose, invoke, stock=None):
+    """预占额度后调用服务商（同步）。返回 (结果, None) 或 (None, 错误 Response)。"""
+    prepared, failed = _prepare_llm(purpose, stock=stock)
+    if failed:
+        return None, failed
+    return _execute_llm(purpose, invoke, prepared, stock=stock)
+
+
+def _execute_llm(purpose, invoke, prepared, stock=None):
+    """按顺序调用服务商，可回退的错误换下一个（AIX-07）。
+
+    invoke(client) 返回 (结果, usage)。返回 (结果, None) 或 (None, 错误 Response)。
+    整个请求只占一条流水与一次额度；回退只发生在上游明确未产出结果、
+    且耗时未超过总时长三分之一时，避免超过 gunicorn/nginx 超时。
+    """
+    clients, call_log = prepared
     started = time.monotonic()
     budget = float(getattr(settings, 'STOCKTRACE_LLM_TOTAL_TIMEOUT', 90)) / 3
     attempted = False
@@ -208,11 +224,67 @@ def stock_ai_analysis(request, pk):
         return Response({'detail': '股票不存在'}, status=status.HTTP_404_NOT_FOUND)
 
     messages = build_analysis_messages(stock)
-    text, failed = _run_llm(
-        'analysis', lambda c: c.chat(messages, max_tokens=1500), stock=stock)
+
+    def invoke(client):
+        return client.chat(messages, max_tokens=1500)
+
+    if _wants_async(request):
+        # 异步：同步完成校验与额度预占（429/400 立即返回），LLM 调用进后台队列
+        prepared, failed = _prepare_llm('analysis', stock=stock)
+        if failed:
+            return failed
+
+        def work():
+            try:
+                with hold_ai_slot(_job_slot_wait()):
+                    text, failed = _execute_llm('analysis', invoke, prepared, stock=stock)
+            except LlmError as exc:
+                # 排队等名额超时：没有调用上游，撤销占位
+                failed = _llm_failed(exc, 'analysis', prepared[1], stock=stock)
+            if failed:
+                return failed.status_code, failed.data
+            return 200, {'analysis': text, 'disclaimer': DISCLAIMER}
+
+        job_id = ai_jobs.submit('analysis', work, meta={'stock_id': stock.id})
+        return Response(
+            {'job_id': job_id, 'status': ai_jobs.STATUS_QUEUED,
+             'poll_url': f'/api/ai/jobs/{job_id}/'},
+            status=status.HTTP_202_ACCEPTED,
+        )
+
+    text, failed = _run_llm('analysis', invoke, stock=stock)
     if failed:
         return failed
     return Response({'analysis': text, 'disclaimer': DISCLAIMER})
+
+
+def _wants_async(request):
+    """?async=1 或 body {"async": true} 时走后台任务（默认仍同步，兼容旧前端）。"""
+    raw = request.query_params.get('async')
+    if raw is None and isinstance(request.data, dict):
+        raw = request.data.get('async')
+    return str(raw).lower() in ('1', 'true', 'yes')
+
+
+def _job_slot_wait():
+    # 后台任务排队等 AI 并发名额的上限：与单次调用总时长同量级，等不到就失败、不无限挂着
+    return float(getattr(settings, 'STOCKTRACE_LLM_TOTAL_TIMEOUT', 90))
+
+
+@api_view(['GET'])
+def ai_job_detail(request, job_id):
+    """查询 AI 后台任务：queued/running 时只有状态；done/failed 时带结果与原 HTTP 状态码。"""
+    job = ai_jobs.get(job_id)
+    if job is None:
+        return Response({'detail': '任务不存在或已过期，请重新发起'},
+                        status=status.HTTP_404_NOT_FOUND)
+    body = {'job_id': job['job_id'], 'kind': job['kind'], 'status': job['status']}
+    if 'queued_ahead' in job:
+        body['queued_ahead'] = job['queued_ahead']
+    if job['status'] in (ai_jobs.STATUS_DONE, ai_jobs.STATUS_FAILED):
+        body['http_status'] = job.get('http_status')
+        body['result'] = job.get('result')
+    return Response(body)
 
 
 @api_view(['POST'])

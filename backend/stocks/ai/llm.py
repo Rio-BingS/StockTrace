@@ -59,16 +59,47 @@ def _get_semaphore():
         return _slot_sem
 
 
+# 后台 AI 任务线程用 hold_ai_slot() 排队等到名额后，在本线程内标记"已持有"，
+# 其中的 chat()/chat_json() 不再重复抢名额（否则自己挡自己）
+_slot_local = threading.local()
+
+
 class _AiSlot:
     """非阻塞占用一个 AI 并发名额；拿不到抛 LlmError(kind='busy')。"""
 
     def __enter__(self):
+        if getattr(_slot_local, 'held', False):
+            self.sem = None
+            return self
         self.sem = _get_semaphore()
         if not self.sem.acquire(blocking=False):
             raise LlmError('AI 并发已满', kind='busy')
         return self
 
     def __exit__(self, *exc):
+        if self.sem is not None:
+            self.sem.release()
+        return False
+
+
+class hold_ai_slot:
+    """后台任务用：阻塞等待一个 AI 并发名额（最多 timeout 秒），等不到抛 busy。
+
+    同步请求仍是"满了立即 429"；排队只发生在异步任务里，不占 gunicorn 请求线程。
+    """
+
+    def __init__(self, timeout):
+        self.timeout = timeout
+
+    def __enter__(self):
+        self.sem = _get_semaphore()
+        if not self.sem.acquire(timeout=self.timeout):
+            raise LlmError('等待 AI 并发名额超时', kind='busy')
+        _slot_local.held = True
+        return self
+
+    def __exit__(self, *exc):
+        _slot_local.held = False
         self.sem.release()
         return False
 
