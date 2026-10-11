@@ -560,7 +560,7 @@ function goDetail(row) {
 }
 .msg.error {
   background: #3a1a1f;
-  color: #ff8a96;
+  color: var(--danger);
 }
 .msg.ok {
   background: #1a3a2a;
@@ -620,7 +620,7 @@ function goDetail(row) {
   border-color: #ff5a6e;
 }
 .cond-error {
-  color: #ff8a96;
+  color: var(--danger);
   font-size: 12px;
 }
 .manual-meta {
@@ -672,8 +672,8 @@ function goDetail(row) {
   color: #fff;
 }
 .btn.primary {
-  background: #e94560;
-  border-color: #e94560;
+  background: var(--accent-strong);
+  border-color: var(--accent);
   color: #fff;
 }
 .btn.primary:hover:not(:disabled) {

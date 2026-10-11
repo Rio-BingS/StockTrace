@@ -211,7 +211,7 @@ onMounted(load)
 }
 .msg.error {
   background: #3a1a1f;
-  color: #ff8a96;
+  color: var(--danger);
 }
 .msg.ok {
   background: #1a3a2a;
@@ -266,15 +266,15 @@ onMounted(load)
   color: #fff;
 }
 .btn.primary {
-  background: #e94560;
-  border-color: #e94560;
+  background: var(--accent-strong);
+  border-color: var(--accent);
   color: #fff;
 }
 .btn.primary:hover:not(:disabled) {
   background: #d63a54;
 }
 .btn.danger {
-  color: #ff8a96;
+  color: var(--danger);
   border-color: #5a2a34;
 }
 .modal-mask {

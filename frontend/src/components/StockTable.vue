@@ -299,7 +299,7 @@ async function handleDelete(e, item) {
 }
 
 .code {
-  color: #e94560;
+  color: var(--accent);
   font-weight: bold;
 }
 
@@ -312,12 +312,12 @@ async function handleDelete(e, item) {
 }
 
 .up {
-  color: #e94560;
+  color: var(--up);
   font-weight: bold;
 }
 
 .down {
-  color: #00c853;
+  color: var(--down);
   font-weight: bold;
 }
 
@@ -328,12 +328,12 @@ async function handleDelete(e, item) {
 }
 
 .cost-error {
-  color: #ff8a96;
+  color: var(--danger);
   font-size: 12px;
 }
 
 .empty.error {
-  color: #ff8a96;
+  color: var(--danger);
 }
 
 /* 展开行 */
@@ -462,8 +462,8 @@ async function handleDelete(e, item) {
 /* 删除按钮 */
 .btn-delete {
   background: transparent;
-  border: 1px solid #e94560;
-  color: #e94560;
+  border: 1px solid var(--danger);
+  color: var(--danger);
   border-radius: 4px;
   padding: 2px 8px;
   font-size: 13px;
@@ -472,8 +472,8 @@ async function handleDelete(e, item) {
 }
 
 .btn-delete:hover {
-  background: #e94560;
-  color: #fff;
+  background: var(--danger-bg);
+  color: var(--danger);
 }
 
 /* 移动端适配 */

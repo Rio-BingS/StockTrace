@@ -106,7 +106,7 @@ defineExpose({ open: () => { show.value = true } })
 }
 
 .agree {
-  background: #e94560;
+  background: var(--accent-strong);
   color: #fff;
   border: none;
   border-radius: 6px;
@@ -116,6 +116,6 @@ defineExpose({ open: () => { show.value = true } })
 }
 
 .agree:hover {
-  background: #c73a52;
+  background: var(--accent-strong-hover);
 }
 </style>

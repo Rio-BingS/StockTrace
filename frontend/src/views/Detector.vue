@@ -315,7 +315,7 @@ onUnmounted(() => { signalsGuard.abort(); heatmapGuard.abort() })
 .primary { cursor: pointer; border: 1px solid #286391; background: #174673; color: #fff; border-radius: 6px; padding: 7px 13px; }
 .primary:disabled, .ghost:disabled { opacity: .5; }
 .ghost { cursor: pointer; border: 1px solid #293b5b; background: #0d1729; color: #aeb9cb; border-radius: 6px; padding: 6px 12px; }
-.error-box { background: #3a1520; color: #ff8796; padding: 10px; border-radius: 7px; margin-bottom: 10px; }
+.error-box { background: var(--danger-bg); color: var(--danger); padding: 10px; border-radius: 7px; margin-bottom: 10px; }
 
 .run-grid { display: grid; grid-template-columns: repeat(5, 1fr); gap: 9px; margin: 10px 0; }
 .run-grid > div { background: #111d34; border: 1px solid #213251; border-radius: 8px; padding: 11px; }
@@ -340,17 +340,17 @@ tbody tr { cursor: pointer; }
 tbody tr:hover, tbody tr.selected { background: #162b49; }
 .name { color: #e0e7f1; }
 .name small { color: #80736a; font-size: 10px; margin-left: 4px; }
-.up { color: #ff8796; }
-.down { color: #4cd68a; }
+.up { color: var(--up); }
+.down { color: var(--down); }
 .sev { border-radius: 4px; padding: 2px 7px; font-size: 11px; }
-.sev.high { color: #ff8796; background: #3a1520; }
+.sev.high { color: var(--danger); background: var(--danger-bg); }
 .sev.medium { color: #ffbd6b; background: #382711; }
 .sev.low { color: #8f9bb2; background: #16213e; }
 .status { border-radius: 4px; padding: 2px 7px; font-size: 11px; }
-.status.active { color: #4cd68a; background: #10281d; }
+.status.active { color: var(--ok); background: var(--ok-bg); }
 .status.watching { color: #8f9bb2; background: #16213e; }
 .status.confirmed { color: #79c7ff; background: #122736; }
-.status.missed { color: #ff8796; background: #3a1520; }
+.status.missed { color: var(--danger); background: var(--danger-bg); }
 .empty { text-align: center; padding: 36px 20px; color: #64718a; }
 .empty-hint { background: #16213e; border: 1px dashed #293b5b; color: #8f9bb2; border-radius: 8px; padding: 14px; margin-bottom: 10px; font-size: 13px; line-height: 1.6; }
 .pager { display: flex; gap: 12px; align-items: center; justify-content: center; margin-top: 10px; color: #8f9bb2; font-size: 12px; }

@@ -190,7 +190,7 @@ usePolling(load, { interval: 60000 })
 }
 
 .badge {
-  background: #e94560;
+  background: var(--accent-strong);
   color: #fff;
   border-radius: 10px;
   padding: 1px 8px;
@@ -203,7 +203,7 @@ usePolling(load, { interval: 60000 })
 }
 
 .error-msg {
-  color: #ff8a96;
+  color: var(--danger);
   background: #3a1a1f;
   padding: 8px 12px;
   border-radius: 6px;
@@ -248,8 +248,8 @@ usePolling(load, { interval: 60000 })
 }
 
 .btn.primary {
-  background: #e94560;
-  border-color: #e94560;
+  background: var(--accent-strong);
+  border-color: var(--accent);
   color: #fff;
 }
 
@@ -268,7 +268,7 @@ usePolling(load, { interval: 60000 })
 }
 
 .btn.danger {
-  color: #ff8a96;
+  color: var(--danger);
   border-color: #5a2a33;
 }
 

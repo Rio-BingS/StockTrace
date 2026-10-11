@@ -39,7 +39,7 @@ const isSettings = computed(() => route.path.startsWith('/settings'))
 .nav-brand a {
   font-size: 20px;
   font-weight: bold;
-  color: #e94560;
+  color: var(--accent);
   text-decoration: none;
 }
 

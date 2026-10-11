@@ -17,6 +17,7 @@ import { formatYiAxis, formatTurnover, formatAmount } from '../utils/marketForma
 import { errorMessage, isCanceled } from '../utils/errorMessage.js'
 import { createRequestGuard } from '../utils/requestGuard.js'
 import { usePolling } from '../composables/usePolling.js'
+import { DOWN, FLAT, UP, trendColor } from '../constants/colors.js'
 
 // 显式组件名：App.vue 的 KeepAlive include 按它匹配，不依赖文件名推断（FEF-15）
 defineOptions({ name: 'Market' })
@@ -98,7 +99,7 @@ const fundChartOption = computed(() => {
   // 北向兜底源（stock_hsgt_hist_em 净买额）单位为亿元，换算回元
   const factor = mainHist.value.source === 'eastmoney_hsgt_hist_north' ? 1e8 : 1
   const main = items.map(i => (i.main_net == null ? null : i.main_net * factor))
-  const colors = main.map(v => (v != null && v >= 0 ? '#e94560' : '#00c853'))
+  const colors = main.map(v => trendColor(v))
   return {
     backgroundColor: 'transparent',
     tooltip: {
@@ -144,9 +145,9 @@ const activityChartOption = computed(() => {
       center: ['50%', '52%'],
       label: { color: '#ccc', fontSize: 12 },
       data: [
-        { name: '上涨', value: up, itemStyle: { color: '#e94560' } },
-        { name: '下跌', value: down, itemStyle: { color: '#00c853' } },
-        { name: '平盘', value: flat, itemStyle: { color: '#888' } },
+        { name: '上涨', value: up, itemStyle: { color: UP } },
+        { name: '下跌', value: down, itemStyle: { color: DOWN } },
+        { name: '平盘', value: flat, itemStyle: { color: FLAT } },
       ],
     }],
   }
@@ -458,7 +459,7 @@ onUnmounted(() => flowGuard.abort())
 .val-pct { color: #8490a8; font-size: 12px; }
 .val-pct b { margin-left: 4px; }
 .val-pct b.v-low { color: #d6a13c; }
-.val-pct b.v-high { color: #ff8796; }
+.val-pct b.v-high { color: var(--danger); }
 .val-span { margin-top: 6px; color: #68758d; font-size: 10px; }
 @media (max-width: 1000px) { .val-grid { grid-template-columns: repeat(2, 1fr); } }
 
@@ -487,7 +488,7 @@ onUnmounted(() => flowGuard.abort())
   padding: 8px 18px;
   border: none;
   border-radius: 6px;
-  background: #e94560;
+  background: var(--accent-strong);
   color: #fff;
   cursor: pointer;
   font-size: 14px;
@@ -496,7 +497,7 @@ onUnmounted(() => flowGuard.abort())
 .btn:disabled { opacity: 0.6; cursor: not-allowed; }
 
 .error-box {
-  background: #3a1520;
+  background: var(--danger-bg);
   color: #ff8a9a;
   padding: 12px 16px;
   border-radius: 8px;
@@ -559,7 +560,7 @@ onUnmounted(() => flowGuard.abort())
 }
 
 .module-card:hover {
-  border-color: #e94560;
+  border-color: var(--accent);
   transform: translateY(-2px);
 }
 
@@ -580,7 +581,7 @@ onUnmounted(() => flowGuard.abort())
 .mod-go {
   margin-top: 10px;
   font-size: 13px;
-  color: #e94560;
+  color: var(--accent);
   font-weight: 600;
 }
 
@@ -705,8 +706,8 @@ onUnmounted(() => flowGuard.abort())
   font-size: 13px;
 }
 
-.up { color: #e94560; font-weight: 600; }
-.down { color: #00c853; font-weight: 600; }
+.up { color: var(--up); font-weight: 600; }
+.down { color: var(--down); font-weight: 600; }
 
 @media (max-width: 640px) {
   .page-header h1 { font-size: 20px; }

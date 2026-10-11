@@ -130,9 +130,9 @@ async function run() {
 }
 .btn {
   padding: 6px 14px;
-  border: 1px solid #e94560;
+  border: 1px solid var(--accent);
   border-radius: 6px;
-  background: #e94560;
+  background: var(--accent-strong);
   color: #fff;
   cursor: pointer;
   font-size: 13px;
@@ -143,7 +143,7 @@ async function run() {
 }
 .btn.ghost {
   background: transparent;
-  color: #e94560;
+  color: var(--accent);
 }
 .btn:hover:not(:disabled) {
   background: #d63a54;
@@ -160,7 +160,7 @@ async function run() {
   padding: 8px 12px;
   border-radius: 6px;
   background: #3a1a1f;
-  color: #ff8a96;
+  color: var(--danger);
   font-size: 13px;
   white-space: pre-wrap;
   word-break: break-all;

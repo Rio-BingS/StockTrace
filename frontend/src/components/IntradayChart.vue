@@ -17,6 +17,7 @@ import { intradayBase, signedPctText as pctTextFrom } from '../utils/intraday.js
 import { formatVolume } from '../utils/marketFormat.js'
 import { escapeHtml } from '../utils/escapeHtml.js'
 import { byKey } from '../utils/sortBy.js'
+import { ACCENT, DOWN, UP, alpha, trendColor } from '../constants/colors.js'
 
 use([
   LineChart,
@@ -92,6 +93,8 @@ const chartOption = computed(() => {
   const highPrice = props.dailyQuote?.high_price ? Number(props.dailyQuote.high_price) : null
   const lowPrice = props.dailyQuote?.low_price ? Number(props.dailyQuote.low_price) : null
   const { price: basePrice, isPrevClose } = baseInfo.value
+  // 分时线颜色：现价高于基准（昨收）红、低于绿、持平灰；不再固定为红色（FEX-01）
+  const lineColor = basePrice ? trendColor(prices[prices.length - 1] - basePrice) : ACCENT
 
   // 找最高/最低/现价在数据中的索引
   let highIdx = 0, lowIdx = 0
@@ -112,7 +115,7 @@ const chartOption = computed(() => {
     markPointData.push({
       coord: [highIdx, prices[highIdx]],
       name: `最高 ${prices[highIdx].toFixed(2)}`,
-      itemStyle: { color: '#e94560' },
+      itemStyle: { color: UP },
       symbolOffset: [0, '-60%'],
       label: {
         show: true,
@@ -121,7 +124,7 @@ const chartOption = computed(() => {
           return `高 ${prices[highIdx].toFixed(2)}${pct ? '\n' + pct : ''}`
         },
         fontSize: 10,
-        color: '#e94560',
+        color: UP,
       },
     })
   }
@@ -131,7 +134,7 @@ const chartOption = computed(() => {
     markPointData.push({
       coord: [lowIdx, prices[lowIdx]],
       name: `最低 ${prices[lowIdx].toFixed(2)}`,
-      itemStyle: { color: '#00c853' },
+      itemStyle: { color: DOWN },
       symbolOffset: [0, '60%'],
       label: {
         show: true,
@@ -140,7 +143,7 @@ const chartOption = computed(() => {
           return `低 ${prices[lowIdx].toFixed(2)}${pct ? '\n' + pct : ''}`
         },
         fontSize: 10,
-        color: '#00c853',
+        color: DOWN,
       },
     })
   }
@@ -281,7 +284,7 @@ const chartOption = computed(() => {
         bottom: '3%',
         height: 12,
         borderColor: '#333',
-        fillerColor: 'rgba(233,69,96,0.2)',
+        fillerColor: alpha(ACCENT, 0.2),
         textStyle: { color: '#888' },
       },
     ],
@@ -291,8 +294,8 @@ const chartOption = computed(() => {
       data: prices,
       smooth: false,
       symbol: 'none',
-      lineStyle: { color: '#e94560', width: 1.5 },
-      areaStyle: { color: 'rgba(233,69,96,0.08)' },
+      lineStyle: { color: lineColor, width: 1.5 },
+      areaStyle: { color: alpha(lineColor, 0.08) },
       markPoint: {
         data: markPointData,
         animation: false,
@@ -486,8 +489,8 @@ const extremaList = computed(() => {
   font-weight: bold;
 }
 
-.up { color: #e94560; font-weight: bold; }
-.down { color: #00c853; font-weight: bold; }
+.up { color: var(--up); font-weight: bold; }
+.down { color: var(--down); font-weight: bold; }
 
 .extrema-section {
   margin-top: 16px;

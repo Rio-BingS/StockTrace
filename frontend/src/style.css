@@ -12,10 +12,24 @@
   --text-primary: #eeeeee;
   --text-secondary: #aaaaaa;
   --text-muted: #666666;
-  --accent: #e94560;
-  --accent-hover: #c73a52;
-  --up: #e94560;
-  --down: #00c853;
+  /* 品牌强调色与涨跌色分离：链接、按钮、选中态用蓝色，红绿只表示涨跌（FEX-01） */
+  --accent: #5b9bff;
+  --accent-hover: #82b4ff;
+  /* 实心按钮底色（白字对比度 ≥4.5） */
+  --accent-strong: #2563eb;
+  --accent-strong-hover: #1d4fd8;
+  /* A 股红涨绿跌；全站只此一套，图表颜色见 constants/colors.js */
+  --up: #ff6b81;
+  --down: #2ed47a;
+  --flat: #9aa3b2;
+  --up-bg: #3a1520;
+  --down-bg: #10281d;
+  /* 状态语义色：与涨跌色区分，避免"错误/过期"被读成"上涨" */
+  --danger: #ff8a65;
+  --danger-bg: #3a1d14;
+  --warn: #ffbd6b;
+  --ok: #5eead4;
+  --ok-bg: #0f2a2a;
   --border: #2a2a3e;
 
   font-family: 'Inter', system-ui, -apple-system, sans-serif;
@@ -30,14 +44,17 @@ body {
   min-height: 100vh;
 }
 
-/* 涨跌着色（A 股红涨绿跌）：pctClass() 返回 up/down，全局兜底，
-   组件内 scoped 定义可再覆盖 */
+/* 涨跌着色（A 股红涨绿跌）：pctClass() 返回 up/down，全站统一用这两个变量 */
 .up {
   color: var(--up);
 }
 
 .down {
   color: var(--down);
+}
+
+.flat {
+  color: var(--flat);
 }
 
 a {

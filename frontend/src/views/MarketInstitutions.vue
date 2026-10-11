@@ -16,6 +16,7 @@ import { formatNum, formatPct, pctClass } from '../utils/format.js'
 import { formatAmount, formatVolume } from '../utils/marketFormat.js'
 import { errorMessage, isCanceled } from '../utils/errorMessage.js'
 import { createRequestGuard } from '../utils/requestGuard.js'
+import { trendColor } from '../constants/colors.js'
 
 // 显式组件名：App.vue 的 KeepAlive include 按它匹配，不依赖文件名推断（FEF-15）
 defineOptions({ name: 'MarketInstitutions' })
@@ -106,7 +107,7 @@ const northChart = computed(() => {
       type: 'bar',
       data: nets,
       itemStyle: {
-        color: (p) => (p.value != null && p.value >= 0 ? '#e94560' : '#00c853'),
+        color: (p) => trendColor(p.value),
       },
     }],
   }
@@ -433,7 +434,7 @@ onUnmounted(() => { northGuard.abort(); detailGuard.abort() })
 }
 
 .error-box {
-  background: #3a1520;
+  background: var(--danger-bg);
   color: #ff8a9a;
   padding: 10px 14px;
   border-radius: 8px;
@@ -560,8 +561,8 @@ onUnmounted(() => { northGuard.abort(); detailGuard.abort() })
   word-break: break-all;
 }
 
-.data-table .up { color: #e94560; }
-.data-table .down { color: #00c853; }
+.data-table .up { color: var(--up); }
+.data-table .down { color: var(--down); }
 
 .link-btn {
   background: none;

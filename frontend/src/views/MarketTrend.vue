@@ -16,6 +16,7 @@ import { marketApi } from '../api/stocks.js'
 import { formatPct, pctClass } from '../utils/format.js'
 import { errorMessage, isCanceled } from '../utils/errorMessage.js'
 import { createRequestGuard } from '../utils/requestGuard.js'
+import { ACCENT } from '../constants/colors.js'
 
 // 显式组件名：App.vue 的 KeepAlive include 按它匹配，不依赖文件名推断（FEF-15）
 defineOptions({ name: 'MarketTrend' })
@@ -29,7 +30,8 @@ use([
   CanvasRenderer,
 ])
 
-const COLORS = ['#e94560', '#4fc3f7', '#ffb74d', '#81c784', '#ba68c8']
+// 多指数对比的系列色：首色用品牌蓝，不用涨跌红绿，避免被读成涨跌（FEX-01）
+const COLORS = [ACCENT, '#ffb74d', '#ba68c8', '#4fc3f7', '#f06292']
 
 const PERIOD_OPTIONS = [
   ['1w', '近1周'], ['1m', '近1月'], ['3m', '近3月'],
@@ -227,7 +229,7 @@ onUnmounted(() => guard.abort())
   padding: 8px 16px;
   border: none;
   border-radius: 6px;
-  background: #e94560;
+  background: var(--accent-strong);
   color: #fff;
   cursor: pointer;
 }
@@ -244,7 +246,7 @@ onUnmounted(() => guard.abort())
 .apply-btn { padding: 5px 12px; border: 1px solid #286391; background: #174673; color: #fff; border-radius: 5px; cursor: pointer; }
 .apply-btn:disabled { opacity: .5; }
 .error-box {
-  background: #3a1520;
+  background: var(--danger-bg);
   color: #ff8a9a;
   padding: 12px;
   border-radius: 8px;

@@ -10,6 +10,7 @@ import { GridComponent, TooltipComponent, VisualMapComponent } from 'echarts/com
 import { CanvasRenderer } from 'echarts/renderers'
 import { escapeHtml } from '../utils/escapeHtml.js'
 import { fmtSigned } from '../utils/number.js'
+import { DOWN, UP, trendColor } from '../constants/colors.js'
 
 use([HeatmapChart, GridComponent, TooltipComponent, VisualMapComponent, CanvasRenderer])
 
@@ -45,7 +46,7 @@ const option = computed(() => {
         const dim = props.dims[p.value[0]]
         const v = p.value[2]
         // 板块名来自第三方数据源，拼 HTML 前转义（SEC-09）
-        return `${escapeHtml(row?.name)}<br/>${escapeHtml(dim?.name)}：<b style="color:${v >= 0 ? '#ff8796' : '#4cd68a'}">${fmtSigned(v, 1)}</b>`
+        return `${escapeHtml(row?.name)}<br/>${escapeHtml(dim?.name)}：<b style="color:${trendColor(Math.round(v * 10))}">${fmtSigned(v, 1)}</b>`
       },
     },
     grid: { left: 8, right: 12, top: 6, bottom: 40, containLabel: true },
@@ -76,7 +77,7 @@ const option = computed(() => {
       itemHeight: 90,
       textStyle: { color: '#68758d', fontSize: 10 },
       // A 股配色：红=向上微变、绿=向下微变、中段深色=接近 0
-      inRange: { color: ['#00a846', '#0f3d2e', '#16213e', '#3d1e2b', '#e94560'] },
+      inRange: { color: [DOWN, '#0f3d2e', '#16213e', '#3d1e2b', UP] },
     },
     series: [{
       type: 'heatmap',

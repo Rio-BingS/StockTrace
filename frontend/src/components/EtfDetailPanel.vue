@@ -8,6 +8,7 @@ import { CanvasRenderer } from 'echarts/renderers'
 import { marketApi } from '../api/stocks.js'
 import { formatNum, formatPct, formatSigned, pctClass } from '../utils/format.js'
 import { formatAmount, formatShare } from '../utils/marketFormat.js'
+import { ACCENT } from '../constants/colors.js'
 import MarketDataStatus from './MarketDataStatus.vue'
 import { errorMessage, isCanceled } from '../utils/errorMessage.js'
 import { createRequestGuard } from '../utils/requestGuard.js'
@@ -49,7 +50,7 @@ const chartOption = computed(() => {
     { type: 'value', gridIndex: 1, axisLabel: { show: false }, splitLine: { show: false } },
   ]
   const series = [
-    { name: '收盘价', type: 'line', showSymbol: false, smooth: true, data: history.value.map(i => i.close), itemStyle: { color: '#e94560' }, lineStyle: { width: 2 } },
+    { name: '收盘价', type: 'line', showSymbol: false, smooth: true, data: history.value.map(i => i.close), itemStyle: { color: ACCENT }, lineStyle: { width: 2 } },
     { name: '成交额', type: 'bar', xAxisIndex: 1, yAxisIndex: 1, data: history.value.map(i => i.turnover), itemStyle: { color: '#315e8c' } },
   ]
   if (hasShare) {
@@ -195,7 +196,7 @@ onUnmounted(() => guard.abort())
 <style scoped>
 .detail-panel { min-height: 520px; background: #111d34; border: 1px solid #213251; border-radius: 10px; padding: 14px; color: #dce4f2; }
 .placeholder, .error { display: grid; place-items: center; min-height: 420px; color: #64718a; text-align: center; }
-.error { color: #ff8796; }
+.error { color: var(--danger); }
 header { display: flex; justify-content: space-between; gap: 12px; border-bottom: 1px solid #213251; padding-bottom: 12px; }
 h2 { margin: 0; font-size: 18px; } header span { color: #71809a; font-size: 12px; }
 .price { text-align: right; }.price strong { display: block; font-size: 22px; }.price span { font-size: 14px; }

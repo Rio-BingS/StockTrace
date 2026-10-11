@@ -251,7 +251,7 @@ onUnmounted(() => {
 
 .input:focus {
   outline: none;
-  border-color: #e94560;
+  border-color: var(--accent);
 }
 
 .search-dropdown {
@@ -289,17 +289,17 @@ onUnmounted(() => {
 }
 
 .dropdown-status.error {
-  color: #ff8a96;
+  color: var(--danger);
 }
 
 .search-hint {
   margin-top: 4px;
-  color: #ff8a96;
+  color: var(--danger);
   font-size: 12px;
 }
 
 .item-code {
-  color: #e94560;
+  color: var(--accent);
   font-weight: bold;
   font-size: 14px;
   min-width: 60px;

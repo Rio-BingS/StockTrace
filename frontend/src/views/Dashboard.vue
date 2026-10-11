@@ -304,7 +304,7 @@ onUnmounted(() => {
 
 .load-error {
   margin-bottom: 10px;
-  color: #ff8a96;
+  color: var(--danger);
   font-size: 13px;
 }
 
@@ -314,11 +314,11 @@ onUnmounted(() => {
 }
 
 .portfolio.up {
-  color: #e94560;
+  color: var(--up);
 }
 
 .portfolio.down {
-  color: #00c853;
+  color: var(--down);
 }
 
 .group-bar {
@@ -356,7 +356,7 @@ onUnmounted(() => {
 }
 
 .g-op.danger {
-  color: #ff8a96;
+  color: var(--danger);
 }
 
 .btn {
@@ -369,12 +369,12 @@ onUnmounted(() => {
 }
 
 .btn-primary {
-  background: #e94560;
+  background: var(--accent-strong);
   color: #fff;
 }
 
 .btn-primary:hover {
-  background: #c73a52;
+  background: var(--accent-strong-hover);
 }
 
 .btn-primary:disabled {

@@ -304,7 +304,7 @@ watch(latestQuote, (q) => {
 }
 
 .back-link {
-  color: #e94560;
+  color: var(--accent);
   text-decoration: none;
   font-size: 14px;
 }
@@ -356,11 +356,11 @@ watch(latestQuote, (q) => {
 }
 
 .up {
-  color: #e94560;
+  color: var(--up);
 }
 
 .down {
-  color: #00c853;
+  color: var(--down);
 }
 
 .no-data {

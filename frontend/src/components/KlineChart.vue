@@ -16,6 +16,7 @@ import { formatNum, formatPct, formatRate, pctFrom } from '../utils/format.js'
 import { formatAmount, formatVolume } from '../utils/marketFormat.js'
 import { escapeHtml } from '../utils/escapeHtml.js'
 import { byKey } from '../utils/sortBy.js'
+import { ACCENT, DOWN, FLAT, UP, alpha, trendColor } from '../constants/colors.js'
 
 use([
   CandlestickChart,
@@ -144,7 +145,7 @@ const chartOption = computed(() => {
         bottom: '2%',
         height: 12,
         borderColor: '#333',
-        fillerColor: 'rgba(233,69,96,0.2)',
+        fillerColor: alpha(ACCENT, 0.2),
         textStyle: { color: '#888' },
       },
     ],
@@ -157,10 +158,10 @@ const chartOption = computed(() => {
         yAxisIndex: 0,
         // A股配色：红涨绿跌
         itemStyle: {
-          color: '#e94560',       // 阳线填充（涨）
-          color0: '#00c853',      // 阴线填充（跌）
-          borderColor: '#e94560', // 阳线边框
-          borderColor0: '#00c853', // 阴线边框
+          color: UP, // 阳线填充（涨）
+          color0: DOWN, // 阴线填充（跌）
+          borderColor: UP, // 阳线边框
+          borderColor0: DOWN, // 阴线边框
         },
         // 蜡烛图默认按收盘价维度取极值，需显式指定最高/最低价维度（FEF-12）
         markPoint: {
@@ -171,7 +172,7 @@ const chartOption = computed(() => {
               name: '最高',
               symbol: 'pin',
               symbolSize: 40,
-              itemStyle: { color: '#e94560' },
+              itemStyle: { color: UP },
               label: { show: true, fontSize: 10 },
             },
             {
@@ -180,7 +181,7 @@ const chartOption = computed(() => {
               name: '最低',
               symbol: 'pin',
               symbolSize: 40,
-              itemStyle: { color: '#00c853' },
+              itemStyle: { color: DOWN },
               label: { show: true, fontSize: 10 },
             },
           ],
@@ -194,11 +195,9 @@ const chartOption = computed(() => {
         yAxisIndex: 1,
         itemStyle: {
           color: function (params) {
-            // 根据涨跌着色
-            const idx = params.dataIndex
-            return klineData[idx] && klineData[idx][1] >= klineData[idx][0]
-              ? '#e9456080'
-              : '#00c85380'
+            // 根据当日阴阳着色，平盘（收=开）为灰色（FEX-01）
+            const k = klineData[params.dataIndex]
+            return alpha(k ? trendColor(k[1] - k[0]) : FLAT, 0.5)
           },
         },
       },

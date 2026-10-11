@@ -33,6 +33,6 @@ const cacheLabel = computed(() => ({
 .stale { border-color: #604a28; background: #211b15; }
 .stale .badge { color: #f0bd71; }
 .unavailable { border-color: #5f2834; background: #2b151c; }
-.unavailable .badge { color: #ff8796; }
+.unavailable .badge { color: var(--danger); }
 p { margin: 5px 0 0; line-height: 1.5; }
 </style>

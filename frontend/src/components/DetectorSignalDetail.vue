@@ -150,21 +150,21 @@ onMounted(load)
 .head h2 small { color: #68758d; font-size: 11px; font-weight: 400; margin-left: 6px; }
 .badges { display: flex; flex-wrap: wrap; gap: 5px; }
 .badge, .dir { border-radius: 4px; padding: 3px 8px; font-size: 11px; background: #16213e; color: #8f9bb2; }
-.dir.up { color: #ff8796; background: #3a1520; }
-.dir.down { color: #4cd68a; background: #10281d; }
-.badge.sev.high { color: #ff8796; background: #3a1520; }
+.dir.up { color: var(--up); background: var(--up-bg); }
+.dir.down { color: var(--down); background: var(--down-bg); }
+.badge.sev.high { color: var(--danger); background: var(--danger-bg); }
 .badge.sev.medium { color: #ffbd6b; background: #382711; }
 .badge.sev.low { color: #8f9bb2; }
-.badge.status.active { color: #4cd68a; background: #10281d; }
+.badge.status.active { color: var(--ok); background: var(--ok-bg); }
 .badge.status.confirmed { color: #79c7ff; background: #122736; }
-.badge.status.missed { color: #ff8796; background: #3a1520; }
+.badge.status.missed { color: var(--danger); background: var(--danger-bg); }
 
 .dims { display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 10px; }
 .dim-chip { background: #0d1729; border: 1px solid #213251; border-radius: 7px; padding: 7px 10px; font-size: 11px; min-width: 130px; }
 .dim-chip b { display: block; color: #dce4f2; margin-bottom: 3px; }
 .dim-chip span { color: #8f9bb2; margin-right: 6px; }
-.dim-chip span.up { color: #ff8796; }
-.dim-chip span.down { color: #4cd68a; }
+.dim-chip span.up { color: var(--up); }
+.dim-chip span.down { color: var(--down); }
 .dim-chip small { color: #64718a; display: block; line-height: 1.4; max-width: 220px; white-space: normal; }
 .dim-chip.off { opacity: .65; }
 .dim-chip.disabled { border-style: dashed; }
@@ -175,6 +175,6 @@ onMounted(load)
 .chart-cell { background: #0d1729; border: 1px solid #1d2a43; border-radius: 8px; padding: 8px 10px; }
 .chart-cell label { display: block; color: #7887a1; font-size: 11px; margin-bottom: 2px; }
 .hint { margin: 9px 0 0; color: #64718a; font-size: 11px; line-height: 1.6; }
-.error-box { background: #3a1520; color: #ff8796; padding: 10px; border-radius: 7px; }
+.error-box { background: var(--danger-bg); color: var(--danger); padding: 10px; border-radius: 7px; }
 .empty { text-align: center; padding: 36px 20px; color: #64718a; }
 </style>
