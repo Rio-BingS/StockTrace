@@ -121,16 +121,21 @@ def _new_extreme(n, high):
     return getter
 
 
+# 量比基期：前 N 根均量（字段说明「今量/5日均量」与此一致）
+_VOLUME_RATIO_BASE = 5
+
+
 def _volume_ratio(ctx):
     """量比：今日成交量 / 前 5 根均量。"""
     bars = ctx['bars']
-    if len(bars) < 6:
+    n = _VOLUME_RATIO_BASE
+    if len(bars) < n + 1:
         return None
     today = _f(bars[-1].volume)
-    base = [_f(b.volume) for b in bars[-6:-1]]
+    base = [_f(b.volume) for b in bars[-(n + 1):-1]]
     if not today or any(v is None or v == 0 for v in base):
         return None
-    return today / (sum(base) / 5)
+    return today / (sum(base) / n)
 
 
 def _turnover_5d_avg(ctx):
@@ -183,8 +188,13 @@ def _up_days(ctx):
 # MACD 预热（ALG-12）：EMA 以首值为种子，35 根时 EMA26 的种子残差仍约 7%，
 # 金叉/零轴判定可能与行情软件不一致；120 根时残差 < 0.01%
 _MACD_MIN_BARS = 120
+_MACD_FAST, _MACD_SLOW, _MACD_SIGNAL = 12, 26, 9
 _KDJ_MIN_BARS = 12    # RSV9 + K/D 递推预热
+_KDJ_N = 9            # RSV 周期
+_KDJ_M = 3            # K/D 平滑：SMA(X, 3, 1)
+_KDJ_SEED = 50.0      # K/D 递推种子；最高=最低时 RSV 也取这个值
 _BOLL_N = 20
+_BOLL_K = 2           # 上下轨 = 中轨 ± K 倍标准差
 # BOLL 标准差口径（ALG-12）：ddof=1 即样本标准差（除以 N-1），
 # 与通达信 STD 函数口径一致；改口径只需改这里
 _BOLL_DDOF = 1
@@ -213,10 +223,10 @@ def _indicators(ctx):
 
     # ---- MACD(12, 26, 9)，柱 = 2*(DIF-DEA)（国内口径） ----
     if len(closes) >= _MACD_MIN_BARS and None not in closes:
-        ema12 = _ema_series(closes, 12)
-        ema26 = _ema_series(closes, 26)
+        ema12 = _ema_series(closes, _MACD_FAST)
+        ema26 = _ema_series(closes, _MACD_SLOW)
         dif = [a - b for a, b in zip(ema12, ema26)]
-        dea = _ema_series(dif, 9)
+        dea = _ema_series(dif, _MACD_SIGNAL)
         ind['macd_dif'] = dif[-1]
         ind['macd_dea'] = dea[-1]
         ind['macd_hist'] = 2 * (dif[-1] - dea[-1])
@@ -234,24 +244,24 @@ def _indicators(ctx):
     # ---- KDJ(9, 3, 3)，SMA(X,3,1) 递推，K/D 种子 50 ----
     if len(closes) >= _KDJ_MIN_BARS and None not in closes \
             and None not in highs and None not in lows:
-        k, d = 50.0, 50.0
+        k, d = _KDJ_SEED, _KDJ_SEED
         for i in range(len(bars)):
-            hh = max(highs[max(0, i - 8):i + 1])
-            ll = min(lows[max(0, i - 8):i + 1])
-            rsv = 50.0 if hh == ll else (closes[i] - ll) / (hh - ll) * 100
-            k = (2 * k + rsv) / 3
-            d = (2 * d + k) / 3
+            hh = max(highs[max(0, i - (_KDJ_N - 1)):i + 1])
+            ll = min(lows[max(0, i - (_KDJ_N - 1)):i + 1])
+            rsv = _KDJ_SEED if hh == ll else (closes[i] - ll) / (hh - ll) * 100
+            k = ((_KDJ_M - 1) * k + rsv) / _KDJ_M
+            d = ((_KDJ_M - 1) * d + k) / _KDJ_M
         ind['kdj_k'] = k
         ind['kdj_d'] = d
         ind['kdj_j'] = 3 * k - 2 * d
         # 金叉/死叉用倒数第二根状态
-        k2, d2 = 50.0, 50.0
+        k2, d2 = _KDJ_SEED, _KDJ_SEED
         for i in range(len(bars) - 1):
-            hh = max(highs[max(0, i - 8):i + 1])
-            ll = min(lows[max(0, i - 8):i + 1])
-            rsv = 50.0 if hh == ll else (closes[i] - ll) / (hh - ll) * 100
-            k2 = (2 * k2 + rsv) / 3
-            d2 = (2 * d2 + k2) / 3
+            hh = max(highs[max(0, i - (_KDJ_N - 1)):i + 1])
+            ll = min(lows[max(0, i - (_KDJ_N - 1)):i + 1])
+            rsv = _KDJ_SEED if hh == ll else (closes[i] - ll) / (hh - ll) * 100
+            k2 = ((_KDJ_M - 1) * k2 + rsv) / _KDJ_M
+            d2 = ((_KDJ_M - 1) * d2 + k2) / _KDJ_M
         ind['kdj_golden_cross'] = 1 if k >= d and k2 < d2 else 0
         ind['kdj_dead_cross'] = 1 if k <= d and k2 > d2 else 0
     else:
@@ -286,8 +296,8 @@ def _indicators(ctx):
         std = (sum((c - mid) ** 2 for c in boll_closes) / (_BOLL_N - _BOLL_DDOF)) ** 0.5
         last = closes[-1]
         ind['above_boll_mid'] = 1 if last >= mid else 0
-        ind['above_boll_upper'] = 1 if last >= mid + 2 * std else 0
-        ind['below_boll_lower'] = 1 if last <= mid - 2 * std else 0
+        ind['above_boll_upper'] = 1 if last >= mid + _BOLL_K * std else 0
+        ind['below_boll_lower'] = 1 if last <= mid - _BOLL_K * std else 0
     else:
         ind.update({k: None for k in (
             'above_boll_mid', 'above_boll_upper', 'below_boll_lower',
