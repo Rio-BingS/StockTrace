@@ -110,7 +110,7 @@ def wrap_user_query(text):
 # ---- 选股条件翻译 ----
 
 def screener_schema_text():
-    from .screener import FIELDS
+    from ..screener.engine import FIELDS
     field_lines = '\n'.join(
         f'- {key}：{name}（{unit}）' for key, (name, _, unit) in FIELDS.items()
     )

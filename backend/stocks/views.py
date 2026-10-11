@@ -748,11 +748,11 @@ def alert_event_read(request):
 @api_view(['GET', 'POST'])
 def screener_preset_list(request):
     """预设列表 / 保存（spec 用与执行完全相同的校验规则，保存即可执行）"""
-    from .ai.screener import ConditionError, _validate
+    from .screener.engine import ConditionError, _validate
     from .models import ScreenerPreset
 
     if request.method == 'GET':
-        from .ai.strategies import BUILTIN_STRATEGIES
+        from .screener.strategies import BUILTIN_STRATEGIES
 
         presets = ScreenerPreset.objects.all()
         builtins = [{

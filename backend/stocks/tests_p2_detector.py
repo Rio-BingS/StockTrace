@@ -998,3 +998,23 @@ class BuiltinStrategyConsistencyTests(TestCase):
         base = {'above_ma20': 1, 'volume_ratio': 0.5}
         self.assertFalse(self._match_all(spec, {**base, 'pct_from_high_20d': 0.0}))
         self.assertTrue(self._match_all(spec, {**base, 'pct_from_high_20d': -5.0}))
+
+
+class ScreenerPackageCompatTests(TestCase):
+    """ARC-07：选股模块迁到 stocks.screener，旧路径仍可导入且是同一模块对象。"""
+
+    def test_old_paths_alias_new_modules(self):
+        from .ai import screener as old_engine, strategies as old_strategies
+        from .screener import engine, strategies
+
+        self.assertIs(old_engine, engine)
+        self.assertIs(old_strategies, strategies)
+        from .ai.screener import run_screener
+
+        self.assertIs(run_screener, engine.run_screener)
+
+    def test_patch_through_old_path_affects_engine(self):
+        from .screener import engine
+
+        with patch('stocks.ai.screener.MAX_LOOKBACK', 7):
+            self.assertEqual(engine.MAX_LOOKBACK, 7)
