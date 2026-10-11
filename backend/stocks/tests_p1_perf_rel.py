@@ -438,3 +438,50 @@ class SqliteConcurrencyTests(SimpleTestCase):
         self.addCleanup(check.close)
         # IMMEDIATE 串行化：第二个事务读到第一个提交后的计数
         self.assertEqual(sorted(r[0] for r in check.execute('SELECT n FROM t')), [0, 1])
+
+
+class DashboardAndDailyQueryTests(TestCase):
+    """PERF-05：Dashboard 用子查询取每只最新日线；/daily/ 无 N+1、缺省 365 天、上限 3650。"""
+
+    def setUp(self):
+        from datetime import timedelta
+        from decimal import Decimal
+
+        from django.utils import timezone
+
+        from .models import DailyQuote, Stock
+
+        self.today = timezone.now().date()
+        self.a = Stock.objects.create(code='600000', name='A')
+        self.b = Stock.objects.create(code='600001', name='B')
+        Stock.objects.create(code='600002', name='C')  # 无行情
+        for stock, offsets in ((self.a, (0, 1, 2, 400, 4000)), (self.b, (3, 10))):
+            for off in offsets:
+                DailyQuote.objects.create(
+                    stock=stock, trade_date=self.today - timedelta(days=off),
+                    open_price=Decimal('10'), close_price=Decimal(10 + off % 7),
+                    high_price=Decimal('20'), low_price=Decimal('5'),
+                    open_close_diff=Decimal('0'), open_close_pct=Decimal('0'),
+                    high_low_diff=Decimal('15'), high_low_pct=Decimal('300'), volume=1,
+                )
+
+    def test_dashboard_latest_per_stock_in_two_queries(self):
+        from datetime import timedelta
+
+        with self.assertNumQueries(2):
+            r = self.client.get('/api/dashboard/')
+        self.assertEqual(r.status_code, 200)
+        rows = {row['code']: row for row in r.json()}
+        self.assertEqual(rows['600000']['trade_date'], self.today.isoformat())
+        self.assertEqual(rows['600001']['trade_date'], (self.today - timedelta(days=3)).isoformat())
+        self.assertIsNone(rows['600002']['trade_date'])
+
+    def test_daily_default_window_select_related_and_cap(self):
+        url = f'/api/stocks/{self.a.id}/daily/'
+        with self.assertNumQueries(2):  # get_object + 日线（含 stock join）
+            r = self.client.get(url)
+        self.assertEqual(r.status_code, 200)
+        self.assertEqual(len(r.json()), 3)  # 400 / 4000 天前的不在缺省窗口
+        self.assertTrue(all(row['code'] == '600000' for row in r.json()))
+        self.assertEqual(len(self.client.get(url, {'days': 500}).json()), 4)
+        self.assertEqual(len(self.client.get(url, {'days': 99999}).json()), 4)  # 上限 3650 天

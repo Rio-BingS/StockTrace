@@ -2,6 +2,7 @@ from rest_framework import viewsets, status
 from rest_framework.decorators import action, api_view
 from rest_framework.response import Response
 from django.db import IntegrityError, transaction
+from django.db.models import OuterRef, Subquery
 from django.utils import timezone
 from datetime import date, datetime, timedelta
 import logging
@@ -148,9 +149,10 @@ class StockViewSet(viewsets.ModelViewSet):
 
     @action(detail=True, methods=['get'], url_path='daily')
     def daily_quotes(self, request, pk=None):
-        """获取某股票日K数据，支持 ?days=N 和 ?date=YYYY-MM-DD"""
+        """获取某股票日K数据，支持 ?days=N（上限 3650）和 ?date=YYYY-MM-DD；缺省近 365 天"""
         stock = self.get_object()
-        queryset = DailyQuote.objects.filter(stock=stock)
+        # select_related：序列化器 source='stock.code' 否则每行懒加载一次（PERF-05）
+        queryset = DailyQuote.objects.filter(stock=stock).select_related('stock')
 
         # 按日期筛选
         if date_str := request.query_params.get('date'):
@@ -177,6 +179,9 @@ class StockViewSet(viewsets.ModelViewSet):
                 )
             start_date = timezone.now().date() - timedelta(days=min(days, 3650))
             queryset = queryset.filter(trade_date__gte=start_date)
+        else:
+            # 无参数默认近 365 天，不再整表倒出（PERF-05）
+            queryset = queryset.filter(trade_date__gte=timezone.now().date() - timedelta(days=365))
 
         queryset = queryset.order_by('-trade_date')
         serializer = DailyQuoteSerializer(queryset, many=True)
@@ -277,21 +282,18 @@ def _quote_row(stock, quote):
 @api_view(['GET'])
 def dashboard(request):
     """Dashboard 聚合：自选 + 每只最新日行情（2 次查询，避免 N+1）"""
-    stocks = list(Stock.objects.filter(is_active=True).select_related('group').order_by('code'))
+    # 每只最新一行日线用相关子查询取 id（走 stock+trade_date 唯一索引），
+    # 不再每 60s 轮询都遍历全部历史日线（PERF-05）
+    latest = DailyQuote.objects.filter(stock_id=OuterRef('pk')).order_by('-trade_date').values('id')[:1]
+    stocks = list(
+        Stock.objects.filter(is_active=True).select_related('group')
+        .annotate(latest_quote_id=Subquery(latest)).order_by('code')
+    )
     if not stocks:
         return Response([])
 
-    stock_ids = [s.id for s in stocks]
-    # 按 stock、日期倒序，遍历时取每只第一条即为最新
-    quotes = (
-        DailyQuote.objects
-        .filter(stock_id__in=stock_ids)
-        .order_by('stock_id', '-trade_date')
-    )
-    latest_map = {}
-    for q in quotes.iterator(chunk_size=200):
-        if q.stock_id not in latest_map:
-            latest_map[q.stock_id] = q
+    quotes = DailyQuote.objects.in_bulk([s.latest_quote_id for s in stocks if s.latest_quote_id])
+    latest_map = {s.id: quotes.get(s.latest_quote_id) for s in stocks}
 
     data = [_quote_row(s, latest_map.get(s.id)) for s in stocks]
     serializer = DashboardStockSerializer(data, many=True)
