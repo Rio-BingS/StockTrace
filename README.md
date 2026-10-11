@@ -78,4 +78,4 @@ npm run lint && npm test && npm run build
 
 1H2G VPS：Nginx + Gunicorn（1 worker 2 线程）+ systemd，Cloudflare Full (strict) SSL + Nginx 限流 + Basic Auth。模板与步骤见 [`deploy/DEPLOY.md`](deploy/DEPLOY.md)。
 
-**版本号只以 git 标签为准**（SemVer，`git describe --tags` 查看当前版本），文档里不再写死版本号；`frontend/package.json` 的 `version` 是私有包占位，不代表发布版本。发版流程：CI 通过后在 main 上打注释标签 `git tag -a vX.Y.Z` 并 `git push --follow-tags`。
+**版本号以仓库根目录 `VERSION` 文件为唯一来源**（SemVer）：后端读入 `settings.APP_VERSION` 并在 `/api/health/` 返回 `version`，前端构建时注入并显示在页脚，`frontend/package.json` 的 `version` 与之保持一致（有单测校验）。发版流程：CI 通过后，1) 同步修改 `VERSION` 与 `frontend/package.json`、`package-lock.json` 的版本号，提交 `chore: 发布 vX.Y.Z`；2) 在 main 上打注释标签 `git tag -a vX.Y.Z`；3) `git push --follow-tags`。fix 升修订号，feat 升次版本号，破坏性变更升主版本号。
