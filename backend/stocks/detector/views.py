@@ -238,6 +238,8 @@ def detector_signal_detail(request, pk):
 
     曲线在详情请求时按当前序列重算——信号行的 dimensions 是信号当日快照
     （不可变事实），曲线是活数据（可以看到信号之后各维度怎么走）。
+    重算用信号当日的参数快照（ALG-15）；旧信号行没有快照时退回当前参数，
+    params_source 标明用的是哪一份。
     重算失败（上游断/快照过期）时如实返回已落库部分并标注。
     """
     sig = DetectorSignal.objects.filter(pk=pk).first()
@@ -246,6 +248,7 @@ def detector_signal_detail(request, pk):
 
     ctx, err = _context_for_signal(sig)
     dimension_series = {}
+    params_source = {}
     if ctx is not None:
         cfg_rows = {c.key: c for c in DetectorDimConfig.objects.all()}
         for key, stored in (sig.dimensions or {}).items():
@@ -253,8 +256,14 @@ def detector_signal_detail(request, pk):
             if spec is None or spec['evaluate'] is None:
                 dimension_series[key] = []
                 continue
-            cfg = cfg_rows.get(key)
-            params = {**spec['defaults'], **((cfg.params or {}) if cfg else {})}
+            snapshot = (stored or {}).get('params')
+            if snapshot:
+                params = {**spec['defaults'], **snapshot}
+                params_source[key] = 'signal'
+            else:
+                cfg = cfg_rows.get(key)
+                params = {**spec['defaults'], **((cfg.params or {}) if cfg else {})}
+                params_source[key] = 'current'
             try:
                 res = spec['evaluate'](ctx, params)
                 dimension_series[key] = res['series']
@@ -266,6 +275,7 @@ def detector_signal_detail(request, pk):
                       message=(err or '') if ctx is None else ''),
         'signal': _signal_row(sig),
         'dimension_series': dimension_series,
+        'params_source': params_source,
         'disabled_dims': [
             {'key': d['key'], 'name': d['name'], 'disabled_reason': d['disabled_reason']}
             for d in registry.DIMENSIONS if not d['enabled']

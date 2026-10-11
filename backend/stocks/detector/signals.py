@@ -125,6 +125,7 @@ def evaluate_target(ctx, configs):
             }
         res['name'] = cfg['name']
         res['weight'] = cfg['weight']
+        res['params'] = dict(cfg.get('params') or {})
         dim_results[cfg['key']] = res
         if res['direction'] == 'up':
             up_votes.append((cfg['key'], res))
@@ -169,7 +170,11 @@ def evaluate_target(ctx, configs):
 
 
 def dimensions_payload(dim_results):
-    """落库用的维度明细（去掉 series 大字段，详情页需要时重算）。"""
+    """落库用的维度明细（去掉 series 大字段，详情页需要时重算）。
+
+    params 是信号当日生效的维度参数快照（ALG-15）：自动调参会改 min/权重，
+    详情页重算曲线要用信号当时的参数，否则曲线与落库判定对不上。
+    """
     return {
         key: {
             'name': res.get('name'),
@@ -178,6 +183,7 @@ def dimensions_payload(dim_results):
             'weight': res.get('weight'),
             'available': res.get('available'),
             'note': res.get('note', ''),
+            'params': res.get('params'),
         }
         for key, res in dim_results.items()
     }

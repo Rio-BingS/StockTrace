@@ -635,3 +635,56 @@ class ConfigSingleSourceTests(TestCase):
         # 前 20 日均量 = (15*100 + 5*300)/20 = 150 → RVOL = 0.667 < 0.7，不平静
         self.assertFalse(ok)
         self.assertIn('RVOL=0.67', meta['reason'])
+
+
+@patch('stocks.services.is_trading_day', _always_trading)
+class SignalParamsSnapshotTests(TestCase):
+    """ALG-15：信号行保存当日参数快照，详情曲线用快照重算而不是当前参数。"""
+
+    def test_payload_keeps_params_and_detail_uses_snapshot(self):
+        from django.urls import reverse
+
+        from .detector import signals
+        from .models import DetectorDimConfig
+
+        def ev(ctx, params):
+            return {'available': True, 'value': 30.0, 'direction': 'up', 'note': '', 'series': []}
+
+        configs = [{'key': k, 'name': k, 'weight': 1.0, 'params': {'min': 0.123},
+                    'targets': ('industry',), 'evaluate': ev, 'enabled': True, 'defaults': {}}
+                   for k in ('ma_relation', 'vol_compress')]
+        ctx = {'kind': 'industry', 'code': '甲', 'name': '甲', 'as_of': _TODAY.isoformat()}
+        data, dims = signals.evaluate_target(ctx, configs)
+        sig, _ = signals.upsert_signal(data, dims)
+        self.assertEqual(sig.dimensions['ma_relation']['params'], {'min': 0.123})
+
+        # 之后自动调参把 min 改了：详情重算仍用信号当日的 0.123
+        DetectorDimConfig.objects.create(key='ma_relation', name='x', params={'min': 9.0})
+        seen = []
+
+        def spy(ctx, params):
+            seen.append(params['min'])
+            return {'available': True, 'value': 0, 'direction': None, 'note': '', 'series': []}
+
+        from .detector import registry, views
+        fake_ctx = ({'kind': 'industry', 'code': '甲', 'dates': [], 'change_pct': [], 'net': []}, '')
+        with patch.dict(registry.DIMENSION_MAP, {'ma_relation': {**registry.DIMENSION_MAP['ma_relation'],
+                                                                'evaluate': spy}}), \
+                patch.object(views, '_context_for_signal', return_value=fake_ctx):
+            resp = self.client.get(reverse('detector-signal-detail', args=[sig.pk])).json()
+        self.assertEqual(seen, [0.123])
+        self.assertEqual(resp['params_source']['ma_relation'], 'signal')
+
+    def test_legacy_row_without_snapshot_falls_back_to_current(self):
+        from django.urls import reverse
+
+        from .detector import views
+        from .models import DetectorSignal
+
+        sig = DetectorSignal.objects.create(
+            target_kind='industry', target_code='乙', target_name='乙', trade_date=_TODAY,
+            direction='up', dimensions={'ma_relation': {'direction': 'up', 'available': True}})
+        fake_ctx = ({'kind': 'industry', 'code': '乙', 'dates': [], 'change_pct': [], 'net': []}, '')
+        with patch.object(views, '_context_for_signal', return_value=fake_ctx):
+            resp = self.client.get(reverse('detector-signal-detail', args=[sig.pk])).json()
+        self.assertEqual(resp['params_source']['ma_relation'], 'current')
