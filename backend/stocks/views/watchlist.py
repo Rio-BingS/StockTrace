@@ -9,6 +9,7 @@ from rest_framework import status, viewsets
 from rest_framework.decorators import action, api_view
 from rest_framework.response import Response
 
+from ..common.params import parse_bool, parse_date, positive_int
 from ..models import DailyQuote, MinuteBar, Stock
 from ..serializers import (
     DailyQuoteSerializer,
@@ -82,8 +83,8 @@ class StockViewSet(viewsets.ModelViewSet):
         默认 light（增量日线 + 近2日分钟）；?full=1 或 body full=true 为更全分钟。
         """
         stock = self.get_object()
-        full = str(request.query_params.get('full', '')).lower() in ('1', 'true', 'yes')
-        if request.data and str(request.data.get('full', '')).lower() in ('1', 'true', 'yes'):
+        full = parse_bool(request.query_params.get('full'))
+        if request.data and parse_bool(request.data.get('full')):
             full = True
         started, st = start_fetch_one(stock.id, light=not full)
         if not started:
@@ -116,8 +117,8 @@ class StockViewSet(viewsets.ModelViewSet):
         手动触发所有关注股票数据拉取（后台线程，立即返回）。
         默认 light；?full=1 才拉更全分钟（仍按股串行）。
         """
-        full = str(request.query_params.get('full', '')).lower() in ('1', 'true', 'yes')
-        if request.data and str(request.data.get('full', '')).lower() in ('1', 'true', 'yes'):
+        full = parse_bool(request.query_params.get('full'))
+        if request.data and parse_bool(request.data.get('full')):
             full = True
         started, st = start_fetch_all(light=not full)
         if not started:
@@ -146,27 +147,16 @@ class StockViewSet(viewsets.ModelViewSet):
         # 按日期筛选
         if date_str := request.query_params.get('date'):
             try:
-                date_obj = datetime.strptime(date_str, '%Y-%m-%d').date()
-            except ValueError:
-                return Response(
-                    {'detail': 'date 格式应为 YYYY-MM-DD'},
-                    status=status.HTTP_400_BAD_REQUEST,
-                )
+                date_obj = parse_date(date_str, 'date', strict=True)
+            except ValueError as e:
+                return Response({'detail': str(e)}, status=status.HTTP_400_BAD_REQUEST)
             queryset = queryset.filter(trade_date=date_obj)
-        elif days_raw := request.query_params.get('days'):
+        elif request.query_params.get('days'):
             try:
-                days = int(days_raw)
-            except (TypeError, ValueError):
-                return Response(
-                    {'detail': 'days 必须是正整数'},
-                    status=status.HTTP_400_BAD_REQUEST,
-                )
-            if days < 1:
-                return Response(
-                    {'detail': 'days 必须是正整数'},
-                    status=status.HTTP_400_BAD_REQUEST,
-                )
-            start_date = timezone.localdate() - timedelta(days=min(days, 3650))
+                days = positive_int(request.query_params, 'days', 365, maximum=3650, strict=True)
+            except ValueError as e:
+                return Response({'detail': str(e)}, status=status.HTTP_400_BAD_REQUEST)
+            start_date = timezone.localdate() - timedelta(days=days)
             queryset = queryset.filter(trade_date__gte=start_date)
         else:
             # 无参数默认近 365 天，不再整表倒出（PERF-05）
@@ -196,12 +186,9 @@ class StockViewSet(viewsets.ModelViewSet):
         stock = self.get_object()
         if date_str := request.query_params.get('date'):
             try:
-                date_obj = datetime.strptime(date_str, '%Y-%m-%d').date()
-            except ValueError:
-                return Response(
-                    {'detail': 'date 格式应为 YYYY-MM-DD'},
-                    status=status.HTTP_400_BAD_REQUEST,
-                )
+                date_obj = parse_date(date_str, 'date', strict=True)
+            except ValueError as e:
+                return Response({'detail': str(e)}, status=status.HTTP_400_BAD_REQUEST)
         else:
             latest = MinuteBar.objects.filter(stock=stock).order_by('-datetime').first()
             if latest is None:

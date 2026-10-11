@@ -9,6 +9,7 @@ from rest_framework import status
 from rest_framework.decorators import api_view
 from rest_framework.response import Response
 
+from ..common.params import positive_int
 from ..common.upstream import (
     _BREAKER_OPEN_SECONDS,
     UpstreamCircuitOpen,
@@ -117,16 +118,8 @@ def market_trend(request):
 
 
 def _positive_int(request, key, default, maximum=None):
-    raw = request.query_params.get(key)
-    if raw in (None, ''):
-        return default
-    try:
-        value = int(raw)
-    except (TypeError, ValueError):
-        raise ValueError(f'{key} 必须是正整数')
-    if value < 1:
-        raise ValueError(f'{key} 必须是正整数')
-    return min(value, maximum) if maximum else value
+    """市场接口口径：非法值抛 ValueError（→400），即 common.params.positive_int(strict=True)。"""
+    return positive_int(request.query_params, key, default, maximum, strict=True)
 
 
 def _optional_float(request, key):

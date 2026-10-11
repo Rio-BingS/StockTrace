@@ -4,6 +4,7 @@ from rest_framework import status
 from rest_framework.decorators import api_view
 from rest_framework.response import Response
 
+from ..common.params import parse_bool
 from ..models import Stock
 from ..serializers import AlertSerializer
 
@@ -113,7 +114,8 @@ def alert_event_list(request):
     from ..models import AlertEvent
 
     events = AlertEvent.objects.select_related('alert', 'stock')
-    if request.query_params.get('unread') in ('1', 'true'):
+    # 旧口径只认小写 '1'/'true'，保持不变
+    if parse_bool(request.query_params.get('unread'), truthy=('1', 'true'), ignore_case=False):
         events = events.filter(is_read=False)
     return Response([{
         'id': event.id,
