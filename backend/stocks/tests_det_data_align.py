@@ -9,6 +9,7 @@ from django.core.management.base import CommandError
 from django.test import TestCase
 from django.utils import timezone
 
+from .detector import dimensions
 from .models import MarketDailySnapshot
 
 _TODAY = timezone.localdate()
@@ -21,6 +22,112 @@ def _weekday(day=None):
 
 def _always(day=None):
     return True
+
+
+class TradingDayAxisTests(TestCase):
+    """#8：日期轴由交易日历生成，不再「最近 N 行」。"""
+
+    def test_axis_skips_weekends_and_keeps_gaps(self):
+        end = date(2026, 10, 9)  # 周五
+        with patch('stocks.trading_calendar.is_trading_day', _weekday):
+            axis = dimensions.trading_day_axis(end, 6)
+        self.assertEqual(axis, [date(2026, 10, 2), date(2026, 10, 5), date(2026, 10, 6),
+                                date(2026, 10, 7), date(2026, 10, 8), date(2026, 10, 9)])
+
+    def test_known_data_day_counts_even_if_calendar_unknown(self):
+        end = date(2026, 10, 9)
+        known = [date(2026, 10, 9), date(2026, 10, 7)]
+        with patch('stocks.trading_calendar.is_trading_day', lambda day=None: None):
+            axis = dimensions.trading_day_axis(end, 5, known)
+        # 日历全未知：退化为已有数据的日期（与旧的按行取数等价）
+        self.assertEqual(axis, sorted(known))
+
+
+class SectorAxisTests(TestCase):
+    """#8/#10：板块快照按交易日轴对齐，整天缺快照为 None 而不是压缩相邻。"""
+
+    def _seed(self, days, skip=()):
+        for i in range(days):
+            day = _TODAY - timedelta(days=days - 1 - i)
+            if i in skip:
+                continue
+            MarketDailySnapshot.objects.create(
+                kind=MarketDailySnapshot.KIND_INDUSTRY_FF, trade_date=day,
+                payload=[{'name': '甲', 'net': 1e8 * (i % 3 - 1), 'change_pct': 0.1 * (i % 5)}],
+            )
+
+    def test_missing_snapshot_day_is_none(self):
+        self._seed(30, skip=(20,))
+        with patch('stocks.trading_calendar.is_trading_day', _always):
+            ctx, err = dimensions.build_sector_context('industry', '甲')
+        self.assertEqual(err, '')
+        self.assertEqual(len(ctx['dates']), 30)  # 缺口日仍在轴上
+        gap = (_TODAY - timedelta(days=9)).isoformat()
+        i = ctx['dates'].index(gap)
+        self.assertIsNone(ctx['net'][i])
+        self.assertIsNone(ctx['change_pct'][i])
+
+    def test_axis_starts_at_first_snapshot_and_caps_length(self):
+        self._seed(30)
+        with patch('stocks.trading_calendar.is_trading_day', _always):
+            snaps = dimensions.load_sector_snapshots('industry')
+            short = dimensions.load_sector_snapshots('industry', lookback_days=10)
+        self.assertEqual(len(snaps), 30)  # 按现有可得长度，不在头部堆空日
+        self.assertEqual(len(short), 10)
+        self.assertEqual(short[-1][0], _TODAY)
+
+
+class MarginSeriesTests(TestCase):
+    """#9：融资余额用 rz、按交易日对齐、末点 = 指数数据日的前一交易日。"""
+
+    def _seed(self, days, skip=(), bad=()):
+        for i in range(days):
+            day = _TODAY - timedelta(days=days - i)  # 最后一行为 T−1
+            if i in skip:
+                continue
+            rz = 18000.0 + 10 * i
+            MarketDailySnapshot.objects.create(
+                kind=MarketDailySnapshot.KIND_MARGIN, trade_date=day,
+                payload=[{'total': rz * 1.01, 'rz': rz / 2 if i in bad else rz, 'sz_total': 1.0}],
+            )
+
+    def test_series_uses_rz_and_ends_at_previous_trading_day(self):
+        self._seed(10)
+        MarketDailySnapshot.objects.create(  # T 当天的数扫描时尚未披露，不得混入
+            kind=MarketDailySnapshot.KIND_MARGIN, trade_date=_TODAY,
+            payload=[{'total': 1.0, 'rz': 0.99, 'sz_total': 0.5}])
+        with patch('stocks.trading_calendar.is_trading_day', _always):
+            items, as_of = dimensions.load_margin_series(_TODAY)
+        self.assertEqual(items[-1]['date'], (_TODAY - timedelta(days=1)).isoformat())
+        self.assertEqual(items[-1]['rz'], 18090.0)
+        self.assertEqual(as_of, items[-1]['date'])
+        self.assertEqual(len(items), 10)
+
+    def test_previous_day_not_disclosed_leaves_last_point_none(self):
+        self._seed(10, skip=(9,))
+        with patch('stocks.trading_calendar.is_trading_day', _always):
+            items, as_of = dimensions.load_margin_series(_TODAY)
+        self.assertEqual(items[-1]['date'], (_TODAY - timedelta(days=1)).isoformat())
+        self.assertIsNone(items[-1]['rz'])
+        self.assertEqual(as_of, (_TODAY - timedelta(days=2)).isoformat())
+
+    def test_gap_and_bad_rz_become_none(self):
+        self._seed(10, skip=(4,), bad=(6,))
+        with patch('stocks.trading_calendar.is_trading_day', _always):
+            items, _ = dimensions.load_margin_series(_TODAY)
+        self.assertEqual(len(items), 10)  # 缺口日留在轴上
+        self.assertIsNone(items[4]['rz'])
+        self.assertIsNone(items[6]['rz'])  # 单边按 0 相加的旧行（比值异常）不冒充
+
+    def test_eval_unavailable_when_recent_window_has_gap(self):
+        from .detector.registry import DIMENSION_MAP
+
+        params = dict(DIMENSION_MAP['margin_north']['defaults'])
+        margin = [{'date': str(i), 'rz': 1.0e4 * (1 + 0.0005 * i)} for i in range(40)]
+        ctx = {'kind': 'index', 'code': 'sh000300', 'margin': margin}
+        self.assertTrue(dimensions.eval_margin_north(ctx, params)['available'])
+        margin[-2]['rz'] = None  # 3 日均值窗口不齐：严格不算，不跳过缺口硬凑
+        self.assertFalse(dimensions.eval_margin_north(ctx, params)['available'])
 
 
 class MarginSnapshotRowTests(TestCase):

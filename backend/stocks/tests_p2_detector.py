@@ -298,8 +298,9 @@ class IndexDimensionCoverageTests(TestCase):
     def _margin_ctx(self, code):
         totals = [1.0e12 * (1 + 0.0005 * i) for i in range(30)]
         totals[-1] *= 1.01  # 末端明显抬升
+        # #9：维度读融资余额 rz（不是融资融券余额 total）
         return {'kind': 'index', 'code': code, 'margin': [
-            {'date': d, 'total': t} for d, t in zip(_dates(30), totals)]}
+            {'date': d, 'rz': t, 'total': t * 1.01} for d, t in zip(_dates(30), totals)]}
 
     def test_margin_votes_only_on_hs300(self):
         from .detector.dimensions import eval_margin_north
@@ -319,16 +320,21 @@ class IndexDimensionCoverageTests(TestCase):
         from .detector import dimensions
         from .models import MarketDailySnapshot
 
-        MarketDailySnapshot.objects.create(
-            kind=MarketDailySnapshot.KIND_MARGIN, trade_date=_TODAY, payload=[{'total': 1.0}])
+        # 两融 T+1：指数数据日 T 只配 T−1 的融资余额（#9），T 当天的行不读
+        for day, rz in ((_TODAY - timedelta(days=1), 0.99), (_TODAY, 0.98)):
+            MarketDailySnapshot.objects.create(
+                kind=MarketDailySnapshot.KIND_MARGIN, trade_date=day,
+                payload=[{'total': 1.0, 'rz': rz, 'sz_total': 0.5}])
         items = [{'date': d, 'open': 1.0, 'high': 1.0, 'low': 1.0, 'close': 1.0, 'volume': 1.0}
                  for d in _dates(40)]
         with patch('stocks.market.indices.fetch_index_daily_series',
-                   return_value={'available': True, 'items': items}):
+                   return_value={'available': True, 'items': items}), \
+                patch('stocks.trading_calendar.is_trading_day', lambda day=None: True):
             ctx, _ = dimensions.build_index_context('sh000001', '上证指数')
             self.assertEqual(ctx['margin'], [])
             ctx, _ = dimensions.build_index_context('sh000300', '沪深300')
-            self.assertEqual(len(ctx['margin']), 1)
+            self.assertEqual([m['rz'] for m in ctx['margin']], [0.99])
+            self.assertEqual(ctx['margin_as_of'], (_TODAY - timedelta(days=1)).isoformat())
 
 
 class TurnoverShareChangeTests(TestCase):
@@ -379,6 +385,7 @@ class TurnoverShareChangeTests(TestCase):
         self.assertIsNotNone(_share_basis_break(self._ctx(split_at=40), 60, 1.2))
 
 
+@patch('stocks.trading_calendar.is_trading_day', lambda day=None: True)
 class SectorSnapshotPreloadTests(TestCase):
     """PERF-04：一次扫描每类板块快照只读一次，各板块共用，结果与逐板块读库一致。"""
 

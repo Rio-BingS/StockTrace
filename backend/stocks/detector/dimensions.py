@@ -14,10 +14,16 @@
 
 from __future__ import annotations
 
+from datetime import date as _date, timedelta
+
 from ..models import DailyQuote, MarketDailySnapshot
 # 阈值数值集中在 constants.py（ARC-06），这里保留同名引用，dimensions.X 旧路径照常可用
 from .constants import (
+    AXIS_CALENDAR_BUFFER,
+    AXIS_CALENDAR_MULTIPLIER,
     COMPRESS_PCT_DEFAULT,
+    MARGIN_CONTEXT_DAYS,
+    MARGIN_VALUE_KEY,
     MARGIN_VOTE_CODES,
     MIN_PRICE_BARS,
     MIN_SECTOR_POINTS,
@@ -181,6 +187,125 @@ def _series_points(dates, values, count=20):
 # MARGIN_VOTE_CODES（ALG-09）见 constants.py。
 
 
+def trading_day_axis(end_date, n, known_dates=()):
+    """截止 end_date（含）往前 n 个交易日的日期轴，升序（#8）。
+
+    为什么不再用「最近 N 行」：整天缺快照（调度宕机、上游挂了）时，按行取数
+    会把缺口前后当成相邻日，窗口语义与漂移都被无声压缩。日期轴由交易日历
+    生成，缺失日由调用方填 None，各维度取窗时如实不可用。
+    交易日 = 日历明确判定为交易日，或本站已有该日数据（数据本身证明开市，
+    日历缺口时不丢真实数据）；日历完全不可用时退化为「已有数据的日期」，
+    与旧的按行取数等价，不会更差。往回最多走 n × 倍数 + 缓冲 个自然日。
+    """
+    from .. import trading_calendar
+
+    known = set(known_dates)
+    axis, day = [], end_date
+    for _ in range(n * AXIS_CALENDAR_MULTIPLIER + AXIS_CALENDAR_BUFFER):
+        if day in known:
+            hit = True
+        else:
+            try:
+                hit = trading_calendar.is_trading_day(day) is True
+            except Exception:  # noqa: BLE001 日历意外异常按「未知」处理：只认已有数据的日期
+                hit = False
+        if hit:
+            axis.append(day)
+            if len(axis) >= n:
+                break
+        day -= timedelta(days=1)
+    axis.reverse()
+    return axis
+
+
+def _snapshot_axis_rows(kind_db, n, end_date=None, before=None):
+    """按交易日轴读出某类快照：[(trade_date, payload | None)] 升序；无快照返回 []。
+
+    - 轴末点：end_date；缺省时取 before 之前（不含）或全表的最新快照日；
+    - 轴起点不早于该类最早一行快照（「按现有可得长度」，不在头部堆 None）；
+    - 轴上没有快照的交易日 payload 为 None（缺口如实保留，不压缩时间）。
+    """
+    qs = MarketDailySnapshot.objects.filter(kind=kind_db)
+    if before is not None:
+        qs = qs.filter(trade_date__lt=before)
+    if end_date is None:
+        end_date = qs.order_by('-trade_date').values_list('trade_date', flat=True).first()
+        if end_date is None:
+            return []
+    span = n * AXIS_CALENDAR_MULTIPLIER + AXIS_CALENDAR_BUFFER
+    known = list(
+        qs.filter(trade_date__gte=end_date - timedelta(days=span), trade_date__lte=end_date)
+        .values_list('trade_date', flat=True)
+    )
+    if not known:
+        return []
+    first = min(known)
+    axis = [d for d in trading_day_axis(end_date, n, known) if d >= first]
+    if not axis:
+        return []
+    by_date = dict(
+        qs.filter(trade_date__gte=axis[0], trade_date__lte=axis[-1])
+        .values_list('trade_date', 'payload')
+    )
+    return [(d, by_date.get(d)) for d in axis]
+
+
+def _margin_value(payload_row):
+    """快照行里的融资余额（亿元，#9）；口径不可信时返回 None。
+
+    旧版落库把缺失的单边 rz 按 0 相加（只剩沪市融资余额），会被误读成余额腰斩：
+    融资余额应占融资融券余额的绝大部分（实际约 98%~99%），比值不在 [0.9, 1]
+    之间视为该行 rz 不可信，如实缺失而不是冒充。
+    """
+    if not payload_row:
+        return None
+    value = payload_row.get(MARGIN_VALUE_KEY)
+    total = payload_row.get('total')
+    if value is None:
+        return None
+    if total and not (0.9 <= value / total <= 1.0):
+        return None
+    return value
+
+
+def load_margin_series(index_as_of, n=MARGIN_CONTEXT_DAYS):
+    """沪深300 的融资余额序列：按交易日轴对齐，末点 = 指数数据日的前一交易日（#8/#9）。
+
+    两融 T+1 披露：扫描日 T（17:15）最新只有 T−1 的数，所以轴末点固定为
+    index_as_of 的前一交易日，且只读 index_as_of 之前（不含）的快照——事后重算
+    （信号详情页）时也不会混入 T 及以后的数。T−1 尚未披露时末点为 None，维度
+    如实不可用，而不是拿更早的数冒充最新。
+    返回 (items, margin_as_of)：items 为 [{'date', 'rz', 'total'}]（缺失日两者为
+    None），margin_as_of 为最后一个有值的数据日（无则 None）。
+    """
+    if isinstance(index_as_of, str):
+        index_as_of = _date.fromisoformat(index_as_of)
+    kind = MarketDailySnapshot.KIND_MARGIN
+    known = list(
+        MarketDailySnapshot.objects.filter(kind=kind, trade_date__lt=index_as_of)
+        .order_by('-trade_date').values_list('trade_date', flat=True)[:1]
+    )
+    prev = trading_day_axis(index_as_of - timedelta(days=1), 1, known)
+    if not prev:
+        return [], None
+    rows = _snapshot_axis_rows(kind, n, end_date=prev[0], before=index_as_of)
+    items, margin_as_of = [], None
+    for trade_date, payload in rows:
+        row = (payload or [None])[0] if payload else None
+        value = _margin_value(row)
+        items.append({
+            'date': trade_date.isoformat(),
+            'rz': value,
+            'total': row.get('total') if row else None,
+        })
+        if value is not None:
+            margin_as_of = trade_date.isoformat()
+    # 末点之后（T−1 未披露）时轴末点仍保留为 None：维度据此如实不可用
+    if rows and rows[-1][0] != prev[0]:
+        items.append({'date': prev[0].isoformat(), 'rz': None, 'total': None})
+    return items, margin_as_of
+
+
 def build_index_context(code, name):
     """指数上下文：新浪日线 OHLCV（同一上游接口，见 market.indices）+ 融资余额快照序列。"""
     from ..market import indices
@@ -194,22 +319,12 @@ def build_index_context(code, name):
 
     ctx = _price_ctx('index', code, name, items)
     ctx['margin'] = []
+    ctx['margin_as_of'] = None
     if code not in MARGIN_VOTE_CODES:
         return ctx, ''  # 只有沪深300用融资余额（ALG-09），其余指数不必读快照
-    # 融资余额序列：本站日度快照积累（T+1 披露），给 margin_north 维度用；
-    # 积累不足时维度自行 available=False，不影响其他维度。
-    rows = (
-        MarketDailySnapshot.objects.filter(kind=MarketDailySnapshot.KIND_MARGIN)
-        .order_by('-trade_date')
-        .values_list('trade_date', 'payload')[:40]
-    )
-    margin = []
-    for trade_date, payload in reversed(list(rows)):
-        for row in payload or []:
-            if row.get('total') is not None:
-                margin.append({'date': trade_date.isoformat(), 'total': row['total']})
-                break
-    ctx['margin'] = margin
+    # 融资余额序列：本站日度快照积累（T+1 披露，可用 backfill_margin 回补），给
+    # margin_north 维度用；积累不足时维度自行 available=False，不影响其他维度。
+    ctx['margin'], ctx['margin_as_of'] = load_margin_series(ctx['as_of'])
     return ctx, ''
 
 
@@ -283,20 +398,18 @@ def _sector_kind_db(kind):
     )
 
 
-def load_sector_snapshots(kind, lookback_days=SECTOR_LOOKBACK_DAYS):
-    """一次读出某类板块最近 lookback_days 个快照日并按名字建索引（PERF-04）。
+def load_sector_snapshots(kind, lookback_days=SECTOR_LOOKBACK_DAYS, end_date=None):
+    """一次读出某类板块最近 lookback_days 个交易日的快照并按名字建索引（PERF-04）。
 
     返回 [(trade_date, {name: row})]，日期升序。扫描时每类只读一次、全部板块
     共用；旧实现每个板块各自重读 45 天全量 JSON，一次扫描约 2 万次大 JSON
     反序列化。
+    日期轴按交易日历生成（#8）：轴末点为 end_date 或最新快照日，轴上缺快照的
+    交易日为 {}（各板块该日即 None），不再「最近 N 行」压缩时间；轴起点不早于
+    最早一行快照（按现有可得长度）。
     """
-    rows = (
-        MarketDailySnapshot.objects.filter(kind=_sector_kind_db(kind))
-        .order_by('-trade_date')
-        .values_list('trade_date', 'payload')[:lookback_days]
-    )
     out = []
-    for trade_date, payload in reversed(list(rows)):
+    for trade_date, payload in _snapshot_axis_rows(_sector_kind_db(kind), lookback_days, end_date):
         out.append((trade_date, {r.get('name'): r for r in (payload or []) if r.get('name')}))
     return out
 
@@ -306,7 +419,7 @@ def build_sector_context(kind, name, lookback_days=SECTOR_LOOKBACK_DAYS, snapsho
 
     「某板块某天缺行就 None」：回填可能只补到部分板块，绝不能拿旧值或 0
     补天（与快照模块「窗口齐全才算数」同一纪律）；各维度在取窗时遇 None
-    自行如实不可用。
+    自行如实不可用。日期轴是交易日历（#8），整天缺快照同样是 None。
     snapshots：load_sector_snapshots 的结果（扫描时预加载、各板块共用）；
     缺省时自行读库（信号详情页等单板块场景）。
     """
@@ -682,19 +795,21 @@ def eval_turnover_pct(ctx, params):
 
 
 def eval_margin_north(ctx, params):
-    """融资余额渐进变化（指数维度）。
+    """融资余额渐进变化（仅沪深300）。
 
-    口径说明：北向资金自 2024-08 起停止逐日净买额披露（项目已如实转
-    null），本维度仅融资余额口径；数据来自交易所官方披露、经本站日度
-    快照积累，窗口不足 6 行时如实不可用（上线初期约需一周积累）。
+    口径说明（#9）：用融资余额 rz（沪+深），不是融资融券余额；序列按交易日
+    历对齐，末点是指数数据日 T 的前一交易日（两融 T+1 披露），缺失日为 None。
+    3 日均值要求窗口齐全；6 个点只够算出第一个漂移，噪声闸门还需 noise_min
+    个历史漂移，所以实际约需 21 个交易日的连续积累才投票（可用 backfill_margin
+    命令回补历史）。北向资金自 2024-08 起停止逐日披露，本维度与北向无关。
     """
     if ctx.get('kind') == 'index' and ctx.get('code') not in MARGIN_VOTE_CODES:
         return _unavailable('融资余额为沪深合计口径，仅在沪深300上投票（避免各指数重复计票）')
     margin = ctx.get('margin') or []
     if len(margin) < 6:
         return _unavailable('融资余额快照积累不足（T+1 披露，逐日积累中）')
-    totals = [m['total'] for m in margin]
-    m3 = _rolling_mean_series(totals, 3)
+    totals = [m.get(MARGIN_VALUE_KEY) for m in margin]
+    m3 = _rolling_mean_series(totals, 3, strict=True)
     if m3[-1] is None or m3[-4] is None or not m3[-4]:
         return _unavailable('融资余额均值窗口不齐')
     raws = [
@@ -704,7 +819,7 @@ def eval_margin_north(ctx, params):
     raw = raws[-1]
     value, direction, note = _gated(raw, raws[:-1], params)
     if direction is not None:
-        note = '仅融资余额口径（北向已停止逐日披露）'
+        note = f"融资余额口径，数据日 {margin[-1]['date']}（T−1）"
     return _result(
         value, direction, note,
         _series_points([m['date'] for m in margin], m3),

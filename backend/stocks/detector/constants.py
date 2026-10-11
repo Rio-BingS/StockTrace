@@ -105,3 +105,17 @@ NOISE_DEFAULTS = {'noise_pct': 0.8, 'noise_window': 60, 'noise_min': 15}
 COMPRESS_PCT_DEFAULT = 0.25
 # 换手率分位：量价基准断层（送转/配股）的台阶比例（registry 默认值与兜底共用）
 SPLIT_RATIO_DEFAULT = 1.2
+
+# ============================================================
+# 取数日期轴（data-align：#8 #9）
+# 只放取数层口径；维度阈值仍在上面各节与 registry。
+# ============================================================
+
+# 融资余额上下文：日期轴长度（交易日数）；末点固定为指数数据日的前一交易日
+# （两融 T+1 披露，扫描日 T 最新只有 T−1 的数，#9）。
+MARGIN_CONTEXT_DAYS = 40
+# 融资余额维度使用的快照字段（#9）：rz=融资余额（沪+深），不再用融资融券余额 total
+MARGIN_VALUE_KEY = 'rz'
+# 日期轴往回走的自然日上限 = 交易日数 × 倍数 + 缓冲（覆盖春节/国庆长假）
+AXIS_CALENDAR_MULTIPLIER = 2
+AXIS_CALENDAR_BUFFER = 30
