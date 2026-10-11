@@ -244,6 +244,33 @@ def save_daily_snapshots(trade_date=None):
 _MARGIN_PROBE_CANDIDATES = 8
 
 
+def margin_snapshot_row(day, sh_row, sz_row):
+    """两融快照行（亿元）：沪深同日合计；rz=融资余额，探测器 margin_north 用它（#9）。
+
+    融资余额只有两市都给出时才合计，单边缺失为 None——旧实现按 0 相加，会把
+    沪市单边冒充两市合计。total（融资融券余额）保留给其他展示用途。
+    """
+    sh_rz, sz_rz = sh_row.get('rz'), sz_row.get('rz')
+    return {
+        'date': day.isoformat(),
+        'total': round((sh_row.get('total') or 0.0) + (sz_row.get('total') or 0.0), 2),
+        'sh_total': sh_row.get('total'),
+        'sz_total': sz_row.get('total'),
+        'rz': round(sh_rz + sz_rz, 2) if sh_rz is not None and sz_rz is not None else None,
+        'sh_rz': sh_rz,
+        'sz_rz': sz_rz,
+    }
+
+
+def write_margin_snapshot(day, sh_row, sz_row):
+    """按 (KIND_MARGIN, day) 幂等写入一行两融快照，返回写入的 payload 行。"""
+    row = margin_snapshot_row(day, sh_row, sz_row)
+    MarketDailySnapshot.objects.update_or_create(
+        kind=MarketDailySnapshot.KIND_MARGIN, trade_date=day, defaults={'payload': [row]},
+    )
+    return row
+
+
 def save_margin_snapshot():
     """融资余额（沪深合计口径）日度快照落库，探测器「融资余额渐进」维度供数。
 
@@ -280,21 +307,7 @@ def save_margin_snapshot():
         if not sz_row or sz_row.get('total') is None:
             # 当日深市未披露（T+1 属预期状态），不是错误，静默跳过
             continue
-        sh_total = sh_row.get('total') or 0.0
-        sz_total = sz_row.get('total') or 0.0
-        MarketDailySnapshot.objects.update_or_create(
-            kind=MarketDailySnapshot.KIND_MARGIN,
-            trade_date=day,
-            defaults={
-                'payload': [{
-                    'date': day.isoformat(),
-                    'total': round(sh_total + sz_total, 2),
-                    'sh_total': sh_row.get('total'),
-                    'sz_total': sz_row.get('total'),
-                    'rz': round((sh_row.get('rz') or 0) + (sz_row.get('rz') or 0), 2),
-                }],
-            },
-        )
+        write_margin_snapshot(day, sh_row, sz_row)
         written += 1
     if written:
         logger.info("融资余额快照新增 %s 行", written)
