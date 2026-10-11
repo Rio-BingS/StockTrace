@@ -6,7 +6,12 @@ from rest_framework.decorators import action, api_view
 from rest_framework.response import Response
 
 from ..models import AiCallLog, AiProvider, Stock
-from ..ai_serializers import AiProviderSerializer
+from ..ai_serializers import (
+    AiProviderSerializer,
+    ScreenerAiInputSerializer,
+    ScreenerCommentInputSerializer,
+    first_error_text,
+)
 from .llm import LlmClient, LlmError
 from .prompts import (
     DISCLAIMER,
@@ -179,9 +184,10 @@ def screener(request):
 @api_view(['POST'])
 def screener_ai(request):
     """自然语言 → LLM 翻译成结构化条件 → 复用引擎执行"""
-    query = (request.data.get('query') or '').strip()
-    if not query:
-        return Response({'detail': 'query 不能为空'}, status=status.HTTP_400_BAD_REQUEST)
+    ser = ScreenerAiInputSerializer(data=request.data)
+    if not ser.is_valid():
+        return _invalid_input(ser.errors)
+    query = ser.validated_data['query']
 
     allowed, reason = check_throttle('screener_translate')
     if not allowed:
@@ -209,15 +215,43 @@ def screener_ai(request):
     return Response({'conditions': spec, 'count': len(rows), 'results': rows})
 
 
+def _invalid_input(errors):
+    return Response({'detail': first_error_text(errors) or '参数不合法', 'errors': errors},
+                    status=status.HTTP_400_BAD_REQUEST)
+
+
+def _comment_rows(codes):
+    """按代码从库里取名称与最新日线（AIX-01）：点评只基于服务端数据，不信客户端数字。"""
+    codes = list(dict.fromkeys(codes))
+    stocks = {s.code: s for s in Stock.objects.filter(is_active=True, code__in=codes)}
+    rows = []
+    for code in codes:
+        stock = stocks.get(code)
+        if stock is None:
+            continue
+        quote = stock.daily_quotes.order_by('-trade_date').first()
+        rows.append({
+            'code': stock.code,
+            'name': stock.name,
+            'trade_date': quote.trade_date if quote else None,
+            'change_pct': quote.change_pct if quote else None,
+            'close_price': quote.close_price if quote else None,
+            'turnover': quote.turnover if quote else None,
+        })
+    return rows
+
+
 @api_view(['POST'])
 def screener_ai_comment(request):
     """对筛选结果做 AI 点评。入参：query（原始需求）+ results（screener 返回的 results）"""
-    query = (request.data.get('query') or '').strip()
-    rows = request.data.get('results')
-    if not isinstance(rows, list) or not rows:
-        return Response(
-            {'detail': 'results 必须是非空数组'}, status=status.HTTP_400_BAD_REQUEST
-        )
+    ser = ScreenerCommentInputSerializer(data=request.data)
+    if not ser.is_valid():
+        return _invalid_input(ser.errors)
+    query = ser.validated_data['query']
+    rows = _comment_rows([r['code'] for r in ser.validated_data['results']])
+    if not rows:
+        return Response({'detail': '结果中的股票都不在自选股池中'},
+                        status=status.HTTP_400_BAD_REQUEST)
 
     allowed, reason = check_throttle('screener_comment')
     if not allowed:
