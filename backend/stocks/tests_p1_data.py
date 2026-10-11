@@ -330,7 +330,7 @@ class NegativeCacheTests(SimpleTestCase):
         from .market import sentiment
         zt = pd.DataFrame({'代码': ['600000'], '连板数': [1]})
         # 交易日历桩：候选日推算不得触网（新浪日历 / BaoStock）
-        with patch('stocks.market.sentiment.is_trading_day', return_value=True), \
+        with patch('stocks.trading_calendar.is_trading_day', return_value=True), \
                 patch('stocks.market.sentiment.ak.stock_zt_pool_em', return_value=zt), \
                 patch('stocks.market.sentiment.ak.stock_zt_pool_dtgc_em',
                       return_value=pd.DataFrame()), \
@@ -444,7 +444,7 @@ class SnapshotEtfFreshnessTests(TestCase):
 
     def _save(self, spot_side_effect):
         from .market import snapshots
-        trading = patch('stocks.services.is_trading_day', return_value=True)
+        trading = patch('stocks.trading_calendar.is_trading_day', return_value=True)
         with trading, patch('stocks.market.sectors.fetch_industry_fund_flow', return_value=[]), \
                 patch('stocks.market.sectors.fetch_concept_fund_flow', return_value=[]), \
                 patch('stocks.market.etf_flow.fetch_flow_klines', side_effect=RuntimeError('down')), \
@@ -602,7 +602,7 @@ class FinalBarReadersTests(TestCase):
         signal = SimpleNamespace(target_code='600000', trade_date=date(2026, 9, 1),
                                  score=1.0, direction='up', cycles=2)
         # 盘中 bar 不计入后续窗口：已收盘的后续行情不满 5 个交易日，保持待回看（ALG-05）
-        with patch('stocks.services.is_trading_day', lambda d=None: True):
+        with patch('stocks.trading_calendar.is_trading_day', lambda d=None: True):
             self.assertIsNone(_stock_outcome(signal, {}))
 
     def test_review_base_must_be_final(self):
@@ -614,5 +614,5 @@ class FinalBarReadersTests(TestCase):
             self._bar(date(2026, 9, day), 10.2)
         signal = SimpleNamespace(target_code='600000', trade_date=date(2026, 9, 1),
                                  score=1.0, direction='up', cycles=2)
-        with patch('stocks.services.is_trading_day', lambda d=None: True):
+        with patch('stocks.trading_calendar.is_trading_day', lambda d=None: True):
             self.assertIsNone(_stock_outcome(signal, {}))

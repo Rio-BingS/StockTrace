@@ -33,8 +33,8 @@ from datetime import timedelta
 
 from django.utils import timezone
 
-from ..market.snapshots import _recent_trading_days
 from ..models import DailyQuote, DetectorDimConfig, DetectorSignal
+from ..trading_calendar import recent_trading_days
 from .dimensions import _std, load_sector_snapshots
 
 logger = logging.getLogger(__name__)
@@ -232,7 +232,7 @@ def review_pending(scan_date, configs):
     只回看 status=active 的信号：watching（周期 1）从未满足「维持」，
     不算一次真正的信号假设，不参与命中率统计，也不调参。
     """
-    days = _recent_trading_days(REVIEW_LOOKBACK + 1, end_date=scan_date)
+    days = recent_trading_days(REVIEW_LOOKBACK + 1, end_date=scan_date)
     if days is None:
         return {'reviewed': 0, 'hits': 0, 'hit_rate': None,
                 'note': '交易日历不可用，本轮跳过回看'}

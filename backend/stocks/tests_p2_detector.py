@@ -440,7 +440,7 @@ class CycleCountTests(TestCase):
         def weekday_only(day=None):
             return day.weekday() < 5
 
-        with patch('stocks.services.is_trading_day', weekday_only), self.assertNumQueries(1):
+        with patch('stocks.trading_calendar.is_trading_day', weekday_only), self.assertNumQueries(1):
             cycles = signals._count_cycles('stock', '600000', 'up', monday)
         self.assertEqual(cycles, 2)
 
@@ -448,9 +448,9 @@ class CycleCountTests(TestCase):
         from .detector import signals
 
         self._sig(_TODAY - timedelta(days=1))
-        with patch('stocks.services.is_trading_day', return_value=None):
+        with patch('stocks.trading_calendar.is_trading_day', return_value=None):
             self.assertIsNone(signals._count_cycles('stock', '600000', 'up', _TODAY))
-        with patch('stocks.services.is_trading_day', side_effect=RuntimeError('down')):
+        with patch('stocks.trading_calendar.is_trading_day', side_effect=RuntimeError('down')):
             self.assertIsNone(signals._count_cycles('stock', '600000', 'up', _TODAY))
 
     def test_unknown_cycles_marks_signal_and_counts_as_one(self):
@@ -462,7 +462,7 @@ class CycleCountTests(TestCase):
         configs = [{'key': k, 'name': k, 'weight': 1.0, 'params': {}, 'targets': ('stock',),
                     'evaluate': ev, 'enabled': True, 'defaults': {}} for k in ('a', 'b')]
         ctx = {'kind': 'stock', 'code': '600000', 'name': 'x', 'as_of': _TODAY.isoformat()}
-        with patch('stocks.services.is_trading_day', return_value=None):
+        with patch('stocks.trading_calendar.is_trading_day', return_value=None):
             data, _ = signals.evaluate_target(ctx, configs)
         self.assertEqual(data['cycles'], 1)
         self.assertTrue(data['cycles_unknown'])
@@ -472,7 +472,7 @@ def _always_trading(day=None):
     return True
 
 
-@patch('stocks.services.is_trading_day', _always_trading)
+@patch('stocks.trading_calendar.is_trading_day', _always_trading)
 class ReviewProtocolTests(TestCase):
     """ALG-05：回看要求满 5 个交易日、基期 T+1 开盘、MAE 先到判未兑现、基线比较、段首计样本。"""
 
@@ -580,7 +580,7 @@ class ReviewProtocolTests(TestCase):
         self.assertIsNone(review._sector_outcome(sig, {}))
 
 
-@patch('stocks.services.is_trading_day', _always_trading)
+@patch('stocks.trading_calendar.is_trading_day', _always_trading)
 class DetectorRunDeferTests(TestCase):
     """PERF-09：只读端点的 DetectorRun 查询不加载 matrix 等大 JSON。"""
 
@@ -611,7 +611,7 @@ class DetectorRunDeferTests(TestCase):
                 self.assertNotIn('"adjustments"', sql, name)
 
 
-@patch('stocks.services.is_trading_day', _always_trading)
+@patch('stocks.trading_calendar.is_trading_day', _always_trading)
 class ConfigSingleSourceTests(TestCase):
     """ALG-15：配置页展示的回看/平静/分级规则直接来自实现常量，没有副本。"""
 
@@ -637,7 +637,7 @@ class ConfigSingleSourceTests(TestCase):
         self.assertIn('RVOL=0.67', meta['reason'])
 
 
-@patch('stocks.services.is_trading_day', _always_trading)
+@patch('stocks.trading_calendar.is_trading_day', _always_trading)
 class SignalParamsSnapshotTests(TestCase):
     """ALG-15：信号行保存当日参数快照，详情曲线用快照重算而不是当前参数。"""
 
@@ -690,7 +690,7 @@ class SignalParamsSnapshotTests(TestCase):
         self.assertEqual(resp['params_source']['ma_relation'], 'current')
 
 
-@patch('stocks.services.is_trading_day', _always_trading)
+@patch('stocks.trading_calendar.is_trading_day', _always_trading)
 class AlertRuleSemanticsTests(TestCase):
     """ALG-14：上穿/下穿按昨收与今价是否跨过阈值判断；涨跌幅两侧对称；is_active 布尔解析。"""
 
@@ -766,7 +766,7 @@ class AlertRuleSemanticsTests(TestCase):
         self.assertEqual(self._eval(), [])
 
 
-@patch('stocks.services.is_trading_day', _always_trading)
+@patch('stocks.trading_calendar.is_trading_day', _always_trading)
 class AlertApiParsingTests(TestCase):
     """ALG-14：创建时阈值统一量化（涨跌幅存绝对值）；is_active 按布尔口径解析。"""
 

@@ -10,7 +10,8 @@ import logging
 import akshare as ak
 
 from ._cache import _cache_get, _cache_meta, _cache_set, _stale_or, _to_float
-from .sentiment import _prev_trading_day, _recent_day_candidates
+from ..trading_calendar import prev_trading_day as _prev_trading_day
+from ..trading_calendar import recent_day_candidates as _recent_day_candidates
 
 logger = logging.getLogger(__name__)
 

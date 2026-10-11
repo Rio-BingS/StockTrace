@@ -11,7 +11,7 @@ from __future__ import annotations
 import logging
 import threading
 import time
-from datetime import datetime, time as dt_time, timedelta
+from datetime import datetime, time as dt_time
 
 from django.db.models import Count, Max
 from django.utils import timezone
@@ -27,7 +27,6 @@ _SECTOR_SNAPSHOT_KINDS = {
 }
 # turnover 自 2026-09 起纳入：为将来「成交额异动」信号积累历史；旧快照缺该键由读取方如实按 None 处理
 _ETF_SNAPSHOT_FIELDS = ('code', 'name', 'share', 'market_cap', 'turnover')
-_MAX_CALENDAR_LOOKBACK_DAYS = 120
 
 
 # 大盘资金流口径：沪（上证 1.000001）+ 深（深证成指 0.399001）两 secid 同日合计，
@@ -138,7 +137,7 @@ def save_daily_snapshots(trade_date=None):
     # 交易日守卫：非交易日（周末/节假日手动触发）落库会产生「最新快照不是最近
     # 已完成交易日」的脏行，卡死所有窗口指标的时效门槛。日历不可用时不拦截。
     try:
-        from ..services import is_trading_day
+        from ..trading_calendar import is_trading_day
 
         if is_trading_day(trade_date) is False:
             logger.info(f'{trade_date} 非交易日，跳过快照落库')
@@ -307,7 +306,7 @@ def verify_daily_snapshots(trade_date=None):
     仅交易日 15:30 后有意义——之前/非交易日/查询异常返回 None（视为「无可校验」，
     不告警）。etf_share 为全市场千行级，行数骤减同样视为异常。
     """
-    from ..services import is_trading_day
+    from ..trading_calendar import is_trading_day
 
     trade_date = trade_date or timezone.localdate()
     try:
@@ -411,20 +410,10 @@ def audit_market_ff_snapshots(start_date=None, end_date=None):
 
 
 def _recent_trading_days(n, end_date=None):
-    """截止 end_date（含）往前数 n 个已完成交易日；不足时返回 None（含日历不可用）。"""
-    from ..services import is_trading_day
+    """截止 end_date（含）往前数 n 个交易日（薄包装，实现见 trading_calendar，ARC-02）"""
+    from .. import trading_calendar
 
-    end_date = end_date or timezone.localdate()
-    days = []
-    day = end_date
-    for _ in range(_MAX_CALENDAR_LOOKBACK_DAYS):
-        if is_trading_day(day):
-            days.append(day)
-            if len(days) == n:
-                days.reverse()
-                return days
-        day -= timedelta(days=1)
-    return None
+    return trading_calendar.recent_trading_days(n, end_date=end_date)
 
 
 def _latest_snapshot(kind):
@@ -437,25 +426,10 @@ def _latest_snapshot(kind):
 
 
 def _expected_latest_date():
-    """最近一个已完成交易日的日期（15:30 后才算当天，覆盖快照写入时点）。
+    """最近一个已完成交易日（薄包装，实现见 trading_calendar，ARC-02）；日历不可用返回 None"""
+    from .. import trading_calendar
 
-    日历不可用时返回 None（调用方按「无法校验时效」处理）。
-    """
-    from datetime import time as dt_time, timedelta
-
-    from ..services import is_trading_day
-
-    now = timezone.localtime()
-    day = now.date()
-    for _ in range(_MAX_CALENDAR_LOOKBACK_DAYS):
-        if day < now.date() or now.time() >= dt_time(15, 30):
-            try:
-                if is_trading_day(day):
-                    return day
-            except Exception:
-                return None
-        day -= timedelta(days=1)
-    return None
+    return trading_calendar.expected_latest_date()
 
 
 def _window_payloads(kind, n):

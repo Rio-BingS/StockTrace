@@ -379,7 +379,7 @@ class SchedulerStepIsolationTests(TestCase):
 
     def _run_detector(self, hh, mm):
         from stocks import scheduler
-        with mock.patch('stocks.services.is_trading_day', return_value=True), \
+        with mock.patch('stocks.trading_calendar.is_trading_day', return_value=True), \
                 mock.patch('stocks.scheduler.timezone.localtime', return_value=self._at(hh, mm)), \
                 mock.patch('stocks.detector.scan.run_scan') as run_scan:
             scheduler._detector_scan_job()

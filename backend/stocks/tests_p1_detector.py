@@ -42,7 +42,7 @@ class DimensionEnabledTests(TestCase):
         cfgs['ma_relation']['evaluate'] = boom
         ctx = {'kind': 'industry', 'code': 'x', 'name': 'x', 'as_of': _TODAY.isoformat(),
                'dates': [], 'net': [], 'change_pct': []}
-        with patch('stocks.services.is_trading_day', _trading_true):
+        with patch('stocks.trading_calendar.is_trading_day', _trading_true):
             _sig, dims = signals.evaluate_target(ctx, list(cfgs.values()))
         self.assertNotIn('ma_relation', dims)
         # 注册表中无实现的停用维度同样不出现（不会以「维度计算异常」冒出来）
@@ -98,7 +98,7 @@ def _scan_patches(targets=None, ctx_builder=None, calm_result=(False, {'reason':
     from .tests_detector import _after_close_clock
 
     stack = ExitStack()
-    stack.enter_context(patch('stocks.services.is_trading_day', _trading_true))
+    stack.enter_context(patch('stocks.trading_calendar.is_trading_day', _trading_true))
     stack.enter_context(patch.object(scan, 'timezone', _after_close_clock()))
     stack.enter_context(patch.object(scan, 'save_margin_snapshot', return_value=0))
     stack.enter_context(patch.object(scan, 'build_index_context', return_value=(None, '指数日线不可用')))

@@ -70,7 +70,7 @@ class AlertDailyFallbackTests(TestCase):
         PriceAlert.objects.create(
             stock=self.stock, rule_type=PriceAlert.PRICE_ABOVE, threshold=Decimal('10'),
         )
-        with patch('stocks.services.is_trading_day', _trading_true):
+        with patch('stocks.trading_calendar.is_trading_day', _trading_true):
             events = alerts.evaluate_alerts(now=_INTRADAY)
         self.assertEqual(len(events), 1)
         self.assertIn('10.50', events[0].message)
@@ -90,7 +90,7 @@ class AlertDailyFallbackTests(TestCase):
                 raise RuntimeError('boom')
             return real(alert, today)
 
-        with patch('stocks.services.is_trading_day', _trading_true), \
+        with patch('stocks.trading_calendar.is_trading_day', _trading_true), \
                 patch.object(alerts, '_evaluate_one', side_effect=flaky), \
                 self.assertLogs('stocks.alerts', level='ERROR') as logs:
             events = alerts.evaluate_alerts(now=_INTRADAY)
@@ -117,7 +117,7 @@ class AlertStaleDataTests(TestCase):
         )
 
     def _eval(self, now):
-        with patch('stocks.services.is_trading_day', _trading_true):
+        with patch('stocks.trading_calendar.is_trading_day', _trading_true):
             return alerts.evaluate_alerts(now=now)
 
     def test_premarket_does_not_evaluate(self):
@@ -160,7 +160,7 @@ class AlertStaleDataTests(TestCase):
 
     def test_non_trading_day_skips(self):
         _make_bar(self.stock, datetime.combine(_TODAY, time(10, 0)), Decimal('11.30'))
-        with patch('stocks.services.is_trading_day', return_value=False):
+        with patch('stocks.trading_calendar.is_trading_day', return_value=False):
             self.assertEqual(alerts.evaluate_alerts(now=_at(10, 5)), [])
 
 
@@ -217,7 +217,7 @@ class ScanTargetIsolationTests(TestCase):
                 raise TypeError("unsupported operand type(s) for /: 'NoneType' and 'float'")
             return False, {'reason': '不平静'}
 
-        with patch('stocks.services.is_trading_day', _trading_true), \
+        with patch('stocks.trading_calendar.is_trading_day', _trading_true), \
                 patch.object(scan, 'timezone', _after_close_clock()), \
                 patch.object(scan, 'save_margin_snapshot', return_value=0), \
                 patch.object(scan, '_collect_targets', return_value=targets), \

@@ -34,7 +34,6 @@ _cache = OrderedDict()
 _cache_lock = threading.RLock()
 # single-flight：key -> [Lock, 等待者计数]，同一 key 只有一个线程打上游
 _inflight = {}
-_calendar_memo = {'close': None, 'at': 0.0}
 
 
 def _calendar_enabled():
@@ -137,38 +136,18 @@ def _stale_or(key, default):
 
 
 def _last_session_close():
-    """最近已完成交易日的 15:00（本地时区）；日历不可用时返回 None。
+    """最近已完成交易日的 15:00（薄包装，实现见 trading_calendar，ARC-02）"""
+    from .. import trading_calendar
 
-    结果记忆 60 秒；最多回看 20 天以覆盖春节/国庆等长假。
-    """
-    from django.utils import timezone
-    from ..services import is_trading_day
-
-    now = timezone.localtime()
-    if now.timestamp() - _calendar_memo['at'] < 60:
-        return _calendar_memo['close']
-    close = None
-    day = now.date()
-    try:
-        for _ in range(20):
-            if is_trading_day(day):
-                candidate = timezone.make_aware(datetime.combine(day, dt_time(15, 0)))
-                if candidate <= now:
-                    close = candidate
-                    break
-            day -= timedelta(days=1)
-    except Exception:
-        close = None
-    _calendar_memo['close'] = close
-    _calendar_memo['at'] = now.timestamp()
-    return close
+    return trading_calendar.last_session_close()
 
 
 def _session_date_at(ts):
     """写入时刻 ts 时数据所属的交易日（ISO 字符串）：当日开盘（09:15）后写入算当日，
     否则算之前最近一个交易日；日历未知时返回 None。最多回看 20 天。"""
     from django.utils import timezone
-    from ..services import is_trading_day
+
+    from ..trading_calendar import is_trading_day
 
     at = timezone.localtime(datetime.fromtimestamp(ts, tz=dt_timezone.utc))
     day = at.date()
@@ -184,12 +163,10 @@ def _session_date_at(ts):
 
 
 def _data_changing_now(now):
-    """交易日 09:15–21:00 数据仍可能变化（盘中 + 收盘后晚到），沿用 TTL。"""
-    from ..services import is_trading_day
+    """交易日 09:15–21:00 数据仍可能变化，沿用 TTL（薄包装，见 trading_calendar）"""
+    from .. import trading_calendar
 
-    if not is_trading_day(now.date()):
-        return False
-    return dt_time(9, 15) <= now.time() <= dt_time(21, 0)
+    return trading_calendar.data_changing_now(now)
 
 
 def _is_fresh(ts, ttl):

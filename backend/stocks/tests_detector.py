@@ -153,7 +153,7 @@ def _vote_config(key, direction_values):
     }
 
 
-@patch('stocks.services.is_trading_day', _trading_true)
+@patch('stocks.trading_calendar.is_trading_day', _trading_true)
 class VoteTests(TestCase):
     def _ctx(self, code='600000'):
         return {'kind': 'stock', 'code': code, 'name': code, 'as_of': _TODAY.isoformat()}
@@ -213,7 +213,7 @@ class CycleAndPersistenceTests(TestCase):
         }
 
     def test_second_day_same_direction_becomes_active(self):
-        with patch('stocks.services.is_trading_day', _trading_true):
+        with patch('stocks.trading_calendar.is_trading_day', _trading_true):
             first, _ = signals.evaluate_target(self._ctx(), self.configs)
             signals.upsert_signal(first, {})
             # 第二天的评估发生在下一个交易日（as_of 前移一天）
@@ -222,7 +222,7 @@ class CycleAndPersistenceTests(TestCase):
         self.assertEqual(second['status'], DetectorSignal.STATUS_ACTIVE)
 
     def test_direction_flip_resets_cycles(self):
-        with patch('stocks.services.is_trading_day', _trading_true):
+        with patch('stocks.trading_calendar.is_trading_day', _trading_true):
             configs_down = [
                 _vote_config('a', {'600000': (30.0, 'down')}),
                 _vote_config('b', {'600000': (40.0, 'down')}),
@@ -234,7 +234,7 @@ class CycleAndPersistenceTests(TestCase):
         self.assertEqual(day2['direction'], 'up')
 
     def test_upsert_is_idempotent(self):
-        with patch('stocks.services.is_trading_day', _trading_true):
+        with patch('stocks.trading_calendar.is_trading_day', _trading_true):
             data, _ = signals.evaluate_target(self._ctx(), self.configs)
             signals.upsert_signal(data, {})
             signals.upsert_signal(data, {})
@@ -276,7 +276,7 @@ class SectorSignalScanTests(TestCase):
             )
 
     def _run(self):
-        with patch('stocks.services.is_trading_day', _trading_true), \
+        with patch('stocks.trading_calendar.is_trading_day', _trading_true), \
                 patch.object(scan, 'timezone', _after_close_clock()), \
                 patch('stocks.detector.scan.save_margin_snapshot', return_value=0), \
                 patch('stocks.detector.scan.build_index_context', return_value=(None, '指数日线不可用')):
@@ -383,7 +383,7 @@ class ReviewTests(TestCase):
     def test_hit_confirms_and_adjusts_weight_up(self):
         self._seed_hit_signals('6001')
         configs = {c['key']: c for c in scan.load_configs()}
-        with patch('stocks.services.is_trading_day', _trading_true):
+        with patch('stocks.trading_calendar.is_trading_day', _trading_true):
             summary = review.review_pending(_TODAY, configs)
         n = review.MIN_ADJ_SAMPLES
         self.assertEqual(summary['reviewed'], n)
@@ -403,7 +403,7 @@ class ReviewTests(TestCase):
                 f'6002{i}0', [-0.5, -1.0, -1.5, -1.8, -2.0], history='up')
             self._make_signal(f'6002{i}0', base_date)
         configs = {c['key']: c for c in scan.load_configs()}
-        with patch('stocks.services.is_trading_day', _trading_true):
+        with patch('stocks.trading_calendar.is_trading_day', _trading_true):
             summary = review.review_pending(_TODAY, configs)
         self.assertEqual(summary['hits'], 0)
         self.assertEqual(summary['reviewed'], review.MIN_ADJ_SAMPLES)
@@ -419,7 +419,7 @@ class ReviewTests(TestCase):
             params={'window': 10, 'slope_days': 3, 'mild': 0.15, 'min': 0.02, 'max': 0.5},
         )
         configs = {c['key']: c for c in scan.load_configs()}
-        with patch('stocks.services.is_trading_day', _trading_true):
+        with patch('stocks.trading_calendar.is_trading_day', _trading_true):
             summary = review.review_pending(_TODAY, configs)
         self.assertTrue(summary['adjustments'])
         cfg = DetectorDimConfig.objects.get(key='vol_ratio_slope')
@@ -429,7 +429,7 @@ class ReviewTests(TestCase):
         _stock, base_date = self._make_stock_with_moves('600004', [2.0, 2.1, 2.2, 2.3, 2.4])
         self._make_signal('600004', base_date)
         configs = {c['key']: c for c in scan.load_configs()}
-        with patch('stocks.services.is_trading_day', _trading_true):
+        with patch('stocks.trading_calendar.is_trading_day', _trading_true):
             summary = review.review_pending(_TODAY, configs)
         self.assertEqual(summary['reviewed'], 1)
         cfg = DetectorDimConfig.objects.get(key='vol_ratio_slope')
@@ -440,7 +440,7 @@ class ReviewTests(TestCase):
         _stock, base_date = self._make_stock_with_moves('600005', [])
         self._make_signal('600005', base_date)
         configs = {c['key']: c for c in scan.load_configs()}
-        with patch('stocks.services.is_trading_day', _trading_true):
+        with patch('stocks.trading_calendar.is_trading_day', _trading_true):
             summary = review.review_pending(_TODAY, configs)
         self.assertEqual(summary['reviewed'], 0)
         self.assertEqual(
@@ -459,7 +459,7 @@ class MarginSnapshotTests(TestCase):
             }
             for i in range(3)
         }
-        with patch('stocks.market.sentiment.is_trading_day', _trading_true), \
+        with patch('stocks.trading_calendar.is_trading_day', _trading_true), \
                 patch.object(sentiment, '_sh_margin_rows', return_value=sh_rows), \
                 patch.object(sentiment, '_sz_margin_row', side_effect=[None, {'total': 13000.0, 'rz': 12000.0}, {'total': 13100.0, 'rz': 12100.0}]):
             from stocks.market.snapshots import save_margin_snapshot
@@ -486,7 +486,7 @@ class MarginSnapshotTests(TestCase):
             (base + timedelta(days=i)).strftime('%Y%m%d'): {'total': 19000.0, 'rz': 18000.0, 'rq': 1000.0}
             for i in range(2)
         }
-        with patch('stocks.market.sentiment.is_trading_day', _trading_true), \
+        with patch('stocks.trading_calendar.is_trading_day', _trading_true), \
                 patch.object(sentiment, '_sh_margin_rows', return_value=sh_rows), \
                 patch.object(sentiment, '_sz_margin_row', return_value={'total': 13000.0, 'rz': 12000.0}):
             save_margin_snapshot()
@@ -498,7 +498,7 @@ class MarginSnapshotTests(TestCase):
 
 class DegradedScanTests(TestCase):
     def test_all_sources_down_produces_no_fabricated_signals(self):
-        with patch('stocks.services.is_trading_day', _trading_true), \
+        with patch('stocks.trading_calendar.is_trading_day', _trading_true), \
                 patch.object(scan, 'timezone', _after_close_clock()), \
                 patch('stocks.detector.scan.save_margin_snapshot', return_value=0), \
                 patch('stocks.detector.scan.build_index_context', return_value=(None, '指数日线不可用')):
@@ -511,13 +511,13 @@ class DegradedScanTests(TestCase):
         self.assertTrue(run.degraded)
 
     def test_non_trading_day_is_skipped(self):
-        with patch('stocks.services.is_trading_day', return_value=False):
+        with patch('stocks.trading_calendar.is_trading_day', return_value=False):
             summary = scan.run_scan()
         self.assertEqual(summary['skipped'], 'non_trading_day')
         self.assertEqual(DetectorRun.objects.count(), 0)
 
 
-@patch('stocks.services.is_trading_day', _trading_true)
+@patch('stocks.trading_calendar.is_trading_day', _trading_true)
 class DetectorApiTests(TestCase):
     def setUp(self):
         self.run_row = DetectorRun.objects.create(

@@ -97,25 +97,25 @@ class NetworkGuardTests(SimpleTestCase):
 
 class ProcessCacheResetTests(SimpleTestCase):
     def test_reset_clears_module_level_caches(self):
-        from stocks import services
+        from stocks import trading_calendar
         from stocks.ai import valuation
         from stocks.market import _sources
         from stocks.market._cache import _cache, _cache_set
 
         _cache_set('k', 1)
         _sources._source_state['src'] = {'fails': 9, 'cool_until': 9e18}
-        services._trade_day_cache['d'] = (True, 9e18)
-        services._trade_calendar_set = {1}
-        services._calendar_fail_until['sina'] = 9e18
+        trading_calendar._trade_day_cache['d'] = (True, 9e18)
+        trading_calendar._trade_calendar_set = {1}
+        trading_calendar._calendar_fail_until['sina'] = 9e18
         valuation._last_fail_at = 9e18
 
         reset_process_caches()
 
         self.assertEqual(len(_cache), 0)
         self.assertEqual(_sources._source_state, {})
-        self.assertEqual(services._trade_day_cache, {})
-        self.assertIsNone(services._trade_calendar_set)
-        self.assertEqual(services._calendar_fail_until['sina'], 0)
+        self.assertEqual(trading_calendar._trade_day_cache, {})
+        self.assertIsNone(trading_calendar._trade_calendar_set)
+        self.assertEqual(trading_calendar._calendar_fail_until['sina'], 0)
         self.assertEqual(valuation._last_fail_at, 0.0)
 
     def test_reset_targets_all_exist(self):

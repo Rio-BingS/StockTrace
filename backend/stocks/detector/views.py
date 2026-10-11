@@ -17,7 +17,7 @@ from rest_framework.decorators import api_view
 from rest_framework.response import Response
 
 from ..market._query import _paginate
-from ..market.snapshots import _expected_latest_date
+from ..trading_calendar import expected_latest_date
 from ..models import DetectorDimConfig, DetectorRun, DetectorSignal
 from . import calm, registry, review, signals
 from .dimensions import (
@@ -52,7 +52,7 @@ def _meta(latest_run, message=''):
         data_date = latest_run.trade_date.isoformat()
         fetched_at = latest_run.updated_at.isoformat(timespec='seconds')
         try:
-            expected = _expected_latest_date()
+            expected = expected_latest_date()
             if expected and latest_run.trade_date >= expected:
                 cache_status = 'fresh'
         except Exception:

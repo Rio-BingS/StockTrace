@@ -19,9 +19,7 @@
 """
 
 import logging
-import threading
 import time
-from contextlib import contextmanager
 from datetime import datetime, time as dt_time, timedelta
 from decimal import Decimal
 
@@ -30,6 +28,10 @@ import pandas as pd
 from django.db import transaction
 from django.utils import timezone
 
+from . import trading_calendar
+# BaoStock 会话串行化与交易日历已分别抽到 baostock_session / trading_calendar（ARC-02），
+# 旧名保留供既有调用方使用
+from .baostock_session import bs_lock as _bs_lock, bs_session as _bs_session  # noqa: F401
 from .models import Stock, DailyQuote, MinuteBar
 
 logger = logging.getLogger(__name__)
@@ -38,48 +40,9 @@ logger = logging.getLogger(__name__)
 _stock_list_cache = {'df': None, 'expires': 0}
 _STOCK_LIST_TTL = 1800
 
-# 交易日历缓存（DAT-07）：
-# - 整表（新浪）带 TTL，过期后刷新失败继续沿用旧表（日历极少变化），只在表覆盖
-#   范围内给出确定结论；范围外不再一律判为非交易日
-# - 单日结论（BaoStock 兜底）按 date 缓存且带 TTL：date -> (bool, expires_at)
-# - 上游失败做负缓存（冷却期内不再请求），避免日历故障时逐日重复打接口
-# - 全部不可用时返回 None（未知），不再把「仅排除周末」的猜测结果永久缓存
-_trade_day_cache = {}
-_trade_calendar_set = None
-_trade_calendar_range = None   # (min_date, max_date)
-_trade_calendar_expires = 0
-_TRADE_CAL_TTL = 6 * 3600
-_TRADE_DAY_TTL = 6 * 3600
-_CALENDAR_FAIL_TTL = 300
-_calendar_fail_until = {'sina': 0, 'baostock': 0}
-
-# BaoStock 是模块级全局会话：多线程各自 login/logout 会互相登出（REL-06），
-# 所有 BaoStock 调用经 _bs_session 串行化 login → query → logout
-_bs_lock = threading.Lock()
-
 # ============================================================
 # 工具函数
 # ============================================================
-
-
-@contextmanager
-def _bs_session():
-    """持锁执行一次 BaoStock 会话（login → query → logout），yield baostock 模块"""
-    import baostock as bs
-    with _bs_lock:
-        lg = bs.login()
-        # BaoStock 登录失败（网络不可达等）不抛异常，只在返回值里给 error_code；
-        # 不检查的话调用方会拿到空结果当「无数据」，冷却/负缓存都不生效
-        err = getattr(lg, 'error_code', '0')
-        if isinstance(err, str) and err != '0':
-            raise RuntimeError(f"BaoStock 登录失败: {err} {getattr(lg, 'error_msg', '')}")
-        try:
-            yield bs
-        finally:
-            try:
-                bs.logout()
-            except Exception as e:
-                logger.debug(f"BaoStock 登出失败: {e}")
 
 def _exchange(code):
     """6位代码所属交易所（DAT-12）：'sh' / 'sz' / 'bj'
@@ -487,119 +450,18 @@ def _try_sources(method_name, *args, sources=None, **kwargs):
 # ============================================================
 
 def is_trading_time(dt=None):
-    """判断当前是否在A股交易时段内"""
-    if dt is None:
-        dt = timezone.now()
-
-    local_time = dt.astimezone(timezone.get_default_timezone())
-    hour, minute = local_time.hour, local_time.minute
-
-    # 上午 9:30 - 11:30
-    if hour == 9 and minute >= 30:
-        return True
-    if hour == 10:
-        return True
-    if hour == 11 and minute <= 30:
-        return True
-
-    # 下午 13:00 - 15:00
-    if hour == 13:
-        return True
-    if hour == 14:
-        return True
-    if hour == 15 and minute == 0:
-        return True
-
-    return False
+    """判断当前是否在A股交易时段内（薄包装，实现见 trading_calendar，ARC-02）"""
+    return trading_calendar.is_trading_time(dt)
 
 
 def _reset_trade_calendar_cache():
-    """清空交易日历全部缓存（测试 / 运维用）"""
-    global _trade_calendar_set, _trade_calendar_range, _trade_calendar_expires
-    _trade_day_cache.clear()
-    _trade_calendar_set = None
-    _trade_calendar_range = None
-    _trade_calendar_expires = 0
-    for k in _calendar_fail_until:
-        _calendar_fail_until[k] = 0
-
-
-def _refresh_trade_calendar(now):
-    """按需刷新新浪整表交易日历；失败进入冷却，保留旧表"""
-    global _trade_calendar_set, _trade_calendar_range, _trade_calendar_expires
-    if _trade_calendar_set is not None and now < _trade_calendar_expires:
-        return
-    if now < _calendar_fail_until['sina']:
-        return
-    try:
-        trade_dates = ak.tool_trade_date_hist_sina()
-        days = set(pd.to_datetime(trade_dates['trade_date']).dt.date)
-        if not days:
-            raise ValueError('交易日历为空')
-        _trade_calendar_set = days
-        _trade_calendar_range = (min(days), max(days))
-        _trade_calendar_expires = now + _TRADE_CAL_TTL
-    except Exception as e:
-        _calendar_fail_until['sina'] = now + _CALENDAR_FAIL_TTL
-        logger.warning(
-            f"新浪交易日历获取失败（{_CALENDAR_FAIL_TTL}s 内不再重试）"
-            f"{'，沿用旧表' if _trade_calendar_set is not None else ''}: {e}"
-        )
-
-
-def _baostock_is_trading_day(date, now):
-    """BaoStock 单日查询；返回 True/False，失败或无结果返回 None（失败进入冷却）"""
-    if now < _calendar_fail_until['baostock']:
-        return None
-    date_str = date.strftime('%Y-%m-%d')
-    try:
-        with _bs_session() as bs:
-            rs = bs.query_trade_dates(start_date=date_str, end_date=date_str)
-            err = getattr(rs, 'error_code', '0')
-            if isinstance(err, str) and err != '0':
-                raise RuntimeError(f"查询失败: {err} {getattr(rs, 'error_msg', '')}")
-            while rs.next():
-                row = rs.get_row_data()
-                return row[1] == '1'
-    except Exception as e:
-        _calendar_fail_until['baostock'] = now + _CALENDAR_FAIL_TTL
-        logger.warning(f"BaoStock交易日历获取失败（{_CALENDAR_FAIL_TTL}s 内不再重试）: {e}")
-    return None
+    """清空交易日历全部缓存（薄包装，实现见 trading_calendar，ARC-02）"""
+    trading_calendar.reset_cache()
 
 
 def is_trading_day(date=None):
-    """判断是否为交易日（排除周末和节假日），三态：True / False / None（未知）
-
-    多源备用 + 带 TTL 的缓存。日历全部不可用、或日期超出日历覆盖范围且兜底源
-    也查不到时返回 None：写库类调用方（`if not is_trading_day()`）会保守跳过，
-    只读类调用方可用 `is False` 只排除明确的非交易日。
-    """
-    if date is None:
-        # 本地交易日（timezone.now() 是 UTC，凌晨会落到前一天）
-        date = timezone.localdate()
-
-    if date.weekday() >= 5:
-        return False
-
-    now = time.time()
-
-    # 方式1: 新浪交易日历（AkShare）整表，只在表覆盖范围内下结论
-    _refresh_trade_calendar(now)
-    if _trade_calendar_set is not None and _trade_calendar_range[0] <= date <= _trade_calendar_range[1]:
-        return date in _trade_calendar_set
-
-    # 方式2: BaoStock 单日查询（结论带 TTL 缓存）
-    cached = _trade_day_cache.get(date)
-    if cached is not None and now < cached[1]:
-        return cached[0]
-    result = _baostock_is_trading_day(date, now)
-    if result is not None:
-        _trade_day_cache[date] = (result, now + _TRADE_DAY_TTL)
-        return result
-
-    # 兜底: 未知（不缓存结论；上游失败已有冷却，不会逐日重复请求）
-    logger.debug(f"交易日历无法判定 {date}，返回未知")
-    return None
+    """三态交易日判断 True / False / None（薄包装，实现见 trading_calendar，ARC-02）"""
+    return trading_calendar.is_trading_day(date)
 
 
 def fetch_stock_info(code):

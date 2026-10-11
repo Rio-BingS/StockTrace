@@ -10,7 +10,7 @@ import pandas as pd
 
 from ._cache import _cache_get, _cache_meta, _cache_set, _stale_or, _to_float
 from ._sources import _safe_df_call
-from ..services import is_trading_day
+from .. import trading_calendar
 
 logger = logging.getLogger(__name__)
 
@@ -19,27 +19,13 @@ _MARGIN_LOOKBACK_DAYS = 21
 
 
 def _recent_day_candidates(n=4, today=None):
-    """按「今天优先、其后最近交易日」生成候选日。
-
-    is_trading_day 仅在明确 False（周末/节假日）时跳过；日历不可用时的
-    节假日候选会多探测一次空结果，属可接受代价。
-    """
-    d = today or _date.today()
-    if is_trading_day(d) is False:
-        d -= timedelta(days=1)
-    out = []
-    while len(out) < n:
-        if is_trading_day(d) is not False:
-            out.append(d)
-        d -= timedelta(days=1)
-    return out
+    """「今天优先、其后最近交易日」候选日（薄包装，实现见 trading_calendar，ARC-02）"""
+    return trading_calendar.recent_day_candidates(n, today)
 
 
 def _prev_trading_day(d):
-    prev = d - timedelta(days=1)
-    while is_trading_day(prev) is False:
-        prev -= timedelta(days=1)
-    return prev
+    """前一交易日（薄包装，实现见 trading_calendar，ARC-02）"""
+    return trading_calendar.prev_trading_day(d)
 
 
 def _zt_top(df):

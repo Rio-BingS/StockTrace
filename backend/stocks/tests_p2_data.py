@@ -219,13 +219,13 @@ class MetaAccuracyTests(SimpleTestCase):
         def trading(d):
             return d.weekday() < 5
 
-        with patch('stocks.services.is_trading_day', side_effect=trading):
+        with patch('stocks.trading_calendar.is_trading_day', side_effect=trading):
             # 周一 08:00 写入（未开盘）→ 上周五；周一 10:00 → 周一
             mon_8 = timezone.make_aware(datetime(2026, 9, 7, 8, 0)).timestamp()
             mon_10 = timezone.make_aware(datetime(2026, 9, 7, 10, 0)).timestamp()
             self.assertEqual(_session_date_at(mon_8), date(2026, 9, 4).isoformat())
             self.assertEqual(_session_date_at(mon_10), date(2026, 9, 7).isoformat())
-        with patch('stocks.services.is_trading_day', return_value=None):
+        with patch('stocks.trading_calendar.is_trading_day', return_value=None):
             self.assertIsNone(_session_date_at(mon_10))
 
     @patch('stocks.market.etf.fetch_holder_structure', new=_no_holders)
@@ -323,7 +323,7 @@ class EtfShareMemoTests(TestCase):
         from contextlib import ExitStack
 
         stack = ExitStack()
-        stack.enter_context(patch('stocks.services.is_trading_day', lambda d: d.weekday() < 5))
+        stack.enter_context(patch('stocks.trading_calendar.is_trading_day', lambda d: d.weekday() < 5))
         stack.enter_context(patch('stocks.market.snapshots._expected_latest_date', return_value=_D2))
         return stack
 
@@ -373,7 +373,7 @@ class MarketFfUpsertTests(TestCase):
         MarketDailySnapshot.objects.create(
             kind=MarketDailySnapshot.KIND_MARKET_FF, trade_date=_D1, payload=[merged[_D1.isoformat()]],
         )
-        with patch('stocks.services.is_trading_day', return_value=True), \
+        with patch('stocks.trading_calendar.is_trading_day', return_value=True), \
                 patch('stocks.market.snapshots.fetch_market_ff_merged_rows', return_value=(merged, [])), \
                 patch('stocks.market.snapshots._etf_spot_fresh_for', return_value=False), \
                 patch('stocks.market.snapshots._prefer_sse_share_rows', return_value=[]), \
