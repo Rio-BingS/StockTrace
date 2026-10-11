@@ -826,3 +826,73 @@ class GroupListQueryTests(TestCase):
         with self.assertNumQueries(1):
             data = self.client.get('/api/stock-groups/').json()
         self.assertEqual([row['stock_count'] for row in data], [2] * 5)
+
+
+def _screener_bars(stock, closes, start, highs=None, lows=None, is_final=True):
+    from decimal import Decimal
+
+    from .models import DailyQuote
+
+    for i, close in enumerate(closes):
+        c = Decimal(str(close))
+        h = Decimal(str(highs[i])) if highs else c
+        lo = Decimal(str(lows[i])) if lows else c
+        DailyQuote.objects.create(
+            stock=stock, trade_date=start + timedelta(days=i), open_price=c, close_price=c,
+            high_price=h, low_price=lo, open_close_diff=Decimal('0'), open_close_pct=Decimal('0'),
+            high_low_diff=Decimal('0'), high_low_pct=Decimal('0'), volume=100000,
+            turnover=Decimal('1000000'), change_pct=Decimal('1'), is_final=is_final)
+
+
+@patch('stocks.ai.valuation.fetch_valuation_map', new=lambda codes: {})
+class ScreenerCrossSectionTests(TestCase):
+    """ALG-12/PERF-08：只用同一交易日（as_of）的行情横截面筛选，查询批量化。"""
+
+    def setUp(self):
+        from datetime import date
+
+        from .models import Stock
+
+        self.start = date(2026, 6, 1)
+        self.a = Stock.objects.create(code='600001', name='甲')
+        self.b = Stock.objects.create(code='600002', name='乙')
+
+    def test_stale_stock_is_excluded_and_reported(self):
+        from .ai.screener import run_screener_with_meta
+
+        _screener_bars(self.a, [10.0] * 30, self.start)
+        _screener_bars(self.b, [10.0] * 25, self.start)  # 停在 5 天前
+        rows, meta = run_screener_with_meta({'logic': 'all', 'conditions': [
+            {'field': 'close_price', 'op': 'gt', 'value': 0}]})
+        self.assertEqual([r['code'] for r in rows], ['600001'])
+        self.assertEqual(meta['as_of'], (self.start + timedelta(days=29)).isoformat())
+        self.assertEqual([e['code'] for e in meta['excluded']], ['600002'])
+        self.assertEqual(meta['excluded'][0]['last_trade_date'],
+                         (self.start + timedelta(days=24)).isoformat())
+
+    def test_api_returns_as_of_and_excluded(self):
+        import json
+
+        _screener_bars(self.a, [10.0] * 3, self.start)
+        resp = self.client.post('/api/screener/', json.dumps({'logic': 'all', 'conditions': [
+            {'field': 'close_price', 'op': 'gt', 'value': 0}]}), content_type='application/json')
+        self.assertEqual(resp.status_code, 200, resp.content)
+        data = resp.json()
+        self.assertEqual(data['as_of'], (self.start + timedelta(days=2)).isoformat())
+        self.assertEqual([e['code'] for e in data['excluded']], ['600002'])
+
+    def test_queries_do_not_grow_with_stock_count(self):
+        from .ai.screener import _latest_contexts
+        from .models import Stock
+
+        _screener_bars(self.a, [10.0] * 30, self.start)
+        _screener_bars(self.b, [10.0] * 30, self.start)
+        with self.assertNumQueries(4):
+            ctxs, _ = _latest_contexts()
+        self.assertEqual(len(ctxs), 2)
+        for i in range(3, 8):
+            _screener_bars(Stock.objects.create(code=f'60000{i}', name='x'), [10.0] * 30, self.start)
+        with self.assertNumQueries(4):
+            ctxs, _ = _latest_contexts()
+        self.assertEqual(len(ctxs), 7)
+        self.assertEqual(len(ctxs[0][1]['bars']), 30)

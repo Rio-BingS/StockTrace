@@ -24,7 +24,7 @@ from .prompts import (
     build_translate_messages,
     build_comment_messages,
 )
-from .screener import ConditionError, run_screener
+from .screener import ConditionError, run_screener_with_meta
 from .throttle import (
     PROVIDER_TEST_PURPOSE,
     cancel_call,
@@ -291,10 +291,11 @@ def ai_job_detail(request, job_id):
 def screener(request):
     """结构化条件选股（可复现）"""
     try:
-        rows = run_screener(request.data)
+        rows, meta = run_screener_with_meta(request.data)
     except ConditionError as exc:
         return Response({'detail': str(exc)}, status=status.HTTP_400_BAD_REQUEST)
-    return Response({'count': len(rows), 'results': rows, 'disclaimer': None})
+    # as_of/excluded：本次横截面的行情日与未参与的股票（ALG-12）
+    return Response({'count': len(rows), 'results': rows, 'disclaimer': None, **meta})
 
 
 @api_view(['POST'])
@@ -311,7 +312,7 @@ def screener_ai(request):
         return failed
 
     try:
-        rows = run_screener(spec)
+        rows, meta = run_screener_with_meta(spec)
     except ConditionError as exc:
         # LLM 翻译出了引擎不认的条件：如实报错，不猜测修正
         return Response(
@@ -319,7 +320,7 @@ def screener_ai(request):
             status=status.HTTP_400_BAD_REQUEST,
         )
     return Response({'conditions': spec, 'count': len(rows), 'results': rows,
-                     'disclaimer': DISCLAIMER})
+                     'disclaimer': DISCLAIMER, **meta})
 
 
 def _invalid_input(errors):

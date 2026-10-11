@@ -13,9 +13,14 @@ DSL 示例：
   "limit": 20                  # 可选
 }
 
-数据全部来自 DailyQuote 真实落库数据；多日字段（均线/区间涨跌/量比等）
-由最近 ≤61 根日线现算。任何字段因历史不足或数据缺失取不到值时为 None，
-该股此条件不命中（如实的「未知」，不当 0，遵守数据诚信红线）。
+数据全部来自 DailyQuote 真实落库数据；多日字段（均线/区间涨跌/量比/
+技术指标等）由截至 as_of 的最近 ≤MAX_LOOKBACK（140）根已收盘日线现算。
+任何字段因历史不足或数据缺失取不到值时为 None，该股此条件不命中（如实的
+「未知」，不当 0，遵守数据诚信红线）。
+
+横截面口径（ALG-12）：先确定全局 as_of = 自选股已收盘日线的最新交易日，只有
+最新一根就是 as_of 的股票参与筛选；停牌/拉取失败而停在更早日期的股票不再拿
+旧行情混进同一张榜，列入 excluded 并告知用户（见 run_screener_with_meta）。
 """
 from dataclasses import dataclass
 
@@ -370,37 +375,62 @@ FIELDS = {
 }
 
 
-def _final_quotes(stock):
-    """只取已收盘的日线（DAT-13）：盘中拉到的当日 bar 价量都不完整，
-    混进来会让涨跌幅/均线/量比等条件按半天数据命中。"""
-    return stock.daily_quotes.filter(is_final=True)
-
-
-def _history_ctx(stock, quote):
-    """组装字段计算上下文：最新日线 + 最近 ≤61 根（升序，尾元素最新）。"""
-    bars = list(_final_quotes(stock).order_by('-trade_date')[:MAX_LOOKBACK])
-    bars.reverse()
-    return {'stock': stock, 'quote': quote, 'bars': bars}
-
-
 def _latest_contexts():
-    """每只活跃股票的 (stock, 最新已收盘日线 ctx)；无收盘行情的股票不参与。
+    """参与筛选的 (stock, ctx) 列表与横截面元信息。
 
-    估值快照（腾讯）对全部自选股一次批量拉取，随 ctx 分发。
+    返回 (contexts, meta)：meta = {'as_of': date|None, 'excluded': [...]}。
+    - 只用已收盘的日线（DAT-13）：盘中拉到的当日 bar 价量都不完整；
+    - as_of 取全部活跃股票已收盘日线的最新交易日，最新一根不是 as_of 的股票
+      不参与，放进 excluded（ALG-12）；
+    - 查询批量化（PERF-08）：一次聚合取各股最新日期，一次取全部参与股票的
+      回看窗口，内存里分组；旧实现每只股票两次查询。
+    估值快照（腾讯）对参与股票一次批量拉取，随 ctx 分发。
     """
+    from django.db.models import Max
+
+    from ..models import DailyQuote
     from .valuation import fetch_valuation_map
 
+    stocks = {s.id: s for s in Stock.objects.filter(is_active=True)}
+    if not stocks:
+        return [], {'as_of': None, 'excluded': []}
+    final = DailyQuote.objects.filter(stock_id__in=list(stocks), is_final=True)
+    latest = dict(final.values('stock_id').annotate(last=Max('trade_date')).values_list('stock_id', 'last'))
+    as_of = max(latest.values()) if latest else None
+
+    excluded = []
+    for sid, stock in sorted(stocks.items(), key=lambda kv: kv[1].code):
+        last = latest.get(sid)
+        if last != as_of or as_of is None:
+            excluded.append({
+                'stock_id': sid, 'code': stock.code, 'name': stock.name,
+                'last_trade_date': last.isoformat() if last else None,
+                'reason': '无已收盘日线' if last is None else f'最新已收盘日线停在 {last.isoformat()}',
+            })
+    ids = [sid for sid, last in latest.items() if last == as_of]
+    meta = {'as_of': as_of, 'excluded': excluded}
+    if not ids:
+        return [], meta
+
+    # 回看窗口：参与股票共同的最近 MAX_LOOKBACK 个交易日（个股有停牌缺口时根数会少于
+    # MAX_LOOKBACK，指标按实际根数与各自的最少根数要求处理）
+    dates = list(
+        final.filter(stock_id__in=ids, trade_date__lte=as_of)
+        .values_list('trade_date', flat=True).distinct().order_by('-trade_date')[:MAX_LOOKBACK]
+    )
+    bars_by_stock = {sid: [] for sid in ids}
+    for bar in final.filter(stock_id__in=ids, trade_date__gte=dates[-1], trade_date__lte=as_of) \
+            .order_by('stock_id', 'trade_date'):
+        bars_by_stock[bar.stock_id].append(bar)
+
+    participants = sorted((stocks[sid] for sid in ids), key=lambda s: s.code)
+    val_map = fetch_valuation_map([s.code for s in participants])
     result = []
-    stocks = list(Stock.objects.filter(is_active=True))
-    val_map = fetch_valuation_map([s.code for s in stocks]) if stocks else {}
-    for stock in stocks:
-        quote = _final_quotes(stock).order_by('-trade_date').first()
-        if quote is None:
-            continue
-        ctx = _history_ctx(stock, quote)
-        ctx['val'] = val_map.get(stock.code)
+    for stock in participants:
+        bars = bars_by_stock[stock.id]
+        ctx = {'stock': stock, 'quote': bars[-1], 'bars': bars, 'val': val_map.get(stock.code)}
         result.append((stock, ctx))
-    return result
+    return result, meta
 
 
 def _match(op, value, target):
@@ -456,12 +486,19 @@ def _validate(spec):
 
 def run_screener(spec):
     """执行筛选，返回结果列表（含股票信息与命中的字段值）"""
+    rows, _meta = run_screener_with_meta(spec)
+    return rows
+
+
+def run_screener_with_meta(spec):
+    """执行筛选，返回 (rows, meta)；meta 含 as_of 与未参与股票列表（excluded）。"""
     _validate(spec)
     logic = spec.get('logic', 'all')
     conditions = spec['conditions']
 
+    contexts, meta = _latest_contexts()
     rows = []
-    for stock, ctx in _latest_contexts():
+    for stock, ctx in contexts:
         values = {key: fn(ctx) for key, (_, fn, _) in FIELDS.items()}
 
         results = []
@@ -498,4 +535,5 @@ def run_screener(spec):
     limit = spec.get('limit')
     if isinstance(limit, int) and limit > 0:
         rows = rows[:limit]
-    return rows
+    as_of = meta['as_of']
+    return rows, {'as_of': as_of.isoformat() if as_of else None, 'excluded': meta['excluded']}
