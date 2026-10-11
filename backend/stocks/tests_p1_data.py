@@ -338,3 +338,79 @@ class NegativeCacheTests(SimpleTestCase):
         self.assertEqual(data['dt_count'], 0)
         self.assertEqual(data['zb_count'], 0)
         self.assertEqual(data['seal_rate'], 100.0)
+
+
+class CacheConcurrencyTests(SimpleTestCase):
+    """REL-07：命中即 LRU 提升、同 key single-flight、源状态表有上限。"""
+
+    def setUp(self):
+        import importlib
+
+        from .market import _sources
+        self.c = importlib.import_module('stocks.market._cache')
+        self.s = _sources
+        self.c._cache.clear()
+        _sources._source_state.clear()
+        self.addCleanup(self.c._cache.clear)
+        self.addCleanup(_sources._source_state.clear)
+
+    def test_hit_moves_to_end(self):
+        c = self.c
+        c._cache_set('hot', 1)
+        for i in range(255):
+            c._cache_set(f'k{i}', i)
+        self.assertEqual(c._cache_get('hot', 60), 1)  # 命中提升为最近使用
+        c._cache_set('new', 2)                         # 超限淘汰最旧的 k0
+        self.assertIn('hot', c._cache)
+        self.assertNotIn('k0', c._cache)
+
+    def test_single_flight(self):
+        import threading
+        import time as _time
+
+        c = self.c
+        calls = []
+        gate = threading.Event()
+
+        def loader():
+            calls.append(1)
+            gate.wait(2)
+            return {'v': 1}
+
+        results = []
+        ts = [threading.Thread(target=lambda: results.append(c._cache_get_or_load('sf', 60, loader)))
+              for _ in range(8)]
+        for t in ts:
+            t.start()
+        _time.sleep(0.1)
+        gate.set()
+        for t in ts:
+            t.join()
+        self.assertEqual(len(calls), 1)
+        self.assertEqual(results, [{'v': 1}] * 8)
+        self.assertEqual(c._inflight, {})
+
+    def test_single_flight_loader_error_not_cached(self):
+        c = self.c
+
+        def boom():
+            raise RuntimeError('x')
+
+        with self.assertRaises(RuntimeError):
+            c._cache_get_or_load('e', 60, boom)
+        self.assertNotIn('e', c._cache)
+        self.assertEqual(c._inflight, {})
+        self.assertEqual(c._cache_get_or_load('e', 60, lambda: [1]), [1])
+
+    def test_source_state_bounded(self):
+        s = self.s
+        s._source_mark_fail('keep', 'e')
+        for i in range(300):
+            s._source_mark_ok(f'src{i}')
+            if i == 100:
+                s._source_mark_fail('keep', 'e')  # 最近更新的不被淘汰
+        self.assertLessEqual(len(s._source_state), 256)
+        self.assertNotIn('src0', s._source_state)
+        self.assertIn('src299', s._source_state)
+        self.assertIn('keep', s._source_state)
+        self.assertEqual(s._source_state['keep']['fails'], 2)

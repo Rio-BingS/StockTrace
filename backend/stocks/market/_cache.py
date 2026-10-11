@@ -15,6 +15,7 @@ available=False）时只做 60 秒负缓存，不走上面的收盘后保鲜；�
 from __future__ import annotations
 
 import sys
+import threading
 import time
 from collections import OrderedDict
 from datetime import datetime, time as dt_time, timedelta
@@ -28,6 +29,11 @@ _CACHE_MAX_ENTRIES = 256
 # 空结果（上游失败）负缓存秒数（DAT-10）
 _NEG_TTL = 60
 _cache = OrderedDict()
+# 调度线程与请求线程共享缓存（REL-07）：结构变更持锁；新鲜度判断可能查交易日历
+# （触网），放在锁外做
+_cache_lock = threading.RLock()
+# single-flight：key -> [Lock, 等待者计数]，同一 key 只有一个线程打上游
+_inflight = {}
 _calendar_memo = {'close': None, 'at': 0.0}
 
 
@@ -47,8 +53,16 @@ def _is_empty_payload(data):
     return isinstance(data, dict) and data.get('available') is False
 
 
+def _touch(key, item):
+    """命中即视为最近使用（真 LRU）；条目已被替换/淘汰则不动"""
+    with _cache_lock:
+        if _cache.get(key) is item:
+            _cache.move_to_end(key)
+
+
 def _cache_get(key, ttl):
-    item = _cache.get(key)
+    with _cache_lock:
+        item = _cache.get(key)
     if not item:
         return None
     now = time.time()
@@ -56,6 +70,7 @@ def _cache_get(key, ttl):
         # 负缓存只认 60 秒，不走收盘后保鲜
         return item['data'] if now - item['ts'] <= _NEG_TTL else None
     if _is_fresh(item['ts'], ttl):
+        _touch(key, item)
         return item['data']
     if now - (item.get('neg_ts') or 0) <= _NEG_TTL:
         # 好数据已过期但上游刚失败：短时间内沿用旧数据，不重打上游
@@ -65,21 +80,50 @@ def _cache_get(key, ttl):
 
 def _cache_set(key, data):
     now = time.time()
-    if _is_empty_payload(data):
-        item = _cache.get(key)
-        if item and not item.get('neg'):
-            item['neg_ts'] = now  # 不覆盖已有好数据
-            return
-        _cache[key] = {'ts': now, 'data': data, 'neg': True}
-    else:
-        _cache[key] = {'ts': now, 'data': data}
-    _cache.move_to_end(key)
-    while len(_cache) > _CACHE_MAX_ENTRIES:
-        _cache.popitem(last=False)
+    with _cache_lock:
+        if _is_empty_payload(data):
+            item = _cache.get(key)
+            if item and not item.get('neg'):
+                item['neg_ts'] = now  # 不覆盖已有好数据
+                return
+            _cache[key] = {'ts': now, 'data': data, 'neg': True}
+        else:
+            _cache[key] = {'ts': now, 'data': data}
+        _cache.move_to_end(key)
+        while len(_cache) > _CACHE_MAX_ENTRIES:
+            _cache.popitem(last=False)
+
+
+def _cache_get_or_load(key, ttl, loader):
+    """取缓存，未命中时调用 loader() 加载并写入；同一 key 并发只加载一次（single-flight）。
+
+    其余线程等待首个线程加载完成后直接读缓存结果（含 60 秒负缓存）。
+    loader 抛异常时向调用方抛出，不写缓存。
+    """
+    cached = _cache_get(key, ttl)
+    if cached is not None:
+        return cached
+    with _cache_lock:
+        entry = _inflight.setdefault(key, [threading.Lock(), 0])
+        entry[1] += 1
+    try:
+        with entry[0]:
+            cached = _cache_get(key, ttl)
+            if cached is not None:
+                return cached
+            data = loader()
+            _cache_set(key, data)
+            return data
+    finally:
+        with _cache_lock:
+            entry[1] -= 1
+            if entry[1] == 0 and _inflight.get(key) is entry:
+                del _inflight[key]
 
 
 def _stale_or(key, default):
-    item = _cache.get(key)
+    with _cache_lock:
+        item = _cache.get(key)
     return item['data'] if item and not item.get('neg') else default
 
 
@@ -138,7 +182,8 @@ def _is_fresh(ts, ttl):
 
 def _cache_meta(cache_key, ttl, source, available, source_data_date=None, disclaimer=''):
     """统一市场 API 元数据；缓存状态只使用 fresh/stale/unavailable。"""
-    item = _cache.get(cache_key)
+    with _cache_lock:
+        item = _cache.get(cache_key)
     if not item or item.get('neg'):
         cache_status = 'unavailable'
         fetched_at = None

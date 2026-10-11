@@ -17,8 +17,18 @@ logger = logging.getLogger(__name__)
 _SOURCE_COOLDOWN_SEC = 180
 _SOURCE_FAIL_THRESHOLD = 2
 _source_lock = threading.Lock()
-# name -> {fails, cool_until, last_ok, last_err}
+# name -> {fails, cool_until, last_ok, last_err}；按最近更新排序，超过上限淘汰最旧
+# （source_name 可能拼入周期等参数，需防无界增长，REL-07）
+_SOURCE_STATE_MAX = 256
 _source_state = {}
+
+
+def _source_state_put(name, st):
+    """写入源状态并移到最近位置；调用方须持有 _source_lock"""
+    _source_state.pop(name, None)
+    _source_state[name] = st
+    while len(_source_state) > _SOURCE_STATE_MAX:
+        _source_state.pop(next(iter(_source_state)))
 
 
 def _source_is_cool(name):
@@ -29,17 +39,17 @@ def _source_is_cool(name):
 
 def _source_mark_ok(name):
     with _source_lock:
-        _source_state[name] = {
+        _source_state_put(name, {
             'fails': 0,
             'cool_until': 0,
             'last_ok': time.time(),
             'last_err': '',
-        }
+        })
 
 
 def _source_mark_fail(name, err):
     with _source_lock:
-        st = _source_state.get(name) or {'fails': 0, 'cool_until': 0}
+        st = dict(_source_state.get(name) or {'fails': 0, 'cool_until': 0})
         st['fails'] = int(st.get('fails') or 0) + 1
         st['last_err'] = str(err)[:200]
         if st['fails'] >= _SOURCE_FAIL_THRESHOLD:
@@ -49,7 +59,7 @@ def _source_mark_fail(name, err):
             )
         else:
             logger.warning(f"数据源 {name} 失败 ({st['fails']}): {err}")
-        _source_state[name] = st
+        _source_state_put(name, st)
 
 
 def _is_empty_result(result):
