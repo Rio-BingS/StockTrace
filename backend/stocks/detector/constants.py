@@ -91,9 +91,12 @@ CYCLE_LOOKBACK = 20
 # ============================================================
 
 REVIEW_LOOKBACK = 5
-HIT_SIGMA_K = 1.0       # 兑现阈值 = k × σ20
+# 兑现阈值 = k × σ20 × √h（h = REVIEW_LOOKBACK）：σ20 是日波动，h 日窗口内
+# 触及 1 倍「日」σ 太容易（随机游走约 45%），按 √h 放大到 h 日尺度；
+# k=1 时随机游走的兑现率约 20%。可用 settings.DETECTOR_REVIEW_SIGMA_K 覆盖。
+HIT_SIGMA_K = 1.0
 SIGMA_WINDOW = 20       # σ 取 T 日及之前 20 个日涨跌幅
-HIT_PCT = 1.5           # σ 不可得时的兜底阈值（%）
+HIT_PCT = 1.5           # σ20 不可得时的兜底日波动（%），同样乘 k·√h
 BASELINE_DAYS = 60      # 无条件基线的起点数上限（T 日之前）
 MIN_BASELINE_WINDOWS = 20
 # 待回看信号只追溯这么多自然日：数据缺口长期补不齐的信号不再每天重试

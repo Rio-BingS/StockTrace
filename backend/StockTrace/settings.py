@@ -105,6 +105,8 @@ AI_CALL_LOG_RETENTION_DAYS = int(os.environ.get('AI_CALL_LOG_RETENTION_DAYS', '9
 # 探测器保留策略：信号行小（600 天对齐市场快照）；run 含热力图矩阵较大，保留更短
 DETECTOR_SIGNAL_RETENTION_DAYS = int(os.environ.get('DETECTOR_SIGNAL_RETENTION_DAYS', '600'))
 DETECTOR_RUN_RETENTION_DAYS = int(os.environ.get('DETECTOR_RUN_RETENTION_DAYS', '120'))
+# 复盘兑现阈值 = k × σ20 × √5（#12），k 默认 1.0
+DETECTOR_REVIEW_SIGMA_K = float(os.environ.get('DETECTOR_REVIEW_SIGMA_K', '1.0'))
 # 分钟 K 线保留天数（PERF-02）：每日 02:30 分批清理更早的 MinuteBar
 MINUTE_BAR_RETENTION_DAYS = int(os.environ.get('MINUTE_BAR_RETENTION_DAYS', '120'))
 # 市场日度快照保留天数（OPS-06）：之前文档写了该变量但 settings 未接线，环境变量从不生效。

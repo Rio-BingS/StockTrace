@@ -12,6 +12,7 @@ from __future__ import annotations
 import logging
 from datetime import timedelta
 
+from django.conf import settings
 from django.utils import timezone
 from rest_framework import status
 from rest_framework.decorators import api_view
@@ -339,9 +340,11 @@ def detector_config(request):
         # 共用一份，旧实现在这里手写了一份副本，改阈值后配置页会与实际不一致
         'review_rules': {
             'lookback_days': constants.REVIEW_LOOKBACK,
-            'hit_sigma_k': constants.HIT_SIGMA_K,
+            'hit_sigma_k': getattr(settings, 'DETECTOR_REVIEW_SIGMA_K', constants.HIT_SIGMA_K),
             'sigma_window': constants.SIGMA_WINDOW,
             'hit_pct': constants.HIT_PCT,
+            # 基期：指数/个股 T+1 开盘；板块无开盘价，T+1 收盘
+            'base': {'index': 'open_t1', 'stock': 'open_t1', 'industry': 'close_t1', 'concept': 'close_t1'},
             'weight_bounds': list(constants.WEIGHT_BOUNDS),
             'min_scale_bounds': list(constants.MIN_SCALE_BOUNDS),
             'min_samples': constants.MIN_ADJ_SAMPLES,

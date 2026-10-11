@@ -624,12 +624,13 @@ class ReviewProtocolTests(TestCase):
         self.assertEqual(summary['adjustments'], [])
         self.assertEqual(DetectorDimConfig.objects.get(key='vol_ratio_slope').weight, 1.0)
 
-    def test_sector_review_needs_full_window_and_uses_signal_close(self):
+    def test_sector_review_needs_full_window_and_uses_next_close(self):
         from .detector import review
         from .models import DetectorSignal, MarketDailySnapshot
 
+        # 板块基期为 T+1 收盘（#12）：需要 T+1..T+6 共 6 个交易日的快照
         base_date = _TODAY - timedelta(days=10)
-        pcts = [(-0.3 if i % 2 else -0.1) for i in range(40)] + [0.0] + [0.5, 0.6, 0.4, 0.3, 0.2]
+        pcts = [(-0.3 if i % 2 else -0.1) for i in range(40)] + [0.0] + [0.5, 0.6, 0.4, 0.3, 0.2, 0.1]
         start = base_date - timedelta(days=40)
         for i, pct in enumerate(pcts):
             MarketDailySnapshot.objects.create(

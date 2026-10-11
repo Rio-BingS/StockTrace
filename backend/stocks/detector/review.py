@@ -1,18 +1,21 @@
-"""迭代优化：回看 5 个交易日前信号的兑现情况，微调维度权重与灵敏度阈值。
+"""迭代优化：回看 h（=5）个交易日前信号的兑现情况，微调维度权重与灵敏度阈值。
 
-兑现（hit）定义（ALG-05 修订）：
-- 窗口：信号日 T 之后连续 5 个交易日（按交易日历校验），后续数据不满 5 日或
-  有缺口时保持待回看，不判定——旧实现有 1 根就判定并永久写入；
-- 基期：T+1 开盘价（指数/个股）。信号 17:15 收盘后才产出，T 日收盘价不可
-  成交（轻度前视）；板块快照只有日涨跌幅、没有开盘价，只能以 T 日收盘为基期；
-- 阈值：k × σ20（T 日及之前 20 个交易日的日涨跌幅标准差），按标的自身波动
-  缩放；σ 不可得时退回固定 HIT_PCT；
+兑现（hit）定义（ALG-05 修订，#12 口径 v2）：
+- 窗口：信号日 T 之后的连续交易日（按交易日历校验），后续数据不满或有缺口时
+  保持待回看，不判定——旧实现有 1 根就判定并永久写入；
+- 基期：指数/个股用 T+1 开盘价（信号 17:15 收盘后才产出，T 日收盘不可成交）；
+  板块快照只有日涨跌幅、没有开盘价，改用 T+1 收盘价为基期，再看其后 h 个收盘
+  （T+2..T+h+1）——旧口径以 T 收盘为基期，吃进了 T→T+1 的隔夜跳空，板块日
+  收益正自相关时偏乐观。两者都是「信号产出后第一个可成交价」：个股/指数是
+  T+1 开盘，板块拿不到开盘只能退到 T+1 收盘，所以板块要多等一个交易日才判定；
+- 阈值：k × σ20 × √h（σ20 为 T 日及之前 20 个日涨跌幅的标准差）——旧口径 1×σ20
+  是「日」尺度，5 日内随机游走约 45% 能触及；σ 不可得时以 HIT_PCT 作 σ；
 - 判定：窗口内按收盘价逐日推进，有利方向先达到 +阈值 记兑现；不利方向先
   触及 −阈值（MAE 先到）或到期都没到，记未兑现。
 
 调参口径：
 - 命中率与同标的「无条件基线」比较：用 T 日之前的历史，以同样的方向、阈值、
-  窗口规则，统计任意起点的兑现率；看超额命中率而不是绝对值——旧口径下随机
+  基期、窗口规则，统计任意起点的兑现率；看超额命中率而不是绝对值——旧口径下随机
   游走的高波动股「命中率」超过 60%，会被当成维度太苛刻而自动放宽门槛；
 - 同一标的连续多日的 active 信号回看窗口高度重叠，只取信号段首个 active 日
   （cycles == 2）计入调参样本，其余照常判定但不参与调参；
@@ -29,8 +32,10 @@
 from __future__ import annotations
 
 import logging
+import math
 from datetime import timedelta
 
+from django.conf import settings
 from django.utils import timezone
 
 from ..models import DailyQuote, DetectorDimConfig, DetectorSignal
@@ -112,19 +117,42 @@ def _judge(base, path, direction, thr):
     return False, None, mfe
 
 
+def _sigma_k():
+    """兑现阈值系数 k（settings.DETECTOR_REVIEW_SIGMA_K 可覆盖常量）。"""
+    try:
+        k = float(getattr(settings, 'DETECTOR_REVIEW_SIGMA_K', HIT_SIGMA_K))
+    except (TypeError, ValueError):
+        k = HIT_SIGMA_K
+    return k if k > 0 else HIT_SIGMA_K
+
+
+def _threshold(sigma, k=None):
+    """h 日兑现阈值（%）：k × σ × √h；σ 不可得时以 HIT_PCT 作日波动。"""
+    k = _sigma_k() if k is None else k
+    return k * (sigma if sigma else HIT_PCT) * math.sqrt(REVIEW_LOOKBACK)
+
+
+def _offset(base_is_open):
+    """基期相对 T 的偏移：开盘基期用 T+1 开盘（窗口 T+1..T+h），收盘基期用
+    T+1 收盘（窗口 T+2..T+h+1），后者多占一个交易日。"""
+    return 0 if base_is_open else 1
+
+
 def _baseline(bars, direction, thr, base_is_open):
     """无条件基线：用信号日之前的历史，任意起点按同规则的兑现率。
 
     bars: 信号日 T 及之前的 [(date, open, close)] 升序（不含 T 之后，避免前视）。
-    起点 s 的窗口 s+1..s+5 必须完全落在 T 及之前。样本窗口不足返回 None。
+    起点 s 的基期与窗口按 _offset 与信号同口径，且必须完全落在 T 及之前。
+    样本窗口不足返回 None。
     """
+    off = _offset(base_is_open)
     n = len(bars)
-    last_start = n - 1 - REVIEW_LOOKBACK
+    last_start = n - 1 - REVIEW_LOOKBACK - off
     first_start = max(0, last_start - BASELINE_DAYS + 1)
     hits = total = 0
     for s in range(first_start, last_start + 1):
-        window = bars[s + 1:s + 1 + REVIEW_LOOKBACK]
-        base = window[0][1] if base_is_open else bars[s][2]
+        window = bars[s + 1 + off:s + 1 + off + REVIEW_LOOKBACK]
+        base = bars[s + 1][1] if base_is_open else bars[s + 1][2]
         if not base or any(c is None for _d, _o, c in window):
             continue
         hit, _d, _m = _judge(base, [(d, c) for d, _o, c in window], direction, thr)
@@ -138,26 +166,30 @@ def _baseline(bars, direction, thr, base_is_open):
 def _evaluate_bars(signal, before, after, base_is_open, calendar=None):
     """统一判定：before = T 及之前的 bars（末根必须是 T），after = T 之后的 bars。
 
+    base_is_open=True：T+1 开盘为基期，窗口 T+1..T+h；False：T+1 收盘为基期，
+    窗口 T+2..T+h+1（板块）。
     返回 None（保持待回看）或 dict(hit, hit_date, mfe, thr, baseline)。
     calendar 见 _next_trading_days（缺省不透传，测试 patch 旧签名照常生效）。
     """
     if not before or before[-1][0] != signal.trade_date:
         return None
+    off = _offset(base_is_open)
     if calendar is not None:
-        expected = _next_trading_days(signal.trade_date, REVIEW_LOOKBACK, calendar=calendar)
+        expected = _next_trading_days(signal.trade_date, REVIEW_LOOKBACK + off, calendar=calendar)
     else:
-        expected = _next_trading_days(signal.trade_date, REVIEW_LOOKBACK)
-    window = after[:REVIEW_LOOKBACK]
-    # 后续必须是连续的 5 个交易日（数据缺口/不足都保持待回看）
-    if expected is None or [b[0] for b in window] != expected:
+        expected = _next_trading_days(signal.trade_date, REVIEW_LOOKBACK + off)
+    span = after[:REVIEW_LOOKBACK + off]
+    # 后续必须是连续交易日（数据缺口/不足都保持待回看）
+    if expected is None or [b[0] for b in span] != expected:
         return None
-    if any(c is None for _d, _o, c in window):
+    if any(c is None for _d, _o, c in span):
         return None
-    base = window[0][1] if base_is_open else before[-1][2]
+    base = span[0][1] if base_is_open else span[0][2]
     if not base:
         return None
+    window = span[off:]
     sigma = _sigma([c for _d, _o, c in before])
-    thr = HIT_SIGMA_K * sigma if sigma else HIT_PCT
+    thr = _threshold(sigma)
     hit, hit_date, mfe = _judge(base, [(d, c) for d, _o, c in window], signal.direction, thr)
     return {
         'hit': hit, 'hit_date': hit_date, 'mfe': mfe, 'thr': thr,
@@ -213,7 +245,7 @@ def _index_outcome(signal, _cache):
 
 
 def _sector_outcome(signal, cache):
-    """板块：快照涨跌幅链式合成伪价格（基期任意），以 T 日收盘为基期（无开盘价）。"""
+    """板块：快照涨跌幅链式合成伪价格（基期任意），以 T+1 日收盘为基期（无开盘价）。"""
     key = ('sector', signal.target_kind)
     if key not in cache:
         cache[key] = load_sector_snapshots(signal.target_kind, lookback_days=160)
