@@ -7,10 +7,16 @@ import StockWatchlist from '../components/StockWatchlist.vue'
 import AlertPanel from '../components/AlertPanel.vue'
 import { errorMessage } from '../utils/errorMessage.js'
 import { usePolling } from '../composables/usePolling.js'
+import { createBurstScheduler, createSerialRunner } from '../utils/serialRunner.js'
 
 const router = useRouter()
 const dashboardData = ref([])
-const loading = ref(false)
+// 首次加载与后台刷新分离（FEF-05）：只有首屏显示"加载中"，
+// 后台刷新保留旧表格（不重建 DOM、输入框不失焦），只在页头显示角标
+const loading = ref(true)
+const refreshing = ref(false)
+const loaded = ref(false)
+const lastLoadedAt = ref('')
 const loadError = ref('')
 const fetchLoading = ref(false)
 const fetchMessage = ref('')
@@ -84,18 +90,32 @@ const portfolio = computed(() => {
   return { cost, value, pnl: value - cost, count }
 })
 
-async function loadDashboard() {
-  loading.value = true
+function hhmm(d) {
+  return `${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}`
+}
+
+async function doLoadDashboard() {
+  if (loaded.value) refreshing.value = true
+  else loading.value = true
   try {
     const res = await dashboardApi.get()
     dashboardData.value = res.data
     loadError.value = ''
+    lastLoadedAt.value = hhmm(new Date())
   } catch (e) {
     loadError.value = errorMessage(e, '加载看板数据失败')
   } finally {
     loading.value = false
+    refreshing.value = false
+    loaded.value = true
   }
 }
+
+// 轮询、手动操作、添加后补刷都走这里：串行执行，执行中的重复调用合并为一次
+const loadDashboard = createSerialRunner(doLoadDashboard)
+// 添加自选后后端在后台拉行情：3/8/15s 各补刷一次，重复添加从头重排，卸载时取消
+const burstRefresh = createBurstScheduler(loadDashboard, [3000, 8000, 15000])
+let fetchMsgTimer = null
 
 function stopPoll() {
   if (pollTimer) {
@@ -120,7 +140,9 @@ async function pollFetchStatus() {
       fetchMessage.value = st.last_error || '拉取失败'
     } else if (st.last_status === 'success') {
       fetchMessage.value = '拉取完成'
-      setTimeout(() => {
+      if (fetchMsgTimer) clearTimeout(fetchMsgTimer)
+      fetchMsgTimer = setTimeout(() => {
+        fetchMsgTimer = null
         if (fetchMessage.value === '拉取完成') fetchMessage.value = ''
       }, 3000)
     } else {
@@ -169,9 +191,7 @@ function goToDetail(item) {
 function onWatchlistRefresh() {
   loadDashboard()
   // 添加后后端会后台拉行情，短时多刷几次
-  setTimeout(loadDashboard, 3000)
-  setTimeout(loadDashboard, 8000)
-  setTimeout(loadDashboard, 15000)
+  burstRefresh.trigger()
 }
 
 // 低配 VPS：看板交易时段 60s 轮询、非交易时段 10 分钟、页面隐藏暂停（FEF-04）；
@@ -184,6 +204,8 @@ onMounted(() => {
 
 onUnmounted(() => {
   stopPoll()
+  burstRefresh.cancel()
+  if (fetchMsgTimer) clearTimeout(fetchMsgTimer)
 })
 </script>
 
@@ -195,6 +217,8 @@ onUnmounted(() => {
         <span v-if="portfolio" class="portfolio" :class="portfolio.pnl >= 0 ? 'up' : 'down'">
           持仓{{ portfolio.count }}只 · 盈亏 {{ portfolio.pnl >= 0 ? '+' : '' }}{{ portfolio.pnl.toFixed(2) }}
         </span>
+        <span v-if="refreshing" class="refresh-badge">刷新中…</span>
+        <span v-else-if="lastLoadedAt" class="updated-at">更新于 {{ lastLoadedAt }}</span>
         <span v-if="fetchMessage" class="fetch-msg">{{ fetchMessage }}</span>
         <button
           class="btn btn-primary"
@@ -269,6 +293,12 @@ onUnmounted(() => {
 .fetch-msg {
   color: #aaa;
   font-size: 13px;
+}
+
+.refresh-badge,
+.updated-at {
+  color: #8a93a6;
+  font-size: 12px;
 }
 
 .load-error {
