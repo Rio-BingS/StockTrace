@@ -30,6 +30,7 @@ from .constants import (
     MARGIN_VOTE_CODES,
     MIN_PRICE_BARS,
     MIN_SECTOR_POINTS,
+    NEW_LISTING_MASK_BARS,
     NOISE_DEFAULTS,
     SECTOR_CONTEXT_DAYS,
     SECTOR_LOOKBACK_DAYS,  # noqa: F401  旧路径 dimensions.SECTOR_LOOKBACK_DAYS 保留
@@ -325,6 +326,9 @@ def build_index_context(code, name):
         return None, f'指数日线仅 {len(items)} 根，历史不足'
 
     ctx = _price_ctx('index', code, name, items)
+    # 指数无股本概念，也无送转：校正量能即原始成交量（#15，与个股同一接口）
+    ctx['volume_adj'] = list(ctx['volume'])
+    ctx['volume_basis'] = 'volume'
     ctx['margin'] = []
     ctx['margin_as_of'] = None
     if code not in MARGIN_VOTE_CODES:
@@ -368,18 +372,125 @@ def build_stock_context(stock):
     # 成交额（元）只用于识别量价基准断层（ALG-13），不参与其他维度
     ctx['amount'] = [it['amount'] for it in items]
     # 逐日流通股本（股）：换手率维度用真实换手率；None 表示股本数据缺失（ALG-13）
-    ctx['float_shares'] = _float_shares_for(stock.code, ctx['dates'])
+    history = _float_share_history(stock.code)
+    ctx['float_shares'] = _shares_on(history, ctx['dates'])
+    # 送转/新股校正后的量能序列（#15）：供平静闸门的 RVOL/量能 CV 与量比类维度接入
+    ctx['volume_adj'], ctx['volume_basis'] = adjusted_volume_series(
+        ctx, listing_date=_listing_date(history),
+    )
     return ctx, ''
+
+
+def _float_share_history(code):
+    """流通股本变动历史 [(date, shares)]；取不到（关闭/熔断/上游失败）返回 None。"""
+    from ..datasources import float_shares
+
+    return float_shares.fetch_float_share_history(code) or None
+
+
+def _shares_on(history, dates):
+    from ..datasources import float_shares
+
+    if not history:
+        return None
+    return float_shares.shares_on_dates(history, dates)
 
 
 def _float_shares_for(code, dates):
     """与 dates 对齐的流通股本序列；取不到（关闭/熔断/上游失败）返回 None。"""
-    from ..datasources import float_shares
+    return _shares_on(_float_share_history(code), dates)
 
-    history = float_shares.fetch_float_share_history(code)
+
+def _listing_date(history):
+    """流通股本历史的首个变动日 ≈ 上市日（新股首次登记流通股本）；无数据返回 None。"""
     if not history:
         return None
-    return float_shares.shares_on_dates(history, dates)
+    first = history[0][0]
+    if isinstance(first, str):
+        first = _date.fromisoformat(first[:10])
+    return first
+
+
+def adjusted_volume_series(ctx, listing_date=None, split_ratio=SPLIT_RATIO_DEFAULT):
+    """送转与新股校正后的量能序列（#15），返回 (series, basis)。
+
+    为什么需要：日线是前复权价、成交量不复权，送转（如 10 转 10）后成交量
+    （股）整体上一个台阶，RVOL、量能 CV、量比斜率都会把股本扩大误读成放量；
+    新股上市初期的极端量能进入基期，会把「平静」基线整体抬高。
+    口径（按优先级）：
+    1. 'turnover'：个股有完整流通股本时用 成交量/当日流通股本（换手率）——送转、
+       定增、解禁前后都连续，且 RVOL/CV 这类比值与「量」口径等价；
+    2. 'split_adjusted'：股本缺失时用 _share_basis_break 找送转/配股断层，把断层前
+       的成交量乘以台阶比（断层前后 r=成交额/(量×价) 的中位数之比，即换算成新
+       股本口径），最多处理 3 个断层；
+    3. 'volume'：都不适用时原样返回成交量（指数、ETF、无断层个股）。
+    新股保护：listing_date 落在 ctx 窗口内时，上市日起 NEW_LISTING_MASK_BARS 根
+    量能置 None（基期窗口不齐就不算，与各维度的严格窗口纪律一致），basis 追加
+    '+listing_masked'。
+    接入方式：平静闸门/量比维度读 ctx.get('volume_adj') or ctx['volume'] 即可，
+    序列与 ctx['dates'] 等长对齐。
+    """
+    volumes = list(ctx.get('volume') or [])
+    basis = 'volume'
+    if ctx.get('kind') == 'stock' and volumes:
+        shares = ctx.get('float_shares')
+        if shares and len(shares) == len(volumes) and all(
+            s for v, s in zip(volumes, shares) if v is not None
+        ):
+            volumes = [v / s if v is not None else None for v, s in zip(volumes, shares)]
+            basis = 'turnover'
+        else:
+            adjusted = _split_adjust_volumes(ctx, split_ratio)
+            if adjusted is not None:
+                volumes, basis = adjusted, 'split_adjusted'
+    if listing_date is not None and ctx.get('dates'):
+        iso = listing_date.isoformat()
+        dates = ctx['dates']
+        if dates[0] <= iso <= dates[-1]:
+            start = next(i for i, d in enumerate(dates) if d >= iso)
+            for i in range(start, min(len(volumes), start + NEW_LISTING_MASK_BARS)):
+                volumes[i] = None
+            basis += '+listing_masked'
+    return volumes, basis
+
+
+def _split_adjust_volumes(ctx, split_ratio, max_breaks=3):
+    """按量价基准断层把断层前的成交量换算到断层后的股本口径；无断层返回 None。"""
+    work = {**ctx, 'volume': list(ctx.get('volume') or [])}
+    n = len(work['volume'])
+    changed = False
+    for _ in range(max_breaks):
+        broke = _share_basis_break(work, n, split_ratio)
+        if broke is None:
+            break
+        j = work['dates'].index(broke)
+        r = _basis_ratios(work)
+        before = _median([x for x in r[max(0, j - 3):j] if x is not None])
+        after = _median([x for x in r[j:j + 3] if x is not None])
+        if not before or not after:
+            break
+        factor = before / after
+        work['volume'] = [
+            v * factor if v is not None and i < j else v for i, v in enumerate(work['volume'])
+        ]
+        changed = True
+    return work['volume'] if changed else None
+
+
+def _basis_ratios(ctx):
+    """逐日 r = 成交额 / (成交量 × 收盘价)；任一缺失为 None（见 _share_basis_break）。"""
+    return [
+        a / (v * c) if a and v and c else None
+        for a, v, c in zip(ctx.get('amount') or [], ctx.get('volume') or [], ctx.get('close') or [])
+    ]
+
+
+def _median(vals):
+    vals = sorted(vals)
+    if not vals:
+        return None
+    mid = len(vals) // 2
+    return vals[mid] if len(vals) % 2 else (vals[mid - 1] + vals[mid]) / 2
 
 
 def _price_ctx(kind, code, name, items):

@@ -134,3 +134,8 @@ AXIS_CALENDAR_BUFFER = 30
 FLOW_RESID_WINDOW = 60
 # 拟合所需最少有效点数：不足时该点残差为 None（如实不可用，不退回原始净额）
 FLOW_RESID_MIN_OBS = 20
+
+# 量能序列送转/新股保护（#15，供 calm/量比类维度接入）：
+# 新股上市初期的极端量能不进入基期——ctx 首根就是该股在库里的第一根、且
+# 不足 CONTEXT_BARS 时，把最前面这么多根量能置 None。
+NEW_LISTING_MASK_BARS = 20

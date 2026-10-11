@@ -12,7 +12,7 @@ from django.test import TestCase
 from django.utils import timezone
 
 from .detector import dimensions
-from .detector.constants import CONTEXT_BARS
+from .detector.constants import CONTEXT_BARS, NEW_LISTING_MASK_BARS
 from .models import MarketDailySnapshot
 
 _TODAY = timezone.localdate()
@@ -282,6 +282,75 @@ class DetectorSchedulerDependencyTests(TestCase):
     def test_waits_for_concept_ff(self):
         with self.assertLogs('stocks.scheduler', level='WARNING'):
             self.assertEqual(self._ready(('industry_ff', 'market_ff')), (False, 'waiting'))
+
+
+class AdjustedVolumeTests(TestCase):
+    """#15：送转与新股保护后的量能序列（供平静闸门/量比维度接入）。"""
+
+    def _ctx(self, n=80, split_at=None):
+        rng = random.Random(5)
+        vols, closes, amounts = [], [], []
+        for i in range(n):
+            price = 10.0 * (1 + rng.gauss(0, 0.01))
+            vol = 1e6 * (1 + rng.gauss(0, 0.05))
+            if split_at is not None:
+                # 10 转 10：前复权价全程减半；断层前成交量是旧股本口径，之后翻倍
+                closes.append(price / 2)
+                vols.append(vol if i < split_at else vol * 2)
+                amounts.append(price * vol)
+            else:
+                closes.append(price)
+                vols.append(vol)
+                amounts.append(price * vol)
+        dates = [(date(2026, 1, 1) + timedelta(days=i)).isoformat() for i in range(n)]
+        return {'kind': 'stock', 'dates': dates, 'volume': vols, 'close': closes,
+                'amount': amounts, 'float_shares': None}
+
+    @staticmethod
+    def _rvol(vols, i, w=10):
+        return vols[i] / (sum(vols[i - w:i]) / w)
+
+    def test_split_without_share_data_is_rescaled(self):
+        ctx = self._ctx(split_at=60)
+        self.assertGreater(self._rvol(ctx['volume'], 62), 1.6)  # 原始量：送转误读成放量
+        vols, basis = dimensions.adjusted_volume_series(ctx)
+        self.assertEqual(basis, 'split_adjusted')
+        self.assertLess(abs(self._rvol(vols, 62) - 1), 0.25)
+        self.assertEqual(len(vols), len(ctx['volume']))
+
+    def test_turnover_basis_when_shares_complete(self):
+        ctx = self._ctx(split_at=60)
+        ctx['float_shares'] = [1e8 if i < 60 else 2e8 for i in range(80)]
+        vols, basis = dimensions.adjusted_volume_series(ctx)
+        self.assertEqual(basis, 'turnover')
+        self.assertLess(abs(self._rvol(vols, 62) - 1), 0.25)
+
+    def test_no_break_keeps_raw_volume(self):
+        ctx = self._ctx()
+        vols, basis = dimensions.adjusted_volume_series(ctx)
+        self.assertEqual(basis, 'volume')
+        self.assertEqual(vols, ctx['volume'])
+
+    def test_new_listing_bars_masked(self):
+        ctx = self._ctx()
+        listing = date.fromisoformat(ctx['dates'][5])
+        vols, basis = dimensions.adjusted_volume_series(ctx, listing_date=listing)
+        self.assertTrue(basis.endswith('+listing_masked'))
+        self.assertTrue(all(v is None for v in vols[5:5 + NEW_LISTING_MASK_BARS]))
+        self.assertIsNotNone(vols[5 + NEW_LISTING_MASK_BARS])
+        # 上市日早于窗口：不做任何处理
+        _v, basis = dimensions.adjusted_volume_series(ctx, listing_date=date(2020, 1, 1))
+        self.assertEqual(basis, 'volume')
+
+
+    def test_contexts_carry_volume_adj(self):
+        items = [{'date': (date(2025, 1, 1) + timedelta(days=i)).isoformat(), 'open': 1.0,
+                  'high': 1.0, 'low': 1.0, 'close': 1.0, 'volume': 1.0 + i} for i in range(40)]
+        with patch('stocks.market.indices.fetch_index_daily_series',
+                   return_value={'available': True, 'items': items}):
+            ctx, _ = dimensions.build_index_context('sh000001', '上证指数')
+        self.assertEqual(ctx['volume_adj'], ctx['volume'])
+        self.assertEqual(ctx['volume_basis'], 'volume')
 
 
 class ContextLengthTests(TestCase):
