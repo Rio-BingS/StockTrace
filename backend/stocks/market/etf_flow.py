@@ -168,7 +168,7 @@ def get_national_team_flow(period='3m', start=None, end=None, ttl=1800):
     # 探针：整条线路不可达时立即返回，避免 18 连发空耗
     try:
         flow_history(NATIONAL_TEAM_ETFS[0][0])
-    except Exception as e:  # noqa: BLE001
+    except Exception as e:  # noqa: BLE001 上游边界：探针任何失败都视为线路不可达
         logger.warning('国家队资金流探针失败，跳过本轮: %s', e)
         return _unavailable_payload(cache_key, ttl, 'custom' if custom else period, window_start, str(e))
 

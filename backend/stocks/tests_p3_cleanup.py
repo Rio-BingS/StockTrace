@@ -266,3 +266,18 @@ class BackfillInvalidDateTests(TestCase):
         self.assertTrue(MarketDailySnapshot.objects.filter(
             kind=MarketDailySnapshot.KIND_MARKET_FF, trade_date=good).exists())
         self.assertIn('无效/未收盘跳过 2 天', out.getvalue())
+
+
+class RuffConfigTests(SimpleTestCase):
+    def test_logging_rules_enabled_globally(self):
+        import tomllib
+        from pathlib import Path
+
+        cfg = tomllib.loads((Path(__file__).resolve().parent.parent / 'ruff.toml').read_text(encoding='utf-8'))
+        rules = cfg['lint']['select'] + cfg['lint'].get('extend-select', [])
+        for rule in ('G004', 'TRY400', 'BLE001'):
+            self.assertIn(rule, rules)
+        # 生产代码不得整文件豁免这三条，只有测试文件豁免 BLE001
+        for pattern, ignored in cfg['lint'].get('per-file-ignores', {}).items():
+            if {'G004', 'TRY400', 'BLE001'} & set(ignored):
+                self.assertEqual((pattern, ignored), ('stocks/tests*.py', ['BLE001']))
