@@ -184,8 +184,8 @@ class DailyIsFinalTests(_NoSleep, TestCase):
         now = _aware(now_str)
         with patch('stocks.ingest._try_sources',
                    return_value=(services.SinaSource(), self.df)), \
-                patch('stocks.services.timezone.now', return_value=now), \
-                patch('stocks.services.timezone.localdate', return_value=now.date()):
+                patch('stocks.ingest.timezone.now', return_value=now), \
+                patch('stocks.ingest.timezone.localdate', return_value=now.date()):
             services.fetch_daily_data(self.stock, start_date='20260901', end_date='20260902')
 
     def _final(self, d):

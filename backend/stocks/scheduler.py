@@ -170,7 +170,7 @@ def _run_steps(job_name, steps):
 
 
 def _intraday_job():
-    from .services import fetch_intraday_update
+    from .jobs import fetch_intraday_update
     return _run_steps('intraday_fetch', [
         ('盘中行情拉取', fetch_intraday_update),
         ('价格提醒评估', _evaluate_alerts),
@@ -178,7 +178,7 @@ def _intraday_job():
 
 
 def _daily_summary_job():
-    from .services import fetch_daily_summary
+    from .jobs import fetch_daily_summary
     return _run_steps('daily_summary', [
         ('收盘日线汇总', fetch_daily_summary),
         ('价格提醒评估', _evaluate_alerts),
@@ -260,7 +260,7 @@ def _minute_bar_cleanup_job():
 
 def _preopen_incremental_job():
     """开盘前只补日线缺口，压力小。"""
-    from .services import fetch_incremental_daily_all
+    from .jobs import fetch_incremental_daily_all
     from .trading_calendar import is_trading_day
     if not is_trading_day():
         logger.debug("非交易日，跳过开盘前增量日线")

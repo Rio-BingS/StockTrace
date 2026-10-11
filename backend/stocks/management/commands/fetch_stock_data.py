@@ -15,9 +15,9 @@ import time
 
 from django.core.management.base import BaseCommand, CommandError
 from stocks.models import Stock
-from stocks.services import (
-    DATA_SOURCES, fetch_daily_data, fetch_stock_all_data,
-)
+from stocks.datasources import DATA_SOURCES
+from stocks.ingest import fetch_daily_data
+from stocks.jobs import fetch_stock_all_data
 from stocks.task_lock import task_lock
 
 _SOURCE_NAMES = [s.name for s in DATA_SOURCES]

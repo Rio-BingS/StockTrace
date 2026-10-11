@@ -379,7 +379,7 @@ class SchedulerStepIsolationTests(TestCase):
     def test_daily_summary_failure_does_not_skip_later_steps(self):
         from stocks import scheduler
         calls = []
-        with mock.patch('stocks.services.fetch_daily_summary', side_effect=RuntimeError('x')), \
+        with mock.patch('stocks.jobs.fetch_daily_summary', side_effect=RuntimeError('x')), \
                 mock.patch.object(scheduler, '_evaluate_alerts', lambda: calls.append('alerts')), \
                 mock.patch.object(scheduler, '_cleanup_ai_logs', lambda: calls.append('ai')), \
                 mock.patch.object(scheduler, '_cleanup_market_snapshots',
@@ -393,7 +393,7 @@ class SchedulerStepIsolationTests(TestCase):
     def test_intraday_failure_still_evaluates_alerts(self):
         from stocks import scheduler
         calls = []
-        with mock.patch('stocks.services.fetch_intraday_update', side_effect=RuntimeError('x')), \
+        with mock.patch('stocks.jobs.fetch_intraday_update', side_effect=RuntimeError('x')), \
                 mock.patch.object(scheduler, '_evaluate_alerts', lambda: calls.append('alerts')), \
                 self.assertLogs('stocks.scheduler', level='ERROR'):
             scheduler._intraday_job()

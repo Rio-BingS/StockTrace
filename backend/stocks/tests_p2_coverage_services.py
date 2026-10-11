@@ -381,9 +381,9 @@ class FetchOrchestrationTests(TestCase):
 
     def test_all_data_fills_name_and_skips_non_trading_days(self, _sleep):
         today = date(2026, 10, 12)  # 周一；10/10、10/11 为周末
-        with patch('stocks.services.fetch_stock_info', return_value='浦发银行'), \
-                patch('stocks.services.fetch_daily_data', return_value=3) as daily, \
-                patch('stocks.services.fetch_minute_data') as minute, \
+        with patch('stocks.jobs.fetch_stock_info', return_value='浦发银行'), \
+                patch('stocks.jobs.fetch_daily_data', return_value=3) as daily, \
+                patch('stocks.jobs.fetch_minute_data') as minute, \
                 patch('stocks.trading_calendar.is_trading_day', side_effect=lambda d=None: d.weekday() < 5), \
                 patch('django.utils.timezone.localdate', return_value=today):
             n = services.fetch_stock_all_data(self.stock, light=True)
@@ -403,7 +403,7 @@ class FetchOrchestrationTests(TestCase):
                 raise RuntimeError('boom')
             return 7
 
-        with patch('stocks.services.fetch_stock_all_data', side_effect=fake):
+        with patch('stocks.jobs.fetch_stock_all_data', side_effect=fake):
             for fn in (services.fetch_all_active_stocks, services.fetch_keep_fresh):
                 res = {r['code']: r for r in fn()}
                 self.assertEqual(set(res), {'600000', '000001'})
@@ -412,34 +412,34 @@ class FetchOrchestrationTests(TestCase):
 
     def test_incremental_daily_counts_ok_and_fail(self, _sleep):
         Stock.objects.create(code='000001', name='平安银行')
-        with patch('stocks.services.fetch_daily_data', side_effect=[5, RuntimeError('x')]):
+        with patch('stocks.jobs.fetch_daily_data', side_effect=[5, RuntimeError('x')]):
             self.assertEqual(services.fetch_incremental_daily_all(), {'ok': 1, 'fail': 1})
 
     def test_intraday_update_guards(self, _sleep):
-        with patch('stocks.services.is_trading_time', return_value=False), \
-                patch('stocks.services.fetch_minute_data') as minute:
+        with patch('stocks.trading_calendar.is_trading_time', return_value=False), \
+                patch('stocks.jobs.fetch_minute_data') as minute:
             services.fetch_intraday_update()
         minute.assert_not_called()
         # 日历未知（None）时写库任务保守跳过
-        with patch('stocks.services.is_trading_time', return_value=True), \
+        with patch('stocks.trading_calendar.is_trading_time', return_value=True), \
                 patch('stocks.trading_calendar.is_trading_day', return_value=None), \
-                patch('stocks.services.fetch_minute_data') as minute:
+                patch('stocks.jobs.fetch_minute_data') as minute:
             services.fetch_intraday_update()
         minute.assert_not_called()
-        with patch('stocks.services.is_trading_time', return_value=True), \
+        with patch('stocks.trading_calendar.is_trading_time', return_value=True), \
                 patch('stocks.trading_calendar.is_trading_day', return_value=True), \
-                patch('stocks.services.fetch_minute_data', side_effect=RuntimeError('x')) as minute:
+                patch('stocks.jobs.fetch_minute_data', side_effect=RuntimeError('x')) as minute:
             services.fetch_intraday_update()  # 单只失败不抛
         minute.assert_called_once()
 
     def test_daily_summary_guard_and_window(self, _sleep):
         with patch('stocks.trading_calendar.is_trading_day', return_value=False), \
-                patch('stocks.services.fetch_daily_data') as daily:
+                patch('stocks.jobs.fetch_daily_data') as daily:
             services.fetch_daily_summary()
         daily.assert_not_called()
         with patch('stocks.trading_calendar.is_trading_day', return_value=True), \
-                patch('stocks.services.fetch_daily_data') as daily, \
-                patch('stocks.services.fetch_minute_data') as minute:
+                patch('stocks.jobs.fetch_daily_data') as daily, \
+                patch('stocks.jobs.fetch_minute_data') as minute:
             services.fetch_daily_summary()
         start = datetime.strptime(daily.call_args.kwargs['start_date'], '%Y%m%d').date()
         end = datetime.strptime(daily.call_args.kwargs['end_date'], '%Y%m%d').date()
