@@ -22,6 +22,11 @@ export function beijingClock(date = new Date()) {
   }
 }
 
+/** 北京时间的今天，YYYY-MM-DD（供日期输入框 max 使用，与运行环境时区无关） */
+export function beijingToday(date = new Date()) {
+  return new Date(date.getTime() + BEIJING_OFFSET_MIN * 60000).toISOString().slice(0, 10)
+}
+
 /** 是否处于 A 股交易时段（北京时间，与运行环境时区无关） */
 export function isTradingTime(date = new Date()) {
   const { weekday, minutes } = beijingClock(date)
