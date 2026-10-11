@@ -1037,8 +1037,8 @@ class ZtSentimentTests(SimpleTestCase):
 
     def test_metrics_top_and_seal_rate(self):
         with patch('stocks.trading_calendar.is_trading_day', return_value=True), \
-             patch('stocks.market.sentiment._date', _FakeDate), \
-             patch('stocks.trading_calendar._date', _FakeDate), \
+             patch('stocks.market.sentiment.timezone.localdate', _FakeDate.today), \
+             patch('stocks.trading_calendar.timezone.localdate', _FakeDate.today), \
              patch('akshare.stock_zt_pool_em', return_value=self._zt_df()), \
              patch('akshare.stock_zt_pool_dtgc_em', return_value=pd.DataFrame({'x': [1]})), \
              patch('akshare.stock_zt_pool_zbgc_em', return_value=pd.DataFrame({'x': [1, 2, 3]})):
@@ -1058,8 +1058,8 @@ class ZtSentimentTests(SimpleTestCase):
         seq = iter([pd.DataFrame(), self._zt_df()])
 
         with patch('stocks.trading_calendar.is_trading_day', return_value=True), \
-             patch('stocks.market.sentiment._date', _FakeDate), \
-             patch('stocks.trading_calendar._date', _FakeDate), \
+             patch('stocks.market.sentiment.timezone.localdate', _FakeDate.today), \
+             patch('stocks.trading_calendar.timezone.localdate', _FakeDate.today), \
              patch('akshare.stock_zt_pool_em', side_effect=lambda date: next(seq)), \
              patch('akshare.stock_zt_pool_dtgc_em', return_value=pd.DataFrame()), \
              patch('akshare.stock_zt_pool_zbgc_em', return_value=pd.DataFrame()):
@@ -1071,8 +1071,8 @@ class ZtSentimentTests(SimpleTestCase):
 
     def test_all_fail_degrades_honestly(self):
         with patch('stocks.trading_calendar.is_trading_day', return_value=True), \
-             patch('stocks.market.sentiment._date', _FakeDate), \
-             patch('stocks.trading_calendar._date', _FakeDate), \
+             patch('stocks.market.sentiment.timezone.localdate', _FakeDate.today), \
+             patch('stocks.trading_calendar.timezone.localdate', _FakeDate.today), \
              patch('akshare.stock_zt_pool_em', side_effect=RuntimeError('boom')):
             d = market.sentiment.fetch_zt_sentiment(force=True)
         self.assertFalse(d['available'])
@@ -1113,8 +1113,8 @@ class MarginBalanceTests(SimpleTestCase):
             raise ValueError('该日未披露')  # 深交所对未披露日期直接抛错
 
         with patch('stocks.trading_calendar.is_trading_day', return_value=True), \
-             patch('stocks.market.sentiment._date', _FakeDate), \
-             patch('stocks.trading_calendar._date', _FakeDate), \
+             patch('stocks.market.sentiment.timezone.localdate', _FakeDate.today), \
+             patch('stocks.trading_calendar.timezone.localdate', _FakeDate.today), \
              patch('akshare.stock_margin_sse', return_value=self._sse_df()), \
              patch('akshare.stock_margin_szse', side_effect=fake_sz):
             d = market.sentiment.fetch_margin_balance(force=True)
@@ -1129,8 +1129,8 @@ class MarginBalanceTests(SimpleTestCase):
 
     def test_sz_unpublished_degrades_to_sh_only(self):
         with patch('stocks.trading_calendar.is_trading_day', return_value=True), \
-             patch('stocks.market.sentiment._date', _FakeDate), \
-             patch('stocks.trading_calendar._date', _FakeDate), \
+             patch('stocks.market.sentiment.timezone.localdate', _FakeDate.today), \
+             patch('stocks.trading_calendar.timezone.localdate', _FakeDate.today), \
              patch('akshare.stock_margin_sse', return_value=self._sse_df()), \
              patch('akshare.stock_margin_szse', side_effect=ValueError('未披露')):
             d = market.sentiment.fetch_margin_balance(force=True)
@@ -1143,8 +1143,8 @@ class MarginBalanceTests(SimpleTestCase):
 
     def test_all_fail_degrades_honestly(self):
         with patch('stocks.trading_calendar.is_trading_day', return_value=True), \
-             patch('stocks.market.sentiment._date', _FakeDate), \
-             patch('stocks.trading_calendar._date', _FakeDate), \
+             patch('stocks.market.sentiment.timezone.localdate', _FakeDate.today), \
+             patch('stocks.trading_calendar.timezone.localdate', _FakeDate.today), \
              patch('akshare.stock_margin_sse', side_effect=RuntimeError('boom')), \
              patch('akshare.stock_margin_szse', side_effect=RuntimeError('boom')):
             d = market.sentiment.fetch_margin_balance(force=True)

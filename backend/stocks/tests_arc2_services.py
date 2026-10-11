@@ -1,8 +1,11 @@
 """ARC 第二轮 services 方向：公开 API、依赖方向与顺带修复的回归测试。"""
 
 import ast
+from datetime import date, datetime, timezone as dt_timezone
 from pathlib import Path
+from unittest.mock import patch
 
+import pandas as pd
 from django.test import SimpleTestCase
 
 STOCKS_DIR = Path(__file__).resolve().parent
@@ -105,3 +108,41 @@ class DependencyDirectionTests(SimpleTestCase):
                 self.assertFalse(
                     module.lstrip('.').split('.')[0] in ('services', 'market', 'detector', 'views'),
                     f'{path.name}: {module}')
+
+
+class LocalDateTodayTests(SimpleTestCase):
+    """候选日与两融区间按项目时区取「今天」，不受进程系统时区影响（VPS 为 UTC 时）"""
+
+    # 北京时间 2026-09-08（周二）01:00 = UTC 2026-09-07 17:00
+    _NOW = datetime(2026, 9, 7, 17, 0, tzinfo=dt_timezone.utc)
+
+    def test_recent_day_candidates_uses_local_date(self):
+        from stocks import trading_calendar as cal
+
+        with patch('django.utils.timezone.now', return_value=self._NOW), \
+                patch('stocks.trading_calendar.is_trading_day', return_value=True):
+            self.assertEqual(cal.recent_day_candidates(1), [date(2026, 9, 8)])
+
+    def test_zt_sentiment_first_candidate_is_local_today(self):
+        from stocks.market import sentiment
+
+        seen = []
+
+        def fake_pool(date):
+            seen.append(date)
+            raise RuntimeError('down')
+
+        with patch('django.utils.timezone.now', return_value=self._NOW), \
+                patch('stocks.trading_calendar.is_trading_day', return_value=True), \
+                patch('akshare.stock_zt_pool_em', side_effect=fake_pool):
+            sentiment.fetch_zt_sentiment(force=True)
+        self.assertEqual(seen[0], '20260908')
+
+    def test_margin_range_ends_on_local_today(self):
+        from stocks.market import sentiment
+
+        with patch('django.utils.timezone.now', return_value=self._NOW), \
+                patch('akshare.stock_margin_sse', return_value=pd.DataFrame()) as sse:
+            sentiment._sh_margin_rows()
+        self.assertEqual(sse.call_args.kwargs['end_date'], '20260908')
+        self.assertEqual(sse.call_args.kwargs['start_date'], '20260818')

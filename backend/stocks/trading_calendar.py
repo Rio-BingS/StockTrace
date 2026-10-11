@@ -19,7 +19,7 @@ market/_cache（最近收盘时刻）四处，market 包还要反向 import serv
 
 import logging
 import time
-from datetime import date as _date, datetime, time as dt_time, timedelta
+from datetime import datetime, time as dt_time, timedelta
 
 import akshare as ak
 import pandas as pd
@@ -204,8 +204,9 @@ def recent_day_candidates(n=4, today=None):
     is_trading_day 仅在明确 False（周末/节假日）时跳过；日历不可用时的
     节假日候选会多探测一次空结果，属可接受代价。
     """
-    # 沿用原 sentiment 实现的 date.today()（进程本地时区），行为不变
-    d = today or _date.today()
+    # 按项目时区（Asia/Shanghai）取今天：date.today() 跟随进程系统时区，VPS 为
+    # UTC 时北京时间 0–8 点会把「今天」算成前一天
+    d = today or timezone.localdate()
     if is_trading_day(d) is False:
         d -= timedelta(days=1)
     out = []
