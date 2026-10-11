@@ -37,7 +37,9 @@ class DetectorConstantsTests(SimpleTestCase):
              constants.SECTOR_LOOKBACK_DAYS),
             (30, 12, ('sh000300',), 45),
         )
-        self.assertEqual(constants.NOISE_DEFAULTS, {'noise_pct': 0.8, 'noise_window': 60, 'noise_min': 15})
+        # #10/#1：噪声窗口取满 120（约 250 根上下文时），上限 noise_hi 倍自身噪声带
+        self.assertEqual(constants.NOISE_DEFAULTS,
+                         {'noise_pct': 0.8, 'noise_window': 120, 'noise_min': 15, 'noise_hi': 2.5})
         self.assertEqual((constants.COMPRESS_PCT_DEFAULT, constants.SPLIT_RATIO_DEFAULT), (0.25, 1.2))
 
     def test_old_module_names_point_to_constants(self) -> None:
@@ -58,7 +60,7 @@ class DetectorConstantsTests(SimpleTestCase):
         for key in ('big_order_net', 'vol_ratio_slope', 'turnover_pct', 'margin_north', 'ma_relation'):
             for k, v in constants.NOISE_DEFAULTS.items():
                 self.assertEqual(spec[key]['defaults'][k], v, (key, k))
-        self.assertEqual(spec['vol_compress']['defaults']['noise_window'], 60)
+        self.assertEqual(spec['vol_compress']['defaults']['noise_window'], 120)
         self.assertEqual(spec['vol_compress']['defaults']['noise_min'], 15)
         self.assertNotIn('noise_pct', spec['vol_compress']['defaults'])
 

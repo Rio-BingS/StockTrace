@@ -14,6 +14,7 @@
 
 from __future__ import annotations
 
+import math
 from datetime import date as _date, timedelta
 
 from ..models import DailyQuote, MarketDailySnapshot
@@ -70,6 +71,70 @@ def _percentile(vals, q):
     return vals[lo] * (1 - frac) + vals[hi] * frac
 
 
+def _betacf(a, b, x):
+    """不完全 Beta 函数的连分式（Lentz 法），供 _betainc 使用。"""
+    tiny, eps = 1e-300, 3e-14
+    qab, qap, qam = a + b, a + 1.0, a - 1.0
+    c, d = 1.0, 1.0 - qab * x / qap
+    d = 1.0 / (d if abs(d) > tiny else tiny)
+    h = d
+    for m in range(1, 301):
+        m2 = 2 * m
+        aa = m * (b - m) * x / ((qam + m2) * (a + m2))
+        d = 1.0 + aa * d
+        d = 1.0 / (d if abs(d) > tiny else tiny)
+        c = 1.0 + aa / c
+        c = c if abs(c) > tiny else tiny
+        h *= d * c
+        aa = -(a + m) * (qab + m) * x / ((a + m2) * (qap + m2))
+        d = 1.0 + aa * d
+        d = 1.0 / (d if abs(d) > tiny else tiny)
+        c = 1.0 + aa / c
+        c = c if abs(c) > tiny else tiny
+        delta = d * c
+        h *= delta
+        if abs(delta - 1.0) < eps:
+            break
+    return h
+
+
+def _betainc(a, b, x):
+    """正则化不完全 Beta 函数 I_x(a, b)（纯 Python，不引入 scipy）。"""
+    if x <= 0:
+        return 0.0
+    if x >= 1:
+        return 1.0
+    log_bt = (math.lgamma(a + b) - math.lgamma(a) - math.lgamma(b)
+              + a * math.log(x) + b * math.log(1.0 - x))
+    bt = math.exp(log_bt)
+    if x < (a + 1.0) / (a + b + 2.0):
+        return bt * _betacf(a, b, x) / a
+    return 1.0 - bt * _betacf(b, a, 1.0 - x) / b
+
+
+def _hd_quantile(vals, q):
+    """Harrell-Davis 分位估计（#10）：全部次序统计量按 Beta 权重加权平均。
+
+    为什么不用线性插值分位：噪声闸门的 80 分位只靠几十个重叠样本估计，
+    线性插值只用相邻两个次序统计量，阈值随窗口滑动大幅抖动；HD 估计对
+    所有样本平滑加权，小样本下方差明显更小，且不对分布形状做假设
+    （量比斜率、分位差这些 raw 并不服从正态）。空序列返回 None。
+    """
+    vals = sorted(v for v in vals if v is not None)
+    n = len(vals)
+    if not n:
+        return None
+    if n == 1:
+        return vals[0]
+    a, b = q * (n + 1), (1 - q) * (n + 1)
+    total, prev = 0.0, 0.0
+    for i, v in enumerate(vals, start=1):
+        cur = _betainc(a, b, i / n)
+        total += (cur - prev) * v
+        prev = cur
+    return total
+
+
 def _clamp(v, lo, hi):
     return max(lo, min(hi, v))
 
@@ -115,6 +180,21 @@ def _params_valid(mild, lo, hi):
         return False
 
 
+def _noise_threshold(history, params):
+    """噪声带阈值：自身历史 |raw| 的 noise_pct 分位（Harrell-Davis 估计）。
+
+    返回 (阈值, 不可用原因)；样本不足 noise_min 时阈值为 None。取最近
+    noise_window 个历史值——上下文拉长（约 250 根）后窗口能真正取满，
+    70 根时有多少用多少（#10）。
+    """
+    window = int(params.get('noise_window', NOISE_DEFAULTS['noise_window']))
+    need = int(params.get('noise_min', NOISE_DEFAULTS['noise_min']))
+    sample = [abs(v) for v in history if v is not None][-window:]
+    if len(sample) < need:
+        return None, f'噪声基线样本不足（{len(sample)}/{need}），不投票'
+    return _hd_quantile(sample, params['noise_pct']), ''
+
+
 def _noise_gate(raw, history, params):
     """噪声闸门（ALG-04）：|raw| 必须超过自身历史 |raw| 分布的 noise_pct 分位才投票。
 
@@ -123,23 +203,33 @@ def _noise_gate(raw, history, params):
     换成「相对自己的历史是否异常」，阈值随品种自身噪声缩放。
     history 是当前点之前的 raw 序列（不含当前点，含 None 时跳过）；
     noise_pct 为 0/缺省时关闭闸门（向前兼容）。返回不投票原因，通过返回 ''。
+
+    上限也用自身单位（#1）：noise_hi 为正时，|raw| 超过 noise_hi × 噪声带
+    视为突变不投票，取代跨品种的绝对 max——绝对 max 与随波动率增长的噪声带
+    相撞时，高波动标的的可投票区间会变成空集。
     """
     q = params.get('noise_pct')
     if not q:
         return ''
-    window = int(params.get('noise_window', NOISE_DEFAULTS['noise_window']))
-    need = int(params.get('noise_min', NOISE_DEFAULTS['noise_min']))
-    sample = [abs(v) for v in history if v is not None][-window:]
-    if len(sample) < need:
-        return f'噪声基线样本不足（{len(sample)}/{need}），不投票'
-    thr = _percentile(sample, q)
+    thr, note = _noise_threshold(history, params)
+    if thr is None:
+        return note
     if abs(raw) <= thr:
         return f'漂移未超出自身历史 {q:.0%} 分位（噪声带 ±{thr:.3g}），不投票'
+    hi = params.get('noise_hi')
+    if hi and abs(raw) > hi * thr:
+        return f'幅度超出自身噪声带 {hi:g} 倍（±{hi * thr:.3g}），疑似突变而非早期迹象'
     return ''
 
 
 def _gated(raw, history, params):
-    """_sign_value + 噪声闸门：温和带内且超出自身噪声带才投票。"""
+    """_sign_value + 噪声闸门：温和带内且超出自身噪声带才投票。
+
+    噪声闸门开启且配置了 noise_hi 时，上限改由闸门按自身噪声带给出，
+    绝对 max 不再参与（#1）；库里旧配置行残留的 max 因此自然失效。
+    """
+    if params.get('noise_pct') and params.get('noise_hi'):
+        params = {**params, 'max': math.inf}
     value, direction, note = _sign_value(raw, params)
     if direction is not None:
         gate = _noise_gate(raw, history, params)

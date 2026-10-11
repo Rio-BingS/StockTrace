@@ -297,7 +297,7 @@ class IndexDimensionCoverageTests(TestCase):
 
     def _margin_ctx(self, code):
         totals = [1.0e12 * (1 + 0.0005 * i) for i in range(30)]
-        totals[-1] *= 1.01  # 末端明显抬升
+        totals[-1] *= 1.003  # 末端抬升（仍在自身噪声带 noise_hi 倍以内，#1）
         # #9：维度读融资余额 rz（不是融资融券余额 total）
         return {'kind': 'index', 'code': code, 'margin': [
             {'date': d, 'rz': t, 'total': t * 1.01} for d, t in zip(_dates(30), totals)]}
