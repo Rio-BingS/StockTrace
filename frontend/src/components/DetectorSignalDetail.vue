@@ -12,6 +12,7 @@ import { errorMessage } from '../utils/errorMessage.js'
 import { SEVERITY_LABEL, STATUS_LABEL, dirText } from '../constants/labels.js'
 import { axisLabel, tooltip } from '../charts/theme.js'
 import { fmtFixed } from '../utils/number.js'
+import { directionalExcess, fmtRate, fmtReturn, signClass } from '../utils/detectorReview.js'
 
 use([LineChart, GridComponent, TooltipComponent, MarkLineComponent, CanvasRenderer])
 
@@ -141,7 +142,7 @@ onMounted(load)
           class="dim-chip disabled"
         >
           <b>{{ dim.name }}</b>
-          <span>未启用</span>
+          <span>{{ dim.disabled_kind === 'candidate' ? '候选维度' : '未启用' }}</span>
           <small>{{ dim.disabled_reason }}</small>
         </div>
       </div>
@@ -149,6 +150,17 @@ onMounted(load)
       <div v-if="signal.review_hit != null" class="review-line">
         回看结果：{{ signal.review_hit ? '已兑现' : '未兑现' }}
         <template v-if="signal.hit_date">（{{ signal.hit_date }} 达成）</template>
+        <!-- v2 口径的明细（#12）；旧口径信号没有这些字段，整段不显示 -->
+        <template v-if="signal.review_version">
+          · 阈值 {{ fmtFixed(signal.review_threshold, 2) }}% · 同标的基线
+          {{ fmtRate(signal.review_baseline) }} · 5 日收益 {{ fmtReturn(signal.fwd_return) }}
+          <template v-if="signal.excess_return != null">
+            · 相对沪深300（按方向）
+            <b :class="signClass(directionalExcess(signal))">{{
+              fmtReturn(directionalExcess(signal))
+            }}</b>
+          </template>
+        </template>
       </div>
 
       <div class="charts">
@@ -291,6 +303,12 @@ onMounted(load)
   padding: 8px 10px;
   margin-bottom: 10px;
   font-size: 12px;
+}
+.review-line b.up {
+  color: var(--up);
+}
+.review-line b.down {
+  color: var(--down);
 }
 
 .charts {

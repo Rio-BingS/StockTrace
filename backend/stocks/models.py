@@ -422,7 +422,7 @@ class DetectorDimConfig(models.Model):
 
     为什么独立成表：探测器的迭代优化要按回看命中率微调各维度的权重与
     灵敏度阈值，调整结果必须跨重启持久化且可审计（调整流水在
-    DetectorRun.adjustments，本表 updated_at 记录最后生效时间）。
+    DetectorTuneLog，本表 updated_at 记录最后生效时间）。
     detector/registry.py 提供维度定义、默认参数与计算实现；本表只存
     「当前生效值」，首次扫描时按注册表种子化。
     """
@@ -504,6 +504,19 @@ class DetectorSignal(models.Model):
     review_hit = models.BooleanField('回看是否兑现', null=True, blank=True)
     hit_date = models.DateField('兑现日期', null=True, blank=True)
     reviewed_at = models.DateTimeField('回看时间', null=True, blank=True)
+    # 回看明细（#7/#12）：全部可空——v1 口径（1×σ20、板块 T 收盘基期）判定的
+    # 旧行没有这些值，统计与展示按「缺失」处理，不与新口径混算。
+    # review_date 是做出判定的扫描日，DetectorRun 的基线/超额/独立样本数按它
+    # 从库里重算，同日重跑幂等。
+    review_date = models.DateField('回看判定日', null=True, blank=True, db_index=True)
+    review_version = models.PositiveSmallIntegerField('回看口径版本', null=True, blank=True)
+    review_threshold = models.FloatField('兑现阈值(%)', null=True, blank=True)
+    review_baseline = models.FloatField('同标的基线命中率', null=True, blank=True)
+    fwd_return = models.FloatField('h日收益(%)', null=True, blank=True)
+    bench_return = models.FloatField('基准h日收益(%)', null=True, blank=True)
+    # 原始差值（标的 − 基准），不乘方向；方向调整在统计时做
+    excess_return = models.FloatField('相对基准超额(%)', null=True, blank=True)
+    benchmark_code = models.CharField('基准代码', max_length=20, blank=True, default='')
     created_at = models.DateTimeField('创建时间', auto_now_add=True)
     updated_at = models.DateTimeField('更新时间', auto_now=True)
 
@@ -580,7 +593,15 @@ class DetectorRun(models.Model):
     reviewed_count = models.IntegerField('回看信号数', default=0)
     hit_count = models.IntegerField('回看命中数', default=0)
     hit_rate = models.FloatField('回看命中率', null=True, blank=True)
+    # 命中率要和基线比才有意义（#7）：零假设下绝对命中率本身不是有效性指标。
+    # 只统计新口径（review_version≥2）的回看；旧 run 行这些字段为空。
+    baseline_rate = models.FloatField('同标的基线命中率', null=True, blank=True)
+    excess_rate = models.FloatField('超额命中率', null=True, blank=True)
+    independent_samples = models.IntegerField('独立样本数(按日聚类)', null=True, blank=True)
+    avg_excess_return = models.FloatField('平均相对基准超额(%)', null=True, blank=True)
     degraded = models.JSONField('降级记录', default=list, blank=True)
+    # 当日调参流水的副本（兼容旧读法）；长期审计以 DetectorTuneLog 为准，
+    # 本表按 DETECTOR_RUN_RETENTION_DAYS 清理
     adjustments = models.JSONField('权重/阈值调整流水', default=list, blank=True)
     matrix = models.JSONField('板块微变矩阵', default=dict, blank=True)
     message = models.CharField('备注', max_length=300, blank=True, default='')
@@ -594,3 +615,42 @@ class DetectorRun(models.Model):
 
     def __str__(self):
         return f"{self.trade_date} {self.status}"
+
+
+class DetectorTuneLog(models.Model):
+    """探测器调参流水（#16）：每次自动调参（或关闭时的演练结论）一行，永久保留。
+
+    为什么单独建表：旧流水写在 DetectorRun.adjustments，run 只保留 120 天，
+    而 DetectorDimConfig 的改动永久生效——四个月后就无法回答「这个权重是
+    哪天、凭什么样本改成这样的」。本表行很小，不参与任何保留期清理。
+    - source：auto=自动调参已生效；dry_run=自动调参关闭（默认），只记录
+      「若开启会怎么调」；legacy=迁移时从旧 DetectorRun.adjustments 搬来的记录；
+    - changes：{参数名: [旧值, 新值]}，权重记为 weight；
+    - stats：判定所用的统计量（独立样本数、命中率、基线、后验概率等）。
+    """
+    SOURCE_AUTO = 'auto'
+    SOURCE_DRY_RUN = 'dry_run'
+    SOURCE_LEGACY = 'legacy'
+    SOURCE_CHOICES = [
+        (SOURCE_AUTO, '自动调参'),
+        (SOURCE_DRY_RUN, '演练（未生效）'),
+        (SOURCE_LEGACY, '旧流水迁移'),
+    ]
+
+    trade_date = models.DateField('扫描交易日')
+    dim_key = models.CharField('维度标识', max_length=40)
+    source = models.CharField('来源', max_length=20, choices=SOURCE_CHOICES, default=SOURCE_AUTO)
+    applied = models.BooleanField('是否已生效', default=False)
+    changes = models.JSONField('参数变更', default=dict, blank=True)
+    stats = models.JSONField('统计依据', default=dict, blank=True)
+    reason = models.CharField('原因', max_length=300, blank=True, default='')
+    created_at = models.DateTimeField('创建时间', auto_now_add=True)
+
+    class Meta:
+        verbose_name = '探测器调参流水'
+        verbose_name_plural = '探测器调参流水'
+        ordering = ['-trade_date', 'dim_key']
+        indexes = [models.Index(fields=['dim_key', 'trade_date'])]
+
+    def __str__(self):
+        return f"{self.trade_date} {self.dim_key} {self.source}"

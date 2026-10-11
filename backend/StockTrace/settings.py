@@ -105,6 +105,15 @@ AI_CALL_LOG_RETENTION_DAYS = int(os.environ.get('AI_CALL_LOG_RETENTION_DAYS', '9
 # 探测器保留策略：信号行小（600 天对齐市场快照）；run 含热力图矩阵较大，保留更短
 DETECTOR_SIGNAL_RETENTION_DAYS = int(os.environ.get('DETECTOR_SIGNAL_RETENTION_DAYS', '600'))
 DETECTOR_RUN_RETENTION_DAYS = int(os.environ.get('DETECTOR_RUN_RETENTION_DAYS', '120'))
+# 探测器在线自动调参（#5）：默认关闭——复盘照常统计并写演练流水，但不改维度配置。
+# 开启后按跨日累计窗口（自然日）+ 按日聚类 + Beta 后验显著性才调整，见 detector/review.py
+DETECTOR_AUTO_TUNE = os.environ.get('DETECTOR_AUTO_TUNE', '0').strip().lower() in ('1', 'true', 'yes', 'on')
+DETECTOR_TUNE_WINDOW_DAYS = int(os.environ.get('DETECTOR_TUNE_WINDOW_DAYS', '180'))
+# 复盘兑现阈值 = k × σ20 × √5（#12），k 默认 1.0
+DETECTOR_REVIEW_SIGMA_K = float(os.environ.get('DETECTOR_REVIEW_SIGMA_K', '1.0'))
+# 每日板块信号按强度截断的上限（#11 多重检验）：约 500 个板块同日检验、彼此相关，
+# 只保留最强的前 N 个；0 = 不截断。指数与自选股不截
+DETECTOR_SECTOR_SIGNAL_CAP = int(os.environ.get('DETECTOR_SECTOR_SIGNAL_CAP', '10'))
 # 分钟 K 线保留天数（PERF-02）：每日 02:30 分批清理更早的 MinuteBar
 MINUTE_BAR_RETENTION_DAYS = int(os.environ.get('MINUTE_BAR_RETENTION_DAYS', '120'))
 # 市场日度快照保留天数（OPS-06）：之前文档写了该变量但 settings 未接线，环境变量从不生效。

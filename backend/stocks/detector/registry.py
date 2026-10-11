@@ -8,51 +8,71 @@
 3. 新增维度 = 注册表加一个条目 + dimensions.py 加一个评估函数，扫描、
    热力图、配置页自动跟上。
 
-params 约定：
+params 约定（阈值一律用「自身分布单位」表达，#1）：
 - min   投票下限：|原始漂移| 低于它视为「没有微变」；
-- mild  温和带上限的归一化基准（value = raw/mild×50）；
-- max   突变上限：超过它说明已不是「早期迹象」，如实不投票；
-- 迭代优化（review.py）只微调 min（灵敏度）与权重，min 的调整边界是
-  [0.5×, 2×] 默认值，权重边界 [0.5, 2.0]，防止自动调参失控；
-- noise_pct / noise_window / noise_min  噪声闸门（ALG-04）：|原始漂移| 还须
-  超过自身近 noise_window 个历史漂移绝对值的 noise_pct 分位才投票，历史不足
-  noise_min 个不投票。min 是跨品种绝对常数，单靠它在随机游走上也会大量出
-  信号；噪声闸门不参与自动调参，noise_pct 置 0 即关闭；
-- compress_pct / drift_z  波动率压缩专用：当前宽度 ≤ 自身历史 compress_pct
-  分位才算压缩，压缩期漂移的 t 值 ≥ drift_z 才投票（2.13≈自由度 4 的双侧 10%）。
+- mild  温和带的归一化基准（value = raw/mild×50）；
+- max   旧的跨品种绝对突变上限。噪声闸门开启且配置了 noise_hi 时不再参与
+  （上限改为 noise_hi × 自身噪声带）；库里旧配置行残留的 max 因此失效；
+- 迭代优化（review.py，DETECTOR_AUTO_TUNE 默认关闭）只调权重（边界 [0.5, 2.0]）
+  与噪声闸门的 noise_pct（constants.TUNE_PARAMS，边界 [0.6, 0.95]）；min 被噪声
+  闸门覆盖、调它是空操作，不再调（#5）；
+- noise_pct / noise_window / noise_min / noise_hi  噪声闸门（ALG-04/#10）：
+  |原始漂移| 须超过自身近 noise_window 个历史漂移绝对值的 noise_pct 分位
+  （Harrell-Davis 估计）才投票，且不超过 noise_hi 倍该分位；历史不足 noise_min
+  个不投票。noise_pct 置 0 即关闭（自动调参不会重新打开）；
+- z_lo / z_hi / z_mild / sigma_window / sigma_min  价格类维度（vol_compress、
+  ma_relation）：raw 先除以由近 sigma_window 个日收益 σ 解析推导的噪声尺度
+  得到 z，z_lo < |z| ≤ z_hi 才投票，value = z/z_mild×50。随机游走下 |z| 近似
+  标准正态，单维度名义投票率 2·(Φ(−z_lo) − Φ(−z_hi))，与标的波动率无关；
+  z_lo=0 即关闭下限闸门；
+- （条目级字段，不在 params 里）group / role：投票信息组与角色（#4）。方向组
+  （price/funds/leverage）决定 up/down，量能强度组（volume）只在活跃度抬升时
+  确认、不定方向不否决；未声明的维度自成方向组（signals.dim_group）；
+- compress_pct  波动率压缩专用：当前宽度 ≤ 自身历史 compress_pct 分位才算压缩。
+  （旧参数 drift_z=2.13 的注释称「≈自由度 4 的双侧 10%」，但 t 的分母取自按
+  「标准差小」筛出的同一窗口，压缩条件下实际假阳约 28%，已改为 σ60 的 z，#3/#17。）
 
 校准依据：backend/stocks/tests_p2_detector.py 的随机游走回归测试——默认参数
-下平静对象的噪声信号率须 < 5%（修复前约 31%）。
+下平静对象的噪声信号率须 < 5%（修复前约 31%）；以及 detector-research 回测原型
+的合成数据（纯噪声假阳率、植入形态检测力）与真实缓存数据对比。
 """
 
 from __future__ import annotations
 
 from . import dimensions as _dims
+from . import dimensions_extra as _dims_extra
 # 噪声闸门默认值（各价量维度共用，见模块 docstring），数值在 constants.py
 from .constants import (
     COMPRESS_PCT_DEFAULT,
     NOISE_DEFAULTS as _NOISE,
+    SIGMA_DEFAULTS as _SIGMA,
     SPLIT_RATIO_DEFAULT,
 )
 
 DIMENSIONS = [
     {
         'key': 'big_order_net',
-        'name': '大单净流入',
+        'group': 'funds',  # 投票信息组（#4，见 signals 模块 docstring）
+        'role': 'direction',
+        'name': '板块资金净额',
         # 指数不在 targets（ALG-09）：build_index_context 从未提供净额序列，指数上
         # 该维度恒为「不可用」；大盘资金快照是全市场口径，即便接入也会给 5 个
         # 指数投完全相同的一票（与融资余额同样的相关性放大问题）
         'targets': ('industry', 'concept'),
         'enabled': True,
         'note': (
-            '板块主力净额，来自收盘后日度快照积累。指数暂不参与：大盘资金快照是'
-            '全市场口径，对各指数是同一条序列，接入只会重复计票。'
+            '同花顺板块资金净额（全单主动买卖口径，按板块指数涨跌划分流入/流出，非大单/主力），'
+            '来自收盘后日度快照积累；先对当日涨跌幅做滚动回归、取残差再看 6 日均值漂移，'
+            '剔除与涨跌机械同向的部分。指数暂不参与：大盘资金快照是全市场口径，'
+            '对各指数是同一条序列，接入只会重复计票。'
         ),
         'defaults': {'window': 15, 'mean_days': 6, 'mild': 0.5, 'min': 0.08, 'max': 2.0, **_NOISE},
         'evaluate': _dims.eval_big_order_net,
     },
     {
         'key': 'vol_ratio_slope',
+        'group': 'volume',  # 投票信息组（#4，见 signals 模块 docstring）
+        'role': 'strength',
         'name': '量比斜率',
         'targets': ('index', 'stock'),
         'enabled': True,
@@ -62,20 +82,24 @@ DIMENSIONS = [
     },
     {
         'key': 'vol_compress',
+        'group': 'price',  # 投票信息组（#4，见 signals 模块 docstring）
+        'role': 'direction',
         'name': '波动率压缩',
         'targets': ('index', 'stock', 'industry', 'concept'),
         'enabled': True,
         'note': (
             '近5日涨跌幅标准差 ≤ 自身历史 25 分位才算压缩，方向取压缩期内价格漂移且须'
-            '相对窗口波动显著（t≥2.13）；未压缩不投票。'
+            '相对压缩前60日波动显著（z=Σr/(σ60·√5) 超过 1.645、不超过 3）；未压缩不投票。'
         ),
-        'defaults': {'window': 5, 'mild': 2.0, 'min': 0.2, 'max': 6.0,
-                     'compress_pct': COMPRESS_PCT_DEFAULT, 'drift_z': 2.13,
+        'defaults': {'window': 5, 'compress_pct': COMPRESS_PCT_DEFAULT,
+                     'z_lo': 1.645, 'z_hi': 3.0, 'z_mild': 2.0, **_SIGMA,
                      'noise_window': _NOISE['noise_window'], 'noise_min': _NOISE['noise_min']},
         'evaluate': _dims.eval_vol_compress,
     },
     {
         'key': 'turnover_pct',
+        'group': 'volume',  # 投票信息组（#4，见 signals 模块 docstring）
+        'role': 'strength',
         'name': '换手率分位',
         'targets': ('index', 'stock'),
         'enabled': True,
@@ -90,28 +114,32 @@ DIMENSIONS = [
     },
     {
         'key': 'margin_north',
-        'name': '融资余额/北向',
+        'group': 'leverage',  # 投票信息组（#4，见 signals 模块 docstring）
+        'role': 'direction',
+        'name': '融资余额',
         'targets': ('index',),
         'enabled': True,
         'note': (
-            '仅融资余额口径（北向自 2024-08 停止逐日披露，如实缺席）；融资余额为沪深'
-            '合计，只在沪深300上投票，其余指数不重复计票；'
-            '数据为交易所官方 T+1 披露、经本站日度快照积累；噪声闸门需约 21 个交易日的积累才投票。'
+            '融资余额（沪深合计，不含融券），只在沪深300上投票，其余指数不重复计票；'
+            '数据为交易所官方 T+1 披露、经本站日度快照积累（可回补），按交易日对齐，'
+            '末点为指数数据日的前一交易日；噪声闸门需约 21 个交易日的连续数据才投票。'
         ),
         'defaults': {'mild': 0.5, 'min': 0.06, 'max': 2.0, **_NOISE},
         'evaluate': _dims.eval_margin_north,
     },
     {
         'key': 'ma_relation',
+        'group': 'price',  # 投票信息组（#4，见 signals 模块 docstring）
+        'role': 'direction',
         'name': '价格与均线关系',
         'targets': ('index', 'stock', 'industry', 'concept'),
         'enabled': True,
         'note': (
-            '20日均线距离的3日漂移；板块价格由真实日涨跌幅链式合成（基期100）。'
-            '距均线过远（趋势已展开）如实不投票。'
+            '收盘相对20日均线的距离，按近60日波动换算成 z 值（随机游走下近似标准正态），'
+            '|z| 超过 1.28 才投票；板块价格由真实日涨跌幅链式合成（基期100）。'
+            '|z| 超过 2（趋势已展开）如实不投票。'
         ),
-        'defaults': {'ma': 20, 'slope_days': 3, 'mild': 0.6, 'min': 0.08, 'max': 3.0,
-                     'max_dist': 4.0, **_NOISE},
+        'defaults': {'ma': 20, 'z_lo': 1.282, 'z_hi': 2.0, 'z_mild': 2.0, **_SIGMA},
         'evaluate': _dims.eval_ma_relation,
     },
     {
@@ -139,6 +167,27 @@ DIMENSIONS = [
         ),
         'defaults': {},
         'evaluate': None,
+    },
+    {
+        # 候选维度（00_plan 阶段 4）：回测证明相对随机基线有超额前不启用。
+        'key': 'vp_corr',
+        # 投票分组（#4）：判 up/down 依据的是「放量领先涨跌」，方向信息其实来自价格，
+        # 量能本身不定方向；按量能强度组处理更保守（只在 up=领先放量时确认，不定
+        # 方向、不否决）。默认停用，启用前须先用回测确认
+        'group': 'volume',
+        'role': 'strength',
+        'name': '量价相关性（量能领先）',
+        'targets': ('index', 'stock'),
+        'enabled': False,
+        'disabled_reason': '候选维度：离线回测未证明相对随机基线有稳定超额，默认停用（见 DET_NOTES_new-dims）',
+        'note': (
+            '昨日异常量能与今日涨跌幅的20日秩相关（z 值）：放量后次日倾向上涨=量先于价。'
+            '量价同步不弱于领先、或近10日价格已走出 1.5σ 时不投票。'
+        ),
+        'defaults': {'window': 20, 'vol_base': 10, 'price_days': 10, 'price_z_max': 1.5,
+                     'sigma_window': 40, 'sync_margin': 0.0,
+                     'mild': 2.0, 'min': 1.64, 'max': 6.0, **_NOISE},
+        'evaluate': _dims_extra.eval_vp_corr,
     },
 ]
 

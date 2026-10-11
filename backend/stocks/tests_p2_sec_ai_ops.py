@@ -417,7 +417,7 @@ class SchedulerStepIsolationTests(TestCase):
         from stocks.models import DetectorRun, MarketDailySnapshot
         with self.assertLogs('stocks.scheduler', level='WARNING'):
             self.assertFalse(self._run_detector(17, 15).called)
-        for kind in ('industry_ff', 'market_ff'):
+        for kind in ('industry_ff', 'concept_ff'):  # #14：不再等 market_ff
             MarketDailySnapshot.objects.create(kind=kind, trade_date=date(2026, 9, 7), payload={})
         self.assertTrue(self._run_detector(17, 45).called)
         # 当日已扫过：后续重试点直接跳过

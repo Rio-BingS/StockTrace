@@ -12,6 +12,7 @@ from __future__ import annotations
 import logging
 from datetime import timedelta
 
+from django.conf import settings
 from django.utils import timezone
 from rest_framework import status
 from rest_framework.decorators import api_view
@@ -21,21 +22,29 @@ from ..common.envelope import envelope
 from ..common.pagination import paginate
 from ..common.params import parse_bool, parse_date, positive_int
 from ..trading_calendar import expected_latest_date
-from ..models import DetectorDimConfig, DetectorRun, DetectorSignal
+from ..models import DetectorDimConfig, DetectorRun, DetectorSignal, DetectorTuneLog
 from . import constants, registry
 from .dimensions import (
     build_index_context,
     build_sector_context,
     build_stock_context,
 )
+from .scan import _sector_signal_cap
+from .signals import dim_group
 
 logger = logging.getLogger(__name__)
 
 _META_SOURCE = '本站探测器日度扫描（上游：东财/同花顺/新浪/沪深交易所公开数据，经日度快照积累）'
-_META_DISCLAIMER = (
-    '信号为盘面形态识别，非买卖建议；维度权重与阈值由 5 日回看命中率自动微调（有界），'
-    '历史命中不代表未来表现。委比挂单、板块内分化两维度因无数据源暂未启用。'
-)
+_META_DISCLAIMER_TAIL = '历史命中不代表未来表现。委比挂单、板块内分化两维度因无数据源暂未启用。'
+
+
+def _meta_disclaimer():
+    """免责声明随自动调参开关变化（#5）：默认关闭时不能再说「自动微调」。"""
+    if getattr(settings, 'DETECTOR_AUTO_TUNE', False):
+        tune = '维度权重与噪声闸门按跨日累计、显著跑赢/跑输基线才有界调整，'
+    else:
+        tune = '维度参数固定（在线自动调参已关闭，复盘只统计不调参），'
+    return f'信号为盘面形态识别，非买卖建议；{tune}{_META_DISCLAIMER_TAIL}'
 
 
 # 信号列表已上线的 JSON 键顺序，接入 common.envelope 时保持不变（ARC-04）
@@ -72,7 +81,7 @@ def _meta(latest_run, message=''):
         'data_as_of': data_date,
         'fetched_at': fetched_at,
         'cache_status': cache_status,
-        'disclaimer': _META_DISCLAIMER,
+        'disclaimer': _meta_disclaimer(),
         **({'message': message} if message else {}),
     }
 
@@ -95,6 +104,14 @@ def _signal_row(sig):
         'review_hit': sig.review_hit,
         'hit_date': sig.hit_date,
         'reviewed_at': sig.reviewed_at,
+        # 回看明细（#12）：v1 口径的旧行全部为 None / ''
+        'review_version': sig.review_version,
+        'review_threshold': sig.review_threshold,
+        'review_baseline': sig.review_baseline,
+        'fwd_return': sig.fwd_return,
+        'bench_return': sig.bench_return,
+        'excess_return': sig.excess_return,
+        'benchmark_code': sig.benchmark_code,
         'created_at': sig.created_at,
     }
 
@@ -191,7 +208,13 @@ def _run_brief(run):
         'signals_new': run.signals_new,
         'signals_sustained': run.signals_sustained,
         'reviewed_count': run.reviewed_count,
+        'hit_count': run.hit_count,
         'hit_rate': run.hit_rate,
+        # 命中率的参照系（#7）：旧 run 行为 None，前端显示「-」
+        'baseline_rate': run.baseline_rate,
+        'excess_rate': run.excess_rate,
+        'independent_samples': run.independent_samples,
+        'avg_excess_return': run.avg_excess_return,
         'message': run.message,
     }
 
@@ -256,7 +279,8 @@ def detector_signal_detail(request, pk):
         'dimension_series': dimension_series,
         'params_source': params_source,
         'disabled_dims': [
-            {'key': d['key'], 'name': d['name'], 'disabled_reason': d['disabled_reason']}
+            {'key': d['key'], 'name': d['name'], 'disabled_reason': d['disabled_reason'],
+             'disabled_kind': _disabled_kind(d, False)}
             for d in registry.DIMENSIONS if not d['enabled']
         ],
     })
@@ -312,18 +336,46 @@ def detector_heatmap(request):
     })
 
 
+def _disabled_kind(spec, enabled):
+    """停用原因的类别：candidate=已实现但回测未证明有效的候选维度；
+    no_source=本站没有数据源/尚未实现；启用中为空串。"""
+    if enabled:
+        return ''
+    return 'no_source' if spec.get('evaluate') is None else 'candidate'
+
+
+def _vote_groups():
+    """投票信息组（#4）：{group: {'role', 'dims': [启用维度 key...]}}，与 signals.vote 同源。"""
+    groups = {}
+    for spec in registry.DIMENSIONS:
+        if not spec['enabled']:
+            continue
+        group, role = dim_group(spec['key'])
+        entry = groups.setdefault(group, {'role': role, 'dims': []})
+        entry['dims'].append(spec['key'])
+    return groups
+
+
 @api_view(['GET'])
 def detector_config(request):
-    """维度配置与迭代状态（只读）：权重/阈值/启停原因 + 近 10 次运行摘要。"""
+    """维度配置与迭代状态（只读）：权重/阈值/启停原因 + 近 10 次运行摘要 + 调参流水。"""
     cfg_rows = {c.key: c for c in DetectorDimConfig.objects.all()}
     dims = []
     for spec in registry.DIMENSIONS:
         cfg = cfg_rows.get(spec['key'])
+        enabled = cfg.is_enabled if cfg else spec['enabled']
+        group, role = dim_group(spec['key'])
         dims.append({
             'key': spec['key'],
             'name': cfg.name if cfg and cfg.name else spec['name'],
-            'enabled': cfg.is_enabled if cfg else spec['enabled'],
+            'enabled': enabled,
             'disabled_reason': (cfg.disabled_reason if cfg else None) or spec.get('disabled_reason', ''),
+            'disabled_kind': _disabled_kind(spec, enabled),
+            # 适用对象与投票分组（前端「适用对象」列与计票说明直接用，不再手写映射）
+            'targets': list(spec['targets']),
+            'vote_codes': list(constants.MARGIN_VOTE_CODES) if spec['key'] == 'margin_north' else None,
+            'group': group,
+            'role': role,
             'note': spec['note'],
             'weight': cfg.weight if cfg else 1.0,
             'params': {**spec['defaults'], **((cfg.params or {}) if cfg else {})},
@@ -338,16 +390,35 @@ def detector_config(request):
         # 规则直接引用 detector/constants 里的常量（ALG-15 / ARC-06）：实现与展示
         # 共用一份，旧实现在这里手写了一份副本，改阈值后配置页会与实际不一致
         'review_rules': {
+            'version': constants.REVIEW_VERSION,
             'lookback_days': constants.REVIEW_LOOKBACK,
-            'hit_sigma_k': constants.HIT_SIGMA_K,
+            'hit_sigma_k': getattr(settings, 'DETECTOR_REVIEW_SIGMA_K', constants.HIT_SIGMA_K),
             'sigma_window': constants.SIGMA_WINDOW,
             'hit_pct': constants.HIT_PCT,
+            'benchmark': constants.BENCHMARK_CODE,
+            # 基期：指数/个股 T+1 开盘；板块无开盘价，T+1 收盘
+            'base': {'index': 'open_t1', 'stock': 'open_t1', 'industry': 'close_t1', 'concept': 'close_t1'},
+            'auto_tune': bool(getattr(settings, 'DETECTOR_AUTO_TUNE', False)),
+            'tune_window_days': getattr(settings, 'DETECTOR_TUNE_WINDOW_DAYS', constants.TUNE_WINDOW_DAYS),
+            'confidence': constants.TUNE_CONFIDENCE,
+            'prior_n': constants.TUNE_PRIOR_N,
             'weight_bounds': list(constants.WEIGHT_BOUNDS),
-            'min_scale_bounds': list(constants.MIN_SCALE_BOUNDS),
+            'tune_params': {k: list(v['bounds']) for k, v in constants.TUNE_PARAMS.items()},
             'min_samples': constants.MIN_ADJ_SAMPLES,
-            'excess_bounds': [constants.EXCESS_LOW, constants.EXCESS_HIGH],
-            'weight_band': constants.WEIGHT_BAND,
         },
+        # 调参流水（#16，独立表、永久保留）：最近 20 条，含关闭时的演练记录
+        'tune_log': [
+            {
+                'trade_date': t.trade_date,
+                'dim_key': t.dim_key,
+                'source': t.source,
+                'applied': t.applied,
+                'changes': t.changes,
+                'stats': t.stats,
+                'reason': t.reason,
+            }
+            for t in DetectorTuneLog.objects.order_by('-trade_date', '-id')[:20]
+        ],
         # 平静闸门与分级参数只读展示（不参与自动调参，理由见 calm.py 文件尾）
         'calm_rules': {
             'price': dict(constants.PRICE_CALM_PARAMS),
@@ -355,6 +426,12 @@ def detector_config(request):
         },
         'vote_rules': {
             'min_dims': constants.VOTE_MIN_DIMS,
+            # 分组加权投票（#4）：同侧加权票下限、对侧比例、信息组构成
+            'min_weight': constants.VOTE_MIN_WEIGHT,
+            'oppose_ratio': constants.OPPOSE_RATIO,
+            'groups': _vote_groups(),
             'severity': dict(constants.SEVERITY_RULES),
+            # 多重检验（#11）：每日板块信号按强度截断的上限，0 = 不截断
+            'sector_signal_cap': _sector_signal_cap(),
         },
     })

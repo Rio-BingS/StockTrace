@@ -13,6 +13,8 @@ backend/scheduler.lock
 backend/task-*.lock
 backend/scheduler_heartbeat.json
 backend/logs/
+# 探测器离线回测的数据缓存与报告（detector_backtest，可随时重拉）
+backend/.cache/
 *.log
 backend/staticfiles/
 

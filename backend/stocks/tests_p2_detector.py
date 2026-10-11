@@ -6,7 +6,7 @@
 from datetime import timedelta
 from unittest.mock import patch
 
-from django.test import TestCase
+from django.test import TestCase, override_settings
 from django.utils import timezone
 
 from .detector import calm
@@ -42,28 +42,22 @@ class CalmBaselineTests(TestCase):
         highs[-1] = 10.0 * 1.01045  # 当日振幅偏低（2.045%，与历史值都不同），应判平静
         return _price_ctx(volumes, closes, highs, lows)
 
-    def test_baselines_exclude_current_sample(self):
+    def test_baselines_exclude_current_window(self):
+        # regime 化（#2）后基线仍不含当前窗口（ALG-10）：下标 e 的基线止于 e−1
+        metric = [float(i) for i in range(30)]
+        self.assertEqual(calm._base(metric, 29, 60), metric[:29])
+        self.assertEqual(calm._base(metric, 29, 10), metric[19:29])
+        self.assertNotIn(metric[29], calm._base(metric, 29, 60))
+
+    def test_regime_uses_lagged_window_only(self):
+        # 此前平静只看止于 T−calm_lag 的窗口：近 3 日任意改动不改变 regime 判定
         ctx = self._calm_price_ctx()
-        seen = []
-        real = calm._percentile
-
-        def spy(vals, q):
-            seen.append(list(vals))
-            return real(vals, q)
-
-        with patch.object(calm, '_percentile', side_effect=spy):
-            ok, meta = calm.is_calm_price(ctx)
+        ctx['high'] = [10.1] * len(ctx['close'])  # 振幅恒定，回到「此前平静」
+        ok, meta = calm.is_calm_price(ctx)
         self.assertTrue(ok, meta)
-        cv_base, amp_base = seen
-        amp_now = (ctx['high'][-1] - ctx['low'][-1]) / ctx['close'][-2] * 100
-        self.assertNotIn(amp_now, amp_base)
-        self.assertEqual(len(amp_base), 43)  # 当日之前的全部振幅（共 44 根振幅，不足 lookback=60）
-        # 当前 5 日窗口的 CV 也不在 CV 基线里：基线最后一个窗口止于前一日
-        vols = ctx['volume']
-        last_base = vols[-6:-1]
-        m = sum(last_base) / 5
-        expected_last = calm._std(last_base) / m
-        self.assertAlmostEqual(cv_base[-1], expected_last)
+        ctx['volume'][-2] = 160.0  # T−1 温和放量：不进滞后窗口，RVOL 也在区间内
+        ok2, meta2 = calm.is_calm_price(ctx)
+        self.assertTrue(ok2, meta2)
 
     def test_missing_today_amplitude_is_not_calm(self):
         # 旧实现先丢 None 再取 amps[-1]，当日缺最高/最低价时拿前一天冒充当日
@@ -80,24 +74,87 @@ class CalmBaselineTests(TestCase):
         self.assertFalse(ok)
         self.assertIn('成交量历史不足', meta['reason'])
 
-    def test_sector_baselines_exclude_current_window(self):
-        nets = [3e8 if i % 2 == 0 else -3e8 for i in range(20)]
-        pcts = [0.3 + 0.01 * i if i % 2 == 0 else -0.3 for i in range(20)]
-        ctx = {'kind': 'industry', 'code': 'x', 'name': 'x', 'dates': _dates(20),
-               'net': nets, 'change_pct': pcts, 'as_of': _dates(20)[-1]}
-        seen = []
-        real = calm._percentile
+    def test_sector_recent_flow_rise_is_calm_but_spike_is_not(self):
+        # 近 3 日资金温和流入留给 big_order_net 去测（#2）；突增 10 倍才排除
+        mags = [2.0, 4.5, 3.0, 5.0, 2.5, 4.0, 3.5, 2.2, 4.8, 3.2]
+        nets = [(mags[i % 10] if i % 2 == 0 else -mags[i % 10]) * 1e8 for i in range(21)] + [1e8] * 3
+        pcts = [0.3 + 0.02 * (i % 5) if i % 2 == 0 else -0.3 for i in range(27)]
+        ctx = {'kind': 'industry', 'code': 'x', 'name': 'x', 'dates': _dates(27),
+               'net': nets + [3e8, 3.5e8, 4e8], 'change_pct': pcts, 'as_of': _dates(27)[-1]}
+        ok, meta = calm.is_calm_sector(ctx)
+        self.assertTrue(ok, meta)
+        ctx['net'] = nets + [30e8, 32e8, 31e8]
+        ok, meta = calm.is_calm_sector(ctx)
+        self.assertFalse(ok)
+        self.assertIn('净额', meta['reason'])
 
-        def spy(vals, q):
-            seen.append(list(vals))
-            return real(vals, q)
 
-        with patch.object(calm, '_percentile', side_effect=spy):
-            calm.is_calm_sector(ctx)
-        flow_base, std_base = seen
-        self.assertEqual(len(flow_base), 20 - 3)   # 不含末尾 3 日窗口
-        self.assertEqual(len(std_base), 20 - 5)    # 不含末尾 5 日窗口
-        self.assertNotIn(calm._std(pcts[-5:]), std_base)
+class CalmRegimeTests(TestCase):
+    """#2 平静闸门 regime 化：迟滞、TR 振幅、温和放量、价格已大动。"""
+
+    def _calm_ctx(self, n=60):
+        # 量能起伏与振幅都缓慢收窄：滞后窗口必然处在自身历史低位（此前平静）
+        volumes = [100 + (3 - i * 0.03) * (1 if i % 2 == 0 else -1) for i in range(n)]
+        closes = [10.0 * (1 + (0.004 if i % 2 == 0 else -0.004)) for i in range(n)]
+        highs = [c * (1.012 - i * 0.00005) for i, c in enumerate(closes)]
+        lows = [c * (0.988 + i * 0.00005) for i, c in enumerate(closes)]
+        return _price_ctx(volumes, closes, highs, lows)
+
+    def test_hysteresis_keeps_calm_inside_exit_band(self):
+        params = {'calm_lag': 0, 'lookback': 60, 'exit_pct': 0.6, 'hysteresis_days': 10,
+                  'regime_min_samples': 20}
+        base = [float(i % 10) for i in range(56)]
+        # 已平静（2 ≤ 40 分位）后出现 5（40~60 分位之间）：维持
+        state, streak, _r = calm._regime([('量能波动', base + [2, 2, 2, 5], 0.4)], 60, params)
+        self.assertTrue(state)
+        self.assertGreaterEqual(streak, 4)
+        # 从不平静（7）直接到 5：进入要 ≤ 40 分位，不平静
+        state, _s, reason = calm._regime([('量能波动', base + [7, 7, 7, 5], 0.4)], 60, params)
+        self.assertFalse(state)
+        self.assertIn('量能波动', reason)
+
+    def test_gap_counts_in_true_range(self):
+        # 跳空 2.9% 但日内窄幅 0.4%：旧 (H−L)/前收 算振幅低位；TR≈3.1% 高于历史
+        # 约 2.4% 的 90 分位，按剧烈波动排除（3 日累计仍未到「已大动」）
+        ctx = self._calm_ctx()
+        c = ctx['close'][-2] * 1.029
+        ctx['close'][-1] = ctx['open'][-1] = c
+        ctx['high'][-1], ctx['low'][-1] = c * 1.002, c * 0.998
+        ok, meta = calm.is_calm_price(ctx)
+        self.assertFalse(ok)
+        self.assertIn('真实波幅', meta['reason'])
+
+    def test_mild_volume_ramp_is_still_calm(self):
+        # 量先于价：近 3 日量能温和抬升（旧闸门 RVOL≤1.5 / 当日 CV 低位会拦下）
+        ctx = self._calm_ctx()
+        ctx['volume'][-3:] = [140.0, 170.0, 200.0]
+        ok, meta = calm.is_calm_price(ctx)
+        self.assertTrue(ok, meta)
+        self.assertGreater(meta['rvol'], 1.5)
+
+    def test_event_volume_spike_is_not_calm(self):
+        ctx = self._calm_ctx()
+        ctx['volume'][-1] = 400.0
+        ok, meta = calm.is_calm_price(ctx)
+        self.assertFalse(ok)
+        self.assertIn('RVOL', meta['reason'])
+
+    def test_price_already_moved_is_not_calm(self):
+        ctx = self._calm_ctx()
+        for i in (-3, -2, -1):
+            ctx['close'][i] = ctx['close'][i - 1] * 1.015  # σ≈0.8%，3 日 +4.6% > 2.5σ√3≈3.5%
+            ctx['high'][i], ctx['low'][i] = ctx['close'][i] * 1.01, ctx['close'][i] * 0.99
+        ok, meta = calm.is_calm_price(ctx)
+        self.assertFalse(ok)
+        self.assertIn('已大动', meta['reason'])
+
+    def test_adjusted_volume_is_preferred(self):
+        # #15 接口：送转校正量优先于原始量（原始量在送转日翻倍会被当成放量）
+        ctx = self._calm_ctx()
+        ctx['volume_adj'] = list(ctx['volume'])
+        ctx['volume'] = ctx['volume'][:-1] + [500.0]
+        ok, meta = calm.is_calm_price(ctx)
+        self.assertTrue(ok, meta)
 
 
 class SignValueBoundaryTests(TestCase):
@@ -198,9 +255,10 @@ class RandomWalkNoiseTests(TestCase):
         self.assertLess(given_calm, 0.05)
 
     def test_without_noise_gate_the_simulation_does_catch_noise(self):
-        # 守护测试本身的灵敏度：关掉噪声闸门（旧口径）时模拟必须能测出大量噪声信号
+        # 守护测试本身的灵敏度：关掉噪声闸门（旧口径）时模拟必须能测出大量噪声信号。
+        # 价格类维度的闸门是解析 z 下限（#1/#3），z_lo=0 即关闭
         overall, _given_calm, _n = self._rates(
-            'stock', _random_walk_ctx, 300, overrides={'noise_pct': 0})
+            'stock', _random_walk_ctx, 300, overrides={'noise_pct': 0, 'z_lo': 0.0})
         self.assertGreater(overall, 0.2)
 
 
@@ -231,7 +289,8 @@ class VolCompressTests(TestCase):
         from .detector.dimensions import eval_vol_compress
         from .detector.registry import DIMENSION_MAP
 
-        pcts = [0.8, -0.7, 0.9, -1.0, 0.6] * 8 + [0.3, 0.35, 0.32, 0.36, 0.34]
+        # 尾段压缩且漂移相对长窗口 σ 显著（z≈1.9，#3）
+        pcts = [0.8, -0.7, 0.9, -1.0, 0.6] * 8 + [0.7, 0.75, 0.72, 0.76, 0.74]
         ctx = self._ctx(pcts)
         params = dict(DIMENSION_MAP['vol_compress']['defaults'])
         first = eval_vol_compress(ctx, params)
@@ -297,9 +356,10 @@ class IndexDimensionCoverageTests(TestCase):
 
     def _margin_ctx(self, code):
         totals = [1.0e12 * (1 + 0.0005 * i) for i in range(30)]
-        totals[-1] *= 1.01  # 末端明显抬升
+        totals[-1] *= 1.003  # 末端抬升（仍在自身噪声带 noise_hi 倍以内，#1）
+        # #9：维度读融资余额 rz（不是融资融券余额 total）
         return {'kind': 'index', 'code': code, 'margin': [
-            {'date': d, 'total': t} for d, t in zip(_dates(30), totals)]}
+            {'date': d, 'rz': t, 'total': t * 1.01} for d, t in zip(_dates(30), totals)]}
 
     def test_margin_votes_only_on_hs300(self):
         from .detector.dimensions import eval_margin_north
@@ -319,16 +379,21 @@ class IndexDimensionCoverageTests(TestCase):
         from .detector import dimensions
         from .models import MarketDailySnapshot
 
-        MarketDailySnapshot.objects.create(
-            kind=MarketDailySnapshot.KIND_MARGIN, trade_date=_TODAY, payload=[{'total': 1.0}])
+        # 两融 T+1：指数数据日 T 只配 T−1 的融资余额（#9），T 当天的行不读
+        for day, rz in ((_TODAY - timedelta(days=1), 0.99), (_TODAY, 0.98)):
+            MarketDailySnapshot.objects.create(
+                kind=MarketDailySnapshot.KIND_MARGIN, trade_date=day,
+                payload=[{'total': 1.0, 'rz': rz, 'sz_total': 0.5}])
         items = [{'date': d, 'open': 1.0, 'high': 1.0, 'low': 1.0, 'close': 1.0, 'volume': 1.0}
                  for d in _dates(40)]
         with patch('stocks.market.indices.fetch_index_daily_series',
-                   return_value={'available': True, 'items': items}):
+                   return_value={'available': True, 'items': items}), \
+                patch('stocks.trading_calendar.is_trading_day', lambda day=None: True):
             ctx, _ = dimensions.build_index_context('sh000001', '上证指数')
             self.assertEqual(ctx['margin'], [])
             ctx, _ = dimensions.build_index_context('sh000300', '沪深300')
-            self.assertEqual(len(ctx['margin']), 1)
+            self.assertEqual([m['rz'] for m in ctx['margin']], [0.99])
+            self.assertEqual(ctx['margin_as_of'], (_TODAY - timedelta(days=1)).isoformat())
 
 
 class TurnoverShareChangeTests(TestCase):
@@ -379,6 +444,7 @@ class TurnoverShareChangeTests(TestCase):
         self.assertIsNotNone(_share_basis_break(self._ctx(split_at=40), 60, 1.2))
 
 
+@patch('stocks.trading_calendar.is_trading_day', lambda day=None: True)
 class SectorSnapshotPreloadTests(TestCase):
     """PERF-04：一次扫描每类板块快照只读一次，各板块共用，结果与逐板块读库一致。"""
 
@@ -472,6 +538,7 @@ def _always_trading(day=None):
     return True
 
 
+@patch('stocks.detector.review._benchmark_bars', lambda cache: {})
 @patch('stocks.trading_calendar.is_trading_day', _always_trading)
 class ReviewProtocolTests(TestCase):
     """ALG-05：回看要求满 5 个交易日、基期 T+1 开盘、MAE 先到判未兑现、基线比较、段首计样本。"""
@@ -528,20 +595,28 @@ class ReviewProtocolTests(TestCase):
         self.assertLess(out['thr'], review.HIT_PCT)  # 历史 σ≈0.2，低于固定 1.5%
         self.assertIsNotNone(out['baseline'])
 
+    @override_settings(DETECTOR_AUTO_TUNE=True)
     def test_only_segment_head_counts_for_tuning(self):
         from .detector import review, scan
-        from .models import DetectorDimConfig
+        from .models import DetectorDimConfig, DetectorSignal
 
         for i in range(review.MIN_ADJ_SAMPLES):
             code = f'6006{i}0'
-            _s, base_date = self.seed._make_stock_with_moves(code, [0.5, 1.2, 2.2, 2.5, 2.8])
-            self.seed._make_signal(code, base_date, cycles=3)  # 信号段中段，窗口与段首重叠
+            _s, base_date = self.seed._make_stock_with_moves(
+                code, [0.5, 1.2, 2.2, 2.5, 2.8], base_date=_TODAY - timedelta(days=10 + 2 * i))
+            # 信号段中段：前一交易日已有同向 active 信号（段首按此判定，不再看 cycles==2；
+            # 段首行标成旧口径已判定，不进入本轮回看与 v2 样本），窗口与段首重叠
+            head = self.seed._make_signal(code, base_date - timedelta(days=1), cycles=2)
+            DetectorSignal.objects.filter(pk=head.pk).update(
+                status=DetectorSignal.STATUS_MISSED, review_hit=False)
+            self.seed._make_signal(code, base_date, cycles=3)
         configs = {c['key']: c for c in scan.load_configs()}
         summary = review.review_pending(_TODAY, configs)
         self.assertEqual(summary['reviewed'], review.MIN_ADJ_SAMPLES)
         self.assertEqual(summary['adjustments'], [])
         self.assertEqual(DetectorDimConfig.objects.get(key='vol_ratio_slope').weight, 1.0)
 
+    @override_settings(DETECTOR_AUTO_TUNE=True)
     def test_hits_matching_baseline_do_not_tune(self):
         from .detector import review, scan
         from .models import DetectorDimConfig
@@ -550,7 +625,8 @@ class ReviewProtocolTests(TestCase):
         for i in range(review.MIN_ADJ_SAMPLES):
             code = f'6007{i}0'
             _s, base_date = self.seed._make_stock_with_moves(
-                code, [0.5, 1.2, 2.2, 2.5, 2.8], history='up')
+                code, [0.5, 1.2, 2.2, 2.5, 2.8], history='up',
+                base_date=_TODAY - timedelta(days=10 + 2 * i))
             self.seed._make_signal(code, base_date)
         configs = {c['key']: c for c in scan.load_configs()}
         summary = review.review_pending(_TODAY, configs)
@@ -558,12 +634,13 @@ class ReviewProtocolTests(TestCase):
         self.assertEqual(summary['adjustments'], [])
         self.assertEqual(DetectorDimConfig.objects.get(key='vol_ratio_slope').weight, 1.0)
 
-    def test_sector_review_needs_full_window_and_uses_signal_close(self):
+    def test_sector_review_needs_full_window_and_uses_next_close(self):
         from .detector import review
         from .models import DetectorSignal, MarketDailySnapshot
 
+        # 板块基期为 T+1 收盘（#12）：需要 T+1..T+6 共 6 个交易日的快照
         base_date = _TODAY - timedelta(days=10)
-        pcts = [(-0.3 if i % 2 else -0.1) for i in range(40)] + [0.0] + [0.5, 0.6, 0.4, 0.3, 0.2]
+        pcts = [(-0.3 if i % 2 else -0.1) for i in range(40)] + [0.0] + [0.5, 0.6, 0.4, 0.3, 0.2, 0.1]
         start = base_date - timedelta(days=40)
         for i, pct in enumerate(pcts):
             MarketDailySnapshot.objects.create(
@@ -652,7 +729,7 @@ class SignalParamsSnapshotTests(TestCase):
 
         configs = [{'key': k, 'name': k, 'weight': 1.0, 'params': {'min': 0.123},
                     'targets': ('industry',), 'evaluate': ev, 'enabled': True, 'defaults': {}}
-                   for k in ('ma_relation', 'vol_compress')]
+                   for k in ('ma_relation', 'big_order_net')]
         ctx = {'kind': 'industry', 'code': '甲', 'name': '甲', 'as_of': _TODAY.isoformat()}
         data, dims = signals.evaluate_target(ctx, configs)
         sig, _ = signals.upsert_signal(data, dims)

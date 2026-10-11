@@ -14,15 +14,28 @@
 
 from __future__ import annotations
 
+import math
+from datetime import date as _date, timedelta
+
 from ..models import DailyQuote, MarketDailySnapshot
 # 阈值数值集中在 constants.py（ARC-06），这里保留同名引用，dimensions.X 旧路径照常可用
 from .constants import (
+    AXIS_CALENDAR_BUFFER,
+    AXIS_CALENDAR_MULTIPLIER,
     COMPRESS_PCT_DEFAULT,
+    CONTEXT_BARS,
+    FLOW_RESID_MIN_OBS,
+    FLOW_RESID_WINDOW,
+    MARGIN_CONTEXT_DAYS,
+    MARGIN_VALUE_KEY,
     MARGIN_VOTE_CODES,
     MIN_PRICE_BARS,
     MIN_SECTOR_POINTS,
+    NEW_LISTING_MASK_BARS,
     NOISE_DEFAULTS,
-    SECTOR_LOOKBACK_DAYS,
+    SECTOR_CONTEXT_DAYS,
+    SECTOR_LOOKBACK_DAYS,  # noqa: F401  旧路径 dimensions.SECTOR_LOOKBACK_DAYS 保留
+    SIGMA_DEFAULTS,
     SPLIT_RATIO_DEFAULT,
 )
 
@@ -57,6 +70,70 @@ def _percentile(vals, q):
     hi = min(lo + 1, len(vals) - 1)
     frac = pos - lo
     return vals[lo] * (1 - frac) + vals[hi] * frac
+
+
+def _betacf(a, b, x):
+    """不完全 Beta 函数的连分式（Lentz 法），供 _betainc 使用。"""
+    tiny, eps = 1e-300, 3e-14
+    qab, qap, qam = a + b, a + 1.0, a - 1.0
+    c, d = 1.0, 1.0 - qab * x / qap
+    d = 1.0 / (d if abs(d) > tiny else tiny)
+    h = d
+    for m in range(1, 301):
+        m2 = 2 * m
+        aa = m * (b - m) * x / ((qam + m2) * (a + m2))
+        d = 1.0 + aa * d
+        d = 1.0 / (d if abs(d) > tiny else tiny)
+        c = 1.0 + aa / c
+        c = c if abs(c) > tiny else tiny
+        h *= d * c
+        aa = -(a + m) * (qab + m) * x / ((a + m2) * (qap + m2))
+        d = 1.0 + aa * d
+        d = 1.0 / (d if abs(d) > tiny else tiny)
+        c = 1.0 + aa / c
+        c = c if abs(c) > tiny else tiny
+        delta = d * c
+        h *= delta
+        if abs(delta - 1.0) < eps:
+            break
+    return h
+
+
+def _betainc(a, b, x):
+    """正则化不完全 Beta 函数 I_x(a, b)（纯 Python，不引入 scipy）。"""
+    if x <= 0:
+        return 0.0
+    if x >= 1:
+        return 1.0
+    log_bt = (math.lgamma(a + b) - math.lgamma(a) - math.lgamma(b)
+              + a * math.log(x) + b * math.log(1.0 - x))
+    bt = math.exp(log_bt)
+    if x < (a + 1.0) / (a + b + 2.0):
+        return bt * _betacf(a, b, x) / a
+    return 1.0 - bt * _betacf(b, a, 1.0 - x) / b
+
+
+def _hd_quantile(vals, q):
+    """Harrell-Davis 分位估计（#10）：全部次序统计量按 Beta 权重加权平均。
+
+    为什么不用线性插值分位：噪声闸门的 80 分位只靠几十个重叠样本估计，
+    线性插值只用相邻两个次序统计量，阈值随窗口滑动大幅抖动；HD 估计对
+    所有样本平滑加权，小样本下方差明显更小，且不对分布形状做假设
+    （量比斜率、分位差这些 raw 并不服从正态）。空序列返回 None。
+    """
+    vals = sorted(v for v in vals if v is not None)
+    n = len(vals)
+    if not n:
+        return None
+    if n == 1:
+        return vals[0]
+    a, b = q * (n + 1), (1 - q) * (n + 1)
+    total, prev = 0.0, 0.0
+    for i, v in enumerate(vals, start=1):
+        cur = _betainc(a, b, i / n)
+        total += (cur - prev) * v
+        prev = cur
+    return total
 
 
 def _clamp(v, lo, hi):
@@ -104,6 +181,21 @@ def _params_valid(mild, lo, hi):
         return False
 
 
+def _noise_threshold(history, params):
+    """噪声带阈值：自身历史 |raw| 的 noise_pct 分位（Harrell-Davis 估计）。
+
+    返回 (阈值, 不可用原因)；样本不足 noise_min 时阈值为 None。取最近
+    noise_window 个历史值——上下文拉长（约 250 根）后窗口能真正取满，
+    70 根时有多少用多少（#10）。
+    """
+    window = int(params.get('noise_window', NOISE_DEFAULTS['noise_window']))
+    need = int(params.get('noise_min', NOISE_DEFAULTS['noise_min']))
+    sample = [abs(v) for v in history if v is not None][-window:]
+    if len(sample) < need:
+        return None, f'噪声基线样本不足（{len(sample)}/{need}），不投票'
+    return _hd_quantile(sample, params['noise_pct']), ''
+
+
 def _noise_gate(raw, history, params):
     """噪声闸门（ALG-04）：|raw| 必须超过自身历史 |raw| 分布的 noise_pct 分位才投票。
 
@@ -112,29 +204,74 @@ def _noise_gate(raw, history, params):
     换成「相对自己的历史是否异常」，阈值随品种自身噪声缩放。
     history 是当前点之前的 raw 序列（不含当前点，含 None 时跳过）；
     noise_pct 为 0/缺省时关闭闸门（向前兼容）。返回不投票原因，通过返回 ''。
+
+    上限也用自身单位（#1）：noise_hi 为正时，|raw| 超过 noise_hi × 噪声带
+    视为突变不投票，取代跨品种的绝对 max——绝对 max 与随波动率增长的噪声带
+    相撞时，高波动标的的可投票区间会变成空集。
     """
     q = params.get('noise_pct')
     if not q:
         return ''
-    window = int(params.get('noise_window', NOISE_DEFAULTS['noise_window']))
-    need = int(params.get('noise_min', NOISE_DEFAULTS['noise_min']))
-    sample = [abs(v) for v in history if v is not None][-window:]
-    if len(sample) < need:
-        return f'噪声基线样本不足（{len(sample)}/{need}），不投票'
-    thr = _percentile(sample, q)
+    thr, note = _noise_threshold(history, params)
+    if thr is None:
+        return note
     if abs(raw) <= thr:
         return f'漂移未超出自身历史 {q:.0%} 分位（噪声带 ±{thr:.3g}），不投票'
+    hi = params.get('noise_hi')
+    if hi and abs(raw) > hi * thr:
+        return f'幅度超出自身噪声带 {hi:g} 倍（±{hi * thr:.3g}），疑似突变而非早期迹象'
     return ''
 
 
 def _gated(raw, history, params):
-    """_sign_value + 噪声闸门：温和带内且超出自身噪声带才投票。"""
+    """_sign_value + 噪声闸门：温和带内且超出自身噪声带才投票。
+
+    噪声闸门开启且配置了 noise_hi 时，上限改由闸门按自身噪声带给出，
+    绝对 max 不再参与（#1）；库里旧配置行残留的 max 因此自然失效。
+    """
+    if params.get('noise_pct') and params.get('noise_hi'):
+        params = {**params, 'max': math.inf}
     value, direction, note = _sign_value(raw, params)
     if direction is not None:
         gate = _noise_gate(raw, history, params)
         if gate:
             direction, note = None, gate
     return value, direction, note
+
+
+def _long_sigma(rets, window, need):
+    """长窗口日收益标准差（%）：末尾 window 个非空收益，样本不足 need 返回 None。
+
+    价格类维度的噪声尺度由它解析推导（#1/#3/#10）：日收益近似独立，
+    60 个收益估 σ 的相对误差约 9%，远比拿几十个高度重叠的 raw 估 80 分位稳。
+    """
+    sample = [r for r in rets if r is not None][-int(window):]
+    if len(sample) < int(need):
+        return None
+    sd = _std(sample)
+    return sd if sd else None
+
+
+def _zband(z, params):
+    """z 值投票区间（#1）：z_lo < |z| ≤ z_hi 才投票，value = z/z_mild × 50。
+
+    返回 (value, direction, note)。阈值都是「自身分布单位」：随机游走下
+    |z| 近似标准正态，单维度名义投票率 = 2·(Φ(−z_lo) − Φ(−z_hi))，与标的
+    波动率无关。参数非法（需 0 ≤ z_lo < z_hi、z_mild > 0）如实不投票。
+    """
+    try:
+        lo, hi, mild = float(params['z_lo']), float(params['z_hi']), float(params['z_mild'])
+        valid = 0 <= lo < hi and mild > 0
+    except (KeyError, TypeError, ValueError):
+        valid = False
+    if not valid:
+        return None, None, '维度参数非法（需 0 ≤ z_lo < z_hi 且 z_mild > 0），不投票'
+    value = _clamp(z / mild * 50, -100, 100)
+    if z == 0 or abs(z) <= lo:
+        return value, None, f'偏离未超出自身噪声尺度（|z|={abs(z):.2f} ≤ {lo:g}），不投票'
+    if abs(z) > hi:
+        return value, None, f'偏离达 {abs(z):.2f} 倍自身噪声尺度，疑似突变/趋势已展开，非早期迹象'
+    return value, ('up' if z > 0 else 'down'), ''
 
 
 def _ols_slope(ys):
@@ -181,11 +318,133 @@ def _series_points(dates, values, count=20):
 # MARGIN_VOTE_CODES（ALG-09）见 constants.py。
 
 
+def trading_day_axis(end_date, n, known_dates=()):
+    """截止 end_date（含）往前 n 个交易日的日期轴，升序（#8）。
+
+    为什么不再用「最近 N 行」：整天缺快照（调度宕机、上游挂了）时，按行取数
+    会把缺口前后当成相邻日，窗口语义与漂移都被无声压缩。日期轴由交易日历
+    生成，缺失日由调用方填 None，各维度取窗时如实不可用。
+    交易日 = 日历明确判定为交易日，或本站已有该日数据（数据本身证明开市，
+    日历缺口时不丢真实数据）；日历完全不可用时退化为「已有数据的日期」，
+    与旧的按行取数等价，不会更差。往回最多走 n × 倍数 + 缓冲 个自然日。
+    """
+    from .. import trading_calendar
+
+    known = set(known_dates)
+    axis, day = [], end_date
+    for _ in range(n * AXIS_CALENDAR_MULTIPLIER + AXIS_CALENDAR_BUFFER):
+        if day in known:
+            hit = True
+        else:
+            try:
+                hit = trading_calendar.is_trading_day(day) is True
+            except Exception:  # noqa: BLE001 日历意外异常按「未知」处理：只认已有数据的日期
+                hit = False
+        if hit:
+            axis.append(day)
+            if len(axis) >= n:
+                break
+        day -= timedelta(days=1)
+    axis.reverse()
+    return axis
+
+
+def _snapshot_axis_rows(kind_db, n, end_date=None, before=None):
+    """按交易日轴读出某类快照：[(trade_date, payload | None)] 升序；无快照返回 []。
+
+    - 轴末点：end_date；缺省时取 before 之前（不含）或全表的最新快照日；
+    - 轴起点不早于该类最早一行快照（「按现有可得长度」，不在头部堆 None）；
+    - 轴上没有快照的交易日 payload 为 None（缺口如实保留，不压缩时间）。
+    """
+    qs = MarketDailySnapshot.objects.filter(kind=kind_db)
+    if before is not None:
+        qs = qs.filter(trade_date__lt=before)
+    if end_date is None:
+        end_date = qs.order_by('-trade_date').values_list('trade_date', flat=True).first()
+        if end_date is None:
+            return []
+    span = n * AXIS_CALENDAR_MULTIPLIER + AXIS_CALENDAR_BUFFER
+    known = list(
+        qs.filter(trade_date__gte=end_date - timedelta(days=span), trade_date__lte=end_date)
+        .values_list('trade_date', flat=True)
+    )
+    if not known:
+        return []
+    first = min(known)
+    axis = [d for d in trading_day_axis(end_date, n, known) if d >= first]
+    if not axis:
+        return []
+    by_date = dict(
+        qs.filter(trade_date__gte=axis[0], trade_date__lte=axis[-1])
+        .values_list('trade_date', 'payload')
+    )
+    return [(d, by_date.get(d)) for d in axis]
+
+
+def _margin_value(payload_row):
+    """快照行里的融资余额（亿元，#9）；口径不可信时返回 None。
+
+    旧版落库把缺失的单边 rz 按 0 相加（只剩沪市融资余额），会被误读成余额腰斩：
+    融资余额应占融资融券余额的绝大部分（实际约 98%~99%），比值不在 [0.9, 1]
+    之间视为该行 rz 不可信，如实缺失而不是冒充。
+    """
+    if not payload_row:
+        return None
+    value = payload_row.get(MARGIN_VALUE_KEY)
+    total = payload_row.get('total')
+    if value is None:
+        return None
+    if total and not (0.9 <= value / total <= 1.0):
+        return None
+    return value
+
+
+def load_margin_series(index_as_of, n=MARGIN_CONTEXT_DAYS):
+    """沪深300 的融资余额序列：按交易日轴对齐，末点 = 指数数据日的前一交易日（#8/#9）。
+
+    两融 T+1 披露：扫描日 T（17:15）最新只有 T−1 的数，所以轴末点固定为
+    index_as_of 的前一交易日，且只读 index_as_of 之前（不含）的快照——事后重算
+    （信号详情页）时也不会混入 T 及以后的数。T−1 尚未披露时末点为 None，维度
+    如实不可用，而不是拿更早的数冒充最新。
+    返回 (items, margin_as_of)：items 为 [{'date', 'rz', 'total'}]（缺失日两者为
+    None），margin_as_of 为最后一个有值的数据日（无则 None）。
+    """
+    if isinstance(index_as_of, str):
+        index_as_of = _date.fromisoformat(index_as_of)
+    kind = MarketDailySnapshot.KIND_MARGIN
+    known = list(
+        MarketDailySnapshot.objects.filter(kind=kind, trade_date__lt=index_as_of)
+        .order_by('-trade_date').values_list('trade_date', flat=True)[:1]
+    )
+    prev = trading_day_axis(index_as_of - timedelta(days=1), 1, known)
+    if not prev:
+        return [], None
+    rows = _snapshot_axis_rows(kind, n, end_date=prev[0], before=index_as_of)
+    items, margin_as_of = [], None
+    for trade_date, payload in rows:
+        row = (payload or [None])[0] if payload else None
+        value = _margin_value(row)
+        items.append({
+            'date': trade_date.isoformat(),
+            'rz': value,
+            'total': row.get('total') if row else None,
+        })
+        if value is not None:
+            margin_as_of = trade_date.isoformat()
+    # 末点之后（T−1 未披露）时轴末点仍保留为 None：维度据此如实不可用
+    if rows and rows[-1][0] != prev[0]:
+        items.append({'date': prev[0].isoformat(), 'rz': None, 'total': None})
+    return items, margin_as_of
+
+
 def build_index_context(code, name):
-    """指数上下文：新浪日线 OHLCV（同一上游接口，见 market.indices）+ 融资余额快照序列。"""
+    """指数上下文：新浪日线 OHLCV（同一上游接口，见 market.indices）+ 融资余额快照序列。
+
+    日线取 CONTEXT_BARS 根（#10）：上游一次返回全史，取多长不增加请求。
+    """
     from ..market import indices
 
-    data = indices.fetch_index_daily_series(code, days=70)
+    data = indices.fetch_index_daily_series(code, days=CONTEXT_BARS)
     if not data.get('available'):
         return None, data.get('message') or '指数日线不可用'
     items = data['items']
@@ -193,23 +452,16 @@ def build_index_context(code, name):
         return None, f'指数日线仅 {len(items)} 根，历史不足'
 
     ctx = _price_ctx('index', code, name, items)
+    # 指数无股本概念，也无送转：校正量能即原始成交量（#15，与个股同一接口）
+    ctx['volume_adj'] = list(ctx['volume'])
+    ctx['volume_basis'] = 'volume'
     ctx['margin'] = []
+    ctx['margin_as_of'] = None
     if code not in MARGIN_VOTE_CODES:
         return ctx, ''  # 只有沪深300用融资余额（ALG-09），其余指数不必读快照
-    # 融资余额序列：本站日度快照积累（T+1 披露），给 margin_north 维度用；
-    # 积累不足时维度自行 available=False，不影响其他维度。
-    rows = (
-        MarketDailySnapshot.objects.filter(kind=MarketDailySnapshot.KIND_MARGIN)
-        .order_by('-trade_date')
-        .values_list('trade_date', 'payload')[:40]
-    )
-    margin = []
-    for trade_date, payload in reversed(list(rows)):
-        for row in payload or []:
-            if row.get('total') is not None:
-                margin.append({'date': trade_date.isoformat(), 'total': row['total']})
-                break
-    ctx['margin'] = margin
+    # 融资余额序列：本站日度快照积累（T+1 披露，可用 backfill_margin 回补），给
+    # margin_north 维度用；积累不足时维度自行 available=False，不影响其他维度。
+    ctx['margin'], ctx['margin_as_of'] = load_margin_series(ctx['as_of'])
     return ctx, ''
 
 
@@ -217,7 +469,8 @@ def build_stock_context(stock):
     """自选股上下文：DailyQuote（本站已拉取的日线），零新增上游请求。
 
     只用已收盘的日线（DAT-13）：盘中拉到的当日 bar 量价不完整，混进序列会
-    让振幅/量比/均线距离按半天数据投票。
+    让振幅/量比/均线距离按半天数据投票。取最近 CONTEXT_BARS 根（#10），
+    本地不足就用现有的，不为补历史额外联网。
     """
     rows = list(
         DailyQuote.objects.filter(stock=stock, is_final=True)
@@ -225,7 +478,7 @@ def build_stock_context(stock):
         .values_list(
             'trade_date', 'open_price', 'high_price', 'low_price',
             'close_price', 'volume', 'turnover',
-        )[:70]
+        )[:CONTEXT_BARS]
     )[::-1]
     if len(rows) < MIN_PRICE_BARS:
         return None, f'日线仅 {len(rows)} 根，历史不足'
@@ -245,18 +498,125 @@ def build_stock_context(stock):
     # 成交额（元）只用于识别量价基准断层（ALG-13），不参与其他维度
     ctx['amount'] = [it['amount'] for it in items]
     # 逐日流通股本（股）：换手率维度用真实换手率；None 表示股本数据缺失（ALG-13）
-    ctx['float_shares'] = _float_shares_for(stock.code, ctx['dates'])
+    history = _float_share_history(stock.code)
+    ctx['float_shares'] = _shares_on(history, ctx['dates'])
+    # 送转/新股校正后的量能序列（#15）：供平静闸门的 RVOL/量能 CV 与量比类维度接入
+    ctx['volume_adj'], ctx['volume_basis'] = adjusted_volume_series(
+        ctx, listing_date=_listing_date(history),
+    )
     return ctx, ''
+
+
+def _float_share_history(code):
+    """流通股本变动历史 [(date, shares)]；取不到（关闭/熔断/上游失败）返回 None。"""
+    from ..datasources import float_shares
+
+    return float_shares.fetch_float_share_history(code) or None
+
+
+def _shares_on(history, dates):
+    from ..datasources import float_shares
+
+    if not history:
+        return None
+    return float_shares.shares_on_dates(history, dates)
 
 
 def _float_shares_for(code, dates):
     """与 dates 对齐的流通股本序列；取不到（关闭/熔断/上游失败）返回 None。"""
-    from ..datasources import float_shares
+    return _shares_on(_float_share_history(code), dates)
 
-    history = float_shares.fetch_float_share_history(code)
+
+def _listing_date(history):
+    """流通股本历史的首个变动日 ≈ 上市日（新股首次登记流通股本）；无数据返回 None。"""
     if not history:
         return None
-    return float_shares.shares_on_dates(history, dates)
+    first = history[0][0]
+    if isinstance(first, str):
+        first = _date.fromisoformat(first[:10])
+    return first
+
+
+def adjusted_volume_series(ctx, listing_date=None, split_ratio=SPLIT_RATIO_DEFAULT):
+    """送转与新股校正后的量能序列（#15），返回 (series, basis)。
+
+    为什么需要：日线是前复权价、成交量不复权，送转（如 10 转 10）后成交量
+    （股）整体上一个台阶，RVOL、量能 CV、量比斜率都会把股本扩大误读成放量；
+    新股上市初期的极端量能进入基期，会把「平静」基线整体抬高。
+    口径（按优先级）：
+    1. 'turnover'：个股有完整流通股本时用 成交量/当日流通股本（换手率）——送转、
+       定增、解禁前后都连续，且 RVOL/CV 这类比值与「量」口径等价；
+    2. 'split_adjusted'：股本缺失时用 _share_basis_break 找送转/配股断层，把断层前
+       的成交量乘以台阶比（断层前后 r=成交额/(量×价) 的中位数之比，即换算成新
+       股本口径），最多处理 3 个断层；
+    3. 'volume'：都不适用时原样返回成交量（指数、ETF、无断层个股）。
+    新股保护：listing_date 落在 ctx 窗口内时，上市日起 NEW_LISTING_MASK_BARS 根
+    量能置 None（基期窗口不齐就不算，与各维度的严格窗口纪律一致），basis 追加
+    '+listing_masked'。
+    接入方式：平静闸门/量比维度读 ctx.get('volume_adj') or ctx['volume'] 即可，
+    序列与 ctx['dates'] 等长对齐。
+    """
+    volumes = list(ctx.get('volume') or [])
+    basis = 'volume'
+    if ctx.get('kind') == 'stock' and volumes:
+        shares = ctx.get('float_shares')
+        if shares and len(shares) == len(volumes) and all(
+            s for v, s in zip(volumes, shares) if v is not None
+        ):
+            volumes = [v / s if v is not None else None for v, s in zip(volumes, shares)]
+            basis = 'turnover'
+        else:
+            adjusted = _split_adjust_volumes(ctx, split_ratio)
+            if adjusted is not None:
+                volumes, basis = adjusted, 'split_adjusted'
+    if listing_date is not None and ctx.get('dates'):
+        iso = listing_date.isoformat()
+        dates = ctx['dates']
+        if dates[0] <= iso <= dates[-1]:
+            start = next(i for i, d in enumerate(dates) if d >= iso)
+            for i in range(start, min(len(volumes), start + NEW_LISTING_MASK_BARS)):
+                volumes[i] = None
+            basis += '+listing_masked'
+    return volumes, basis
+
+
+def _split_adjust_volumes(ctx, split_ratio, max_breaks=3):
+    """按量价基准断层把断层前的成交量换算到断层后的股本口径；无断层返回 None。"""
+    work = {**ctx, 'volume': list(ctx.get('volume') or [])}
+    n = len(work['volume'])
+    changed = False
+    for _ in range(max_breaks):
+        broke = _share_basis_break(work, n, split_ratio)
+        if broke is None:
+            break
+        j = work['dates'].index(broke)
+        r = _basis_ratios(work)
+        before = _median([x for x in r[max(0, j - 3):j] if x is not None])
+        after = _median([x for x in r[j:j + 3] if x is not None])
+        if not before or not after:
+            break
+        factor = before / after
+        work['volume'] = [
+            v * factor if v is not None and i < j else v for i, v in enumerate(work['volume'])
+        ]
+        changed = True
+    return work['volume'] if changed else None
+
+
+def _basis_ratios(ctx):
+    """逐日 r = 成交额 / (成交量 × 收盘价)；任一缺失为 None（见 _share_basis_break）。"""
+    return [
+        a / (v * c) if a and v and c else None
+        for a, v, c in zip(ctx.get('amount') or [], ctx.get('volume') or [], ctx.get('close') or [])
+    ]
+
+
+def _median(vals):
+    vals = sorted(vals)
+    if not vals:
+        return None
+    mid = len(vals) // 2
+    return vals[mid] if len(vals) % 2 else (vals[mid - 1] + vals[mid]) / 2
 
 
 def _price_ctx(kind, code, name, items):
@@ -283,32 +643,64 @@ def _sector_kind_db(kind):
     )
 
 
-def load_sector_snapshots(kind, lookback_days=SECTOR_LOOKBACK_DAYS):
-    """一次读出某类板块最近 lookback_days 个快照日并按名字建索引（PERF-04）。
+def load_sector_snapshots(kind, lookback_days=SECTOR_CONTEXT_DAYS, end_date=None):
+    """一次读出某类板块最近 lookback_days 个交易日的快照并按名字建索引（PERF-04）。
 
     返回 [(trade_date, {name: row})]，日期升序。扫描时每类只读一次、全部板块
     共用；旧实现每个板块各自重读 45 天全量 JSON，一次扫描约 2 万次大 JSON
     反序列化。
+    日期轴按交易日历生成（#8）：轴末点为 end_date 或最新快照日，轴上缺快照的
+    交易日为 {}（各板块该日即 None），不再「最近 N 行」压缩时间；轴起点不早于
+    最早一行快照（按现有可得长度）。
     """
-    rows = (
-        MarketDailySnapshot.objects.filter(kind=_sector_kind_db(kind))
-        .order_by('-trade_date')
-        .values_list('trade_date', 'payload')[:lookback_days]
-    )
     out = []
-    for trade_date, payload in reversed(list(rows)):
+    for trade_date, payload in _snapshot_axis_rows(_sector_kind_db(kind), lookback_days, end_date):
         out.append((trade_date, {r.get('name'): r for r in (payload or []) if r.get('name')}))
     return out
 
 
-def build_sector_context(kind, name, lookback_days=SECTOR_LOOKBACK_DAYS, snapshots=None):
+def sector_flow_residuals(nets, pcts, window=FLOW_RESID_WINDOW, min_obs=FLOW_RESID_MIN_OBS):
+    """板块资金净额对当日涨跌幅的滚动回归残差（#6），与 nets 等长。
+
+    同花顺板块「净额」按板块指数涨跌划分流入/流出（全单口径），与当日
+    change_pct 机械同向，直接投票等于把「涨了」再数一遍。第 i 点用截至 i 的
+    最近 window 个有效点 (pct, net) 拟合 net = a + b·pct，残差 e_i = net_i −
+    (a + b·pct_i) 才是「涨跌解释不了的资金」。只用 ≤ i 的数据，无前视；有效点
+    不足 min_obs、或当日 net/pct 缺失时该点为 None（如实不可用，不退回原始净额）。
+    窗口内 pct 无变化（方差 0）时退化为 net − 均值。
+    """
+    out = [None] * len(nets)
+    for i in range(len(nets)):
+        if nets[i] is None or pcts[i] is None:
+            continue
+        pts = [
+            (pcts[j], nets[j])
+            for j in range(max(0, i + 1 - window), i + 1)
+            if nets[j] is not None and pcts[j] is not None
+        ]
+        if len(pts) < min_obs:
+            continue
+        mx = sum(p for p, _ in pts) / len(pts)
+        my = sum(v for _, v in pts) / len(pts)
+        sxx = sum((p - mx) ** 2 for p, _ in pts)
+        b = sum((p - mx) * (v - my) for p, v in pts) / sxx if sxx else 0.0
+        e = nets[i] - (my + b * (pcts[i] - mx))
+        # 浮点舍入残留（净额完全由涨跌决定时 ~1e-8 元）按 0 计，免得被归一化放大成假漂移
+        tol = 1e-9 * max(abs(v) for _, v in pts)
+        out[i] = 0.0 if abs(e) <= tol else e
+    return out
+
+
+def build_sector_context(kind, name, lookback_days=SECTOR_CONTEXT_DAYS, snapshots=None):
     """板块上下文：本站日度快照透视出的逐日 net / change_pct 序列。
 
     「某板块某天缺行就 None」：回填可能只补到部分板块，绝不能拿旧值或 0
     补天（与快照模块「窗口齐全才算数」同一纪律）；各维度在取窗时遇 None
-    自行如实不可用。
+    自行如实不可用。日期轴是交易日历（#8），整天缺快照同样是 None。
     snapshots：load_sector_snapshots 的结果（扫描时预加载、各板块共用）；
     缺省时自行读库（信号详情页等单板块场景）。
+    ctx['flow_resid']：净额对当日涨跌幅的滚动回归残差（#6），板块资金净额
+    维度的输入；ctx['net'] 保持原始净额（平静闸门的资金面条件仍用它）。
     """
     if snapshots is None:
         snapshots = load_sector_snapshots(kind, lookback_days)
@@ -339,6 +731,7 @@ def build_sector_context(kind, name, lookback_days=SECTOR_LOOKBACK_DAYS, snapsho
         'name': name,
         'dates': dates,
         'net': nets,
+        'flow_resid': sector_flow_residuals(nets, pcts),
         'change_pct': pcts,
         'as_of': as_of,
     }
@@ -353,13 +746,18 @@ def build_sector_context(kind, name, lookback_days=SECTOR_LOOKBACK_DAYS, snapsho
 def eval_vol_ratio_slope(ctx, params):
     """量比斜率（指数/个股）：RVOL 近几日的最小二乘斜率（日均漂移）。
 
-    为什么看斜率而不是当日 RVOL：平静判定已要求当日 RVOL ∈ [0.7, 1.5]，
-    「平静中的微变」体现在量比的缓慢趋势上——资金悄悄回流的最早形态
-    就是量比温和抬升，而不是放量本身。
+    为什么看斜率而不是当日 RVOL：平静判定已要求当日 RVOL 不出现突变（见
+    PRICE_CALM_PARAMS 的 rvol 区间），「平静中的微变」体现在量比的缓慢趋势上
+    ——资金悄悄回流的最早形态就是量比温和抬升，而不是放量本身。
     噪声校准（ALG-04）：斜率用 slope_days+1 个点的 OLS 而不是两端点差分，
     且 |斜率| 须超出自身历史斜率的 noise_pct 分位才投票。
+    量能口径（#15）：优先用取数层给的送转/新股校正量 volume_adj（与 volume 等长
+    时），送转除权日的成交量台阶不会被当成量比抬升；没有时退回原始成交量。
     """
     volumes = ctx.get('volume')
+    adj = ctx.get('volume_adj')
+    if adj and volumes and len(adj) == len(volumes):
+        volumes = adj
     window, slope_days = params['window'], params['slope_days']
     need = window + slope_days + 1
     if not volumes or len(volumes) < need:
@@ -409,15 +807,20 @@ def _rolling_mean_series(vals, k, strict=False):
 
 
 def eval_big_order_net(ctx, params):
-    """大单净流入（指数/板块）：近 6 日均净额对比前 6 日的相对漂移。
+    """板块资金净额（仅板块）：近 6 日均值对比前 6 日的相对漂移。
 
-    指数用本站大盘快照的「超大单+大单」合计，板块用快照的主力净额——
-    都是收盘后落库的真实上游数据。为什么窗口取偶数长度（6 日）：
-    资金流在平静期常出现逐日正负交替，奇数窗口（如 5 日）的均值会残留
-    ±1 天的相位噪声、制造假漂移；偶数窗口把交替完全抵消，趋势才浮现。
-    分母取窗口内平均绝对净额，把大盘/板块的量级差异归一，阈值才能跨对象通用。
+    输入口径（#6）：同花顺板块「净额」是全单主动买卖口径、按板块指数涨跌
+    划分流入/流出，并非「大单/主力」，且与当日 change_pct 机械同向。ctx 带
+    flow_resid（净额对当日涨跌幅的滚动回归残差，build_sector_context 生成）
+    时用残差，只看「涨跌解释不了的资金」；没有时（旧调用方/单测）退回原始
+    净额。指数不参与（ALG-09，见 registry）。
+    为什么窗口取偶数长度（6 日）：资金流在平静期常出现逐日正负交替，偶数
+    窗口能抵消严格的 ±交替（一般噪声下不必然）。分母取窗口内平均绝对值，
+    把各板块的量级差异归一，阈值才能跨对象通用。
     """
-    nets = ctx.get('net')
+    nets = ctx.get('flow_resid')
+    if nets is None:
+        nets = ctx.get('net')
     window = params['window']
     mean_days = params['mean_days']
     need = window + mean_days * 2
@@ -494,13 +897,18 @@ def eval_vol_compress(ctx, params):
     「缩而价稳且缓慢抬升」是吸筹蓄势的典型形态，反之亦然。未压缩时
     如实显示「波动未压缩」且不投票。
 
-    口径（ALG-04/DET-18）：
-    - 旧实现只比较两个重叠 5 日窗口的单点（widths[-1] < widths[-4]），噪声下
-      近一半时间成立；现改为当前宽度 ≤ 自身历史宽度的 compress_pct 分位；
-    - 宽度统一用「逐日涨跌幅」的标准差（板块与指数/个股同口径），不再用振幅——
+    口径（ALG-04/DET-18/#3）：
+    - 当前宽度 ≤ 自身历史宽度的 compress_pct 分位才算压缩（不再比较两个
+      重叠窗口的单点）；
+    - 宽度统一用「逐日涨跌幅」的标准差（板块与指数/个股同口径），不用振幅——
       平静闸门已经要求振幅低位，两边都用振幅会让压缩条件与闸门高度相关；
-    - 漂移须相对窗口内自身波动显著：t = 均值 / (标准差/√k) 的绝对值 ≥ drift_z，
-      否则视为压缩期内的随机游走，不投票。
+    - 漂移显著性：z = Σr / (σ_long·√k)，σ_long 取压缩窗口之前 sigma_window
+      个日收益的标准差。旧实现用同窗口标准差做 t 的分母，而窗口正是按
+      「标准差小」筛出来的，|t| 被系统性放大：名义「t≥2.13≈双侧 10%」在
+      压缩条件下实际约 28% 假阳。改用窗口之外的长窗口 σ 后，正态独立收益
+      下 Σr 与窗口样本方差相互独立，筛选不再改变 z 的分布，假阳率回到名义值；
+    - 噪声闸门以解析形式接入：z_lo < |z| ≤ z_hi 才投票（自身波动单位），
+      取代跨品种的绝对 min/max（旧 max=6% 让 σ≥2.5% 的标的几乎投不了票，#1）。
     """
     k = params['window']
     rets = _return_series(ctx)
@@ -529,16 +937,17 @@ def eval_vol_compress(ctx, params):
     if widths[-1] > thr:
         return _result(0.0, None, '波动未压缩，不构成蓄势形态', series)
 
-    value, direction, note = _sign_value(drift, params)
-    if direction is not None:
-        mean_r = sum(cur) / k
-        w = widths[-1]
-        tstat = float('inf') if w == 0 else abs(mean_r) / (w / k ** 0.5)
-        if tstat < params.get('drift_z', 0.0):
-            direction, note = None, f'压缩期内漂移不显著（t={tstat:.2f}），不投票'
-    # 温和带：|漂移| 在 (min, max] 内才投票；压缩但漂移过小=完全静止
-    if direction is None and not note:
-        note = '压缩期内无有效漂移'
+    sigma = _long_sigma(
+        rets[:-k],
+        params.get('sigma_window', SIGMA_DEFAULTS['sigma_window']),
+        params.get('sigma_min', SIGMA_DEFAULTS['sigma_min']),
+    )
+    if sigma is None:
+        return _unavailable('长窗口波动样本不足，无法判断漂移显著性')
+    z = sum(cur) / (sigma * k ** 0.5)
+    value, direction, note = _zband(z, params)
+    if direction is None and note.startswith('偏离未超出'):
+        note = f'压缩期内漂移不显著（z={z:.2f}），不投票'
     return _result(value, direction, note, series)
 
 
@@ -670,7 +1079,12 @@ def eval_turnover_pct(ctx, params):
     raw = raws[-1]
     last = pct_series[-1]
     value, direction, note = _gated(raw, raws[:-1], params)
-    # 位置闸门：分位 >70 时再抬升就是「热」而非「微变」；<30 时再降温即冰点
+    # 位置闸门：分位 >70 时再抬升就是「热」而非「微变」；<30 时再降温即冰点。
+    # 依据复核（2026-10，回测原型 40 股 + 5 指数、3 年）：时序上「自身分位 5 日
+    # 抬升」对后续价格并不反向（个股约中性、指数同向），与截面「低换手异象/
+    # 异常换手跑输」（月频、比较的是股票之间）不是同一个量，方向语义保留；
+    # 被 70/30 拦下的样本在回测里也不比放行的差，但外部实证（换手倒 U 形、
+    # 放量上涨后跑输）支持「高位不再计 up」，作为先验约束保留，样本足够后再校准
     if direction == 'up' and last > params['pos_cap']:
         direction, note = None, f'分位已达 {last:.0f}，超出温和区间'
     elif direction == 'down' and last < params['pos_floor']:
@@ -682,19 +1096,21 @@ def eval_turnover_pct(ctx, params):
 
 
 def eval_margin_north(ctx, params):
-    """融资余额渐进变化（指数维度）。
+    """融资余额渐进变化（仅沪深300）。
 
-    口径说明：北向资金自 2024-08 起停止逐日净买额披露（项目已如实转
-    null），本维度仅融资余额口径；数据来自交易所官方披露、经本站日度
-    快照积累，窗口不足 6 行时如实不可用（上线初期约需一周积累）。
+    口径说明（#9）：用融资余额 rz（沪+深），不是融资融券余额；序列按交易日
+    历对齐，末点是指数数据日 T 的前一交易日（两融 T+1 披露），缺失日为 None。
+    3 日均值要求窗口齐全；6 个点只够算出第一个漂移，噪声闸门还需 noise_min
+    个历史漂移，所以实际约需 21 个交易日的连续积累才投票（可用 backfill_margin
+    命令回补历史）。北向资金自 2024-08 起停止逐日披露，本维度与北向无关。
     """
     if ctx.get('kind') == 'index' and ctx.get('code') not in MARGIN_VOTE_CODES:
         return _unavailable('融资余额为沪深合计口径，仅在沪深300上投票（避免各指数重复计票）')
     margin = ctx.get('margin') or []
     if len(margin) < 6:
         return _unavailable('融资余额快照积累不足（T+1 披露，逐日积累中）')
-    totals = [m['total'] for m in margin]
-    m3 = _rolling_mean_series(totals, 3)
+    totals = [m.get(MARGIN_VALUE_KEY) for m in margin]
+    m3 = _rolling_mean_series(totals, 3, strict=True)
     if m3[-1] is None or m3[-4] is None or not m3[-4]:
         return _unavailable('融资余额均值窗口不齐')
     raws = [
@@ -704,7 +1120,7 @@ def eval_margin_north(ctx, params):
     raw = raws[-1]
     value, direction, note = _gated(raw, raws[:-1], params)
     if direction is not None:
-        note = '仅融资余额口径（北向已停止逐日披露）'
+        note = f"融资余额口径，数据日 {margin[-1]['date']}（T−1）"
     return _result(
         value, direction, note,
         _series_points([m['date'] for m in margin], m3),
@@ -733,22 +1149,37 @@ def _sector_price_series(ctx):
     return out
 
 
-def eval_ma_relation(ctx, params):
-    """价格与均线关系（全部对象）：20 日均线距离的 3 日漂移。
+def _ma_dist_scale(ma_days):
+    """随机游走下「收盘/均线 − 1」的标准差相对日收益 σ 的倍数。
 
-    为什么用「距离的漂移」而不是「价格在上/在下」：平静期价格贴近均线，
-    距离开始单侧缓慢扩大是趋势萌芽的最早形态；而距离已拉得很远说明趋势
-    展开（追认而非早期），如实不投票。
+    对数近似：dist_t = Σ_{j=0}^{m−2} r_{t−j}·(m−1−j)/m，故
+    Var = σ²·Σ_{i=1}^{m−1} i² / m² = σ²·(m−1)(2m−1)/(6m)。m=20 时约 2.485σ。
     """
-    ma_days, slope_days = params['ma'], params['slope_days']
+    m = int(ma_days)
+    return ((m - 1) * (2 * m - 1) / (6 * m)) ** 0.5
+
+
+def eval_ma_relation(ctx, params):
+    """价格与均线关系（全部对象）：20 日均线距离水平的 z 值（#13/#1）。
+
+    为什么改测「距离水平」：旧实现测距离的 3 日漂移（二阶量），稳态缓慢
+    趋势下距离趋于常数、漂移回到噪声，正是要找的「渐进微变」反而测不到。
+    现在 z = dist / (σ_long × 均线距离的随机游走尺度)，σ_long 取近
+    sigma_window 个日收益的标准差：随机游走下 z 近似标准正态，与标的波动率
+    无关；日漂移 μ 的稳态趋势下 E[dist] ≈ (m−1)/2·μ，z 随趋势持续累积。
+    z_lo < |z| ≤ z_hi 才投票：|z| > z_hi 说明价格已远离均线（趋势已展开，
+    追认而非早期），取代旧的绝对 max/max_dist——那两个百分比上限与随 σ
+    增长的噪声带相撞，σ≥1.5% 的标的可投票区间为空。
+    """
+    ma_days = params['ma']
     if ctx.get('change_pct') is not None:
         closes = _sector_price_series(ctx)
         dates = ctx['dates']
     else:
         closes, dates = ctx.get('close'), ctx['dates']
-    if not closes or len(closes) < ma_days + slope_days + 1:
+    if not closes or len(closes) < ma_days + 1:
         return _unavailable('收盘序列不足（均线窗口不齐）')
-    if any(v is None for v in closes[-(ma_days + slope_days + 1):]):
+    if any(v is None for v in closes[-ma_days:]):
         return _unavailable('均线窗口存在缺失数据')
 
     # 严格窗口：板块伪价格缺口前后水平不可比，跨缺口的均线不能算（ALG-06）
@@ -757,18 +1188,19 @@ def eval_ma_relation(ctx, params):
         (closes[i] / ma[i] - 1) * 100 if ma[i] and closes[i] is not None else None
         for i in range(len(closes))
     ]
-    if dist[-1] is None or dist[-1 - slope_days] is None:
+    if dist[-1] is None:
         return _unavailable('均线距离序列不齐')
-    raws = [
-        dist[i] - dist[i - slope_days]
-        if i >= slope_days and dist[i] is not None and dist[i - slope_days] is not None
-        else None
-        for i in range(len(dist))
-    ]
-    raw = raws[-1]
-    value, direction, note = _gated(raw, raws[:-1], params)
-    if abs(dist[-1]) > params['max_dist'] and direction is not None:
-        direction, note = None, f'距均线 {dist[-1]:.1f}%，趋势已展开，非早期迹象'
+    sigma = _long_sigma(
+        _return_series(ctx) or [],
+        params.get('sigma_window', SIGMA_DEFAULTS['sigma_window']),
+        params.get('sigma_min', SIGMA_DEFAULTS['sigma_min']),
+    )
+    if sigma is None:
+        return _unavailable('长窗口波动样本不足，无法换算均线距离的噪声尺度')
+    z = dist[-1] / (sigma * _ma_dist_scale(ma_days))
+    value, direction, note = _zband(z, params)
+    if direction is None and note.startswith('偏离达'):
+        note = f'距均线 {dist[-1]:.1f}%（{abs(z):.1f} 倍噪声尺度），趋势已展开，非早期迹象'
     return _result(
         value, direction, note,
         _series_points(dates, dist),

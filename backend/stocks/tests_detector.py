@@ -8,7 +8,7 @@ from datetime import datetime, time as dt_time, timedelta
 from types import SimpleNamespace
 from unittest.mock import patch
 
-from django.test import TestCase
+from django.test import TestCase, override_settings
 from django.urls import reverse
 from django.utils import timezone
 
@@ -19,6 +19,7 @@ from .models import (
     DetectorDimConfig,
     DetectorRun,
     DetectorSignal,
+    DetectorTuneLog,
     MarketDailySnapshot,
     Stock,
 )
@@ -68,8 +69,9 @@ class RegistryIntegrityTests(TestCase):
                 self.assertTrue(spec['disabled_reason'], f"{spec['key']} 停用但未说明原因")
 
     def test_disabled_dims_are_exactly_the_sourceless_two(self):
+        # 无数据源的两个 + 待回测证明的候选维度 vp_corr（new-dims，默认停用）
         keys = {s['key'] for s in registry.DIMENSIONS if not s['enabled']}
-        self.assertEqual(keys, {'order_imbalance', 'sector_dispersion'})
+        self.assertEqual(keys, {'order_imbalance', 'sector_dispersion', 'vp_corr'})
 
 
 class MathHelperTests(TestCase):
@@ -242,29 +244,47 @@ class CycleAndPersistenceTests(TestCase):
 
 
 class SectorSignalScanTests(TestCase):
-    """端到端（板块路径）：工程化的快照序列应产出恰好 2 票同向的信号。
+    """端到端（板块路径）：工程化的快照序列应产出「价格组 + 资金组」两组同向的信号。
 
-    序列设计（45 日：均线窗口 + 噪声闸门基线，ALG-04 后需要更长历史）：
-    - 前 39 日：净额交替（资金面平稳）、涨跌幅为小幅随机噪声（固定数值，
-      作为各维度「自身历史噪声」的基线）；
-    - 尾 6 日：波动显著收窄 + 每日约 +0.35% 的稳定上行 → vol_compress（压缩且
-      漂移显著）与 ma_relation（均线距离漂移超出自身噪声带）投票 up；
-    - big_order_net 用偶数窗口均值对比，交替净额下漂移=0，不投票。
-    累计涨幅控制在温和带内（距 MA20 < 4%），避免被「趋势已展开」闸门排除。
+    序列设计（80 日：板块资金净额要先攒够 20 个点做「净额对涨跌」的滚动回归残差
+    （#6），再加维度窗口与噪声闸门基线，约需 48 个交易日）：
+    - 前 70 日：涨跌幅为 σ≈0.5% 的固定噪声、净额正负交替且幅度不等（各维度与
+      平静闸门的「自身历史」基线）；
+    - 尾 10 日：涨跌幅收窄为约 +0.35%/日的稳定上行 → 滞后窗口（止于 T−3）判
+      「此前平静」，近 3 日累计约 1% < 2.5σ√3（价格尚未大动）；压缩期漂移 z 与
+      均线距离 z 都在温和带内（#1/#3/#13）→ 价格组投 up；净额由 +1e8 缓慢抬到
+      +2.2e8（残差温和抬升，未超出自身噪声带 2.5 倍，也未超历史 95 分位）
+      → big_order_net 投 up（资金组）。
+    分组投票（#4）后 vol_compress 与 ma_relation 同属价格组只算一票，因此这里
+    必须有资金组的独立一票才出信号。
     """
 
     def setUp(self):
         self.names = ['测试行业']
-        self.nets = [3e8 if i % 2 == 0 else -3e8 for i in range(45)]
-        self.pcts = [
-            -0.18, 0.06, 0.15, -0.08, -0.2, -0.01, 0.07, 0.16, -0.18, -0.19,
-            0.11, 0.07, 0.23, 0.15, -0.02, -0.04, 0.39, -0.04, -0.12, -0.17,
-            0.01, 0.02, -0.05, -0.01, 0.04, 0.1, 0.16, 0.03, -0.27, 0.11,
-            -0.21, -0.03, -0.22, 0.0, -0.12, 0.03, 0.5, -0.01, 0.13,
-        ] + [0.36, 0.32, 0.38, 0.34, 0.36, 0.33]
+        hist = [
+            0.64, 0.72, 0.03, -0.38, -0.55, 0.02, -0.51, -0.72, 0.1, 0.07,
+            0.27, -0.46, 0.0, -0.03, -0.75, 0.27, 0.16, 1.19, 0.1, -0.07,
+            0.62, 0.1, 0.45, -0.18, 0.11, 0.51, 0.35, 0.06, -0.54, 0.22,
+            0.04, 0.36, 0.11, 0.54, -0.03, 0.1, 0.33, -0.54, -0.2, -0.25,
+            0.99, -0.05, 0.33, 0.31, -0.14, -0.78, 0.48, -0.2, 0.36, -0.65,
+            -0.22, 0.63, 0.72, -0.65, -0.67, -0.02, 0.36, 0.08, 0.15, -0.49,
+            0.29, 0.56, -0.22, -0.72, -0.38, 0.38, -0.87, -0.05, -0.5, -0.07,
+        ]
+        self.pcts = hist + [0.35, 0.35, 0.38, 0.36, 0.38, 0.35, 0.34, 0.36, 0.29, 0.35]
+        mags = [
+            4.31, 3.62, 4.58, 2.7, 3.54, 4.86, 3.73, 3.38, 2.81, 3.64,
+            4.87, 2.02, 4.35, 4.46, 4.66, 4.22, 4.43, 3.56, 3.68, 3.28,
+            2.17, 4.61, 3.71, 2.6, 3.51, 3.45, 3.07, 3.04, 3.62, 3.87,
+            3.84, 3.37, 2.08, 2.69, 2.53, 3.75, 4.58, 4.4, 4.39, 4.45,
+            2.77, 4.53, 4.02, 2.25, 2.05, 2.04, 4.27, 2.75, 2.33, 3.87,
+            3.03, 2.21, 2.48, 3.58, 2.5, 2.82, 4.13, 3.36, 2.97, 3.42,
+            2.07, 3.16, 3.26, 2.56, 2.33, 4.7, 3.53, 2.63, 3.82, 4.45,
+        ]
+        self.nets = [(m if i % 2 == 0 else -m) * 1e8 for i, m in enumerate(mags)]
+        self.nets += [1e8] * 4 + [1.2e8, 1.4e8, 1.6e8, 1.8e8, 2e8, 2.2e8]
 
     def _seed_full_history(self):
-        """把完整 30 日序列落成快照（板块宇宙取最近 3 日名字并集）。"""
+        """把完整序列落成快照（板块宇宙取最近 3 日名字并集）。"""
         MarketDailySnapshot.objects.all().delete()
         n = len(self.pcts)
         for i in range(n):
@@ -289,9 +309,15 @@ class SectorSignalScanTests(TestCase):
         sig = DetectorSignal.objects.filter(target_kind='industry', target_code='测试行业').first()
         self.assertIsNotNone(sig, summary)
         self.assertEqual(sig.direction, 'up')
-        self.assertEqual(sig.cycles, 1)
-        voted = [k for k, v in sig.dimensions.items() if v['direction'] == 'up']
-        self.assertGreaterEqual(len(voted), 2, sig.dimensions)
+        # 周期按「方向组同向状态」回看（#2）：尾段此前几天价格组+资金组已同向上行，
+        # 不要求那些天也平静、也落过信号行，所以首个信号日即为维持中
+        self.assertGreater(sig.cycles, 1)
+        self.assertEqual(sig.status, DetectorSignal.STATUS_ACTIVE)
+        counted = {k for k, v in sig.dimensions.items() if v['counted']}
+        # 价格组只由组内最强的一个维度代表计票（vol_compress / ma_relation 之一）
+        self.assertIn('big_order_net', counted, sig.dimensions)
+        self.assertEqual(len(counted), 2, sig.dimensions)
+        self.assertEqual({sig.dimensions[k]['group'] for k in counted}, {'price', 'funds'})
         # 热力图矩阵里有该板块且分值非空
         run = DetectorRun.objects.get(trade_date=_TODAY)
         rows = run.matrix['industry']
@@ -316,21 +342,25 @@ class SectorSignalScanTests(TestCase):
         )
 
 
+@patch('stocks.detector.review._benchmark_bars', lambda cache: {})
 class ReviewTests(TestCase):
     """回看与调参：兑现推进状态、权重有界调整、样本不足不动参数。
 
-    口径（ALG-05）：后续必须凑满 5 个交易日、基期为 T+1 开盘、阈值 k×σ20、
-    命中率与同标的无条件基线比较。每个信号用独立的股票：
+    口径（ALG-05 / #12 v2）：后续必须凑满 5 个交易日、基期为 T+1 开盘、阈值
+    k×σ20×√5、命中率与同标的无条件基线比较。每个信号用独立的股票：
     - 信号日之前造 40 根「历史」日线，用来算 σ20 与基线：history='down' 为稳步
       下行（做多基线≈0，信号兑现即跑赢基线），'up' 为稳步上行（做多基线≈1）；
     - 信号日之后按 moves（相对信号日收盘的涨跌%）造后续日线，开盘=收盘。
+    自动调参（#5）默认关闭；调参用例显式开启，且信号分布在不同交易日——
+    同日同簇的信号只算一个独立样本。基准（沪深300）默认取不到（断网），
+    超额留空；需要基准的用例自己 patch。
     """
 
-    def _make_stock_with_moves(self, code, moves, history='down'):
+    def _make_stock_with_moves(self, code, moves, history='down', base_date=None):
         """造自选股 + 日线。DailyQuote 的派生字段有 NOT NULL 约束，
         必须先算（compute_derived_fields）再存。moves 为信号日后逐日涨跌%。"""
         stock = Stock.objects.create(code=code, name=code)
-        base_date = _TODAY - timedelta(days=10)
+        base_date = base_date or _TODAY - timedelta(days=10)
 
         def _quote(day, close, prev_close=None):
             q = DailyQuote(
@@ -374,17 +404,23 @@ class ReviewTests(TestCase):
             },
         )
 
-    def _seed_hit_signals(self, prefix, n=review.MIN_ADJ_SAMPLES):
+    def _seed_days(self, prefix, moves, history='down', n=review.MIN_ADJ_SAMPLES, same_day=False):
+        """n 个信号；same_day=False 时分布在 n 个不同交易日（n 个独立样本）。"""
         for i in range(n):
-            _stock, base_date = self._make_stock_with_moves(f'6001{i}0', [0.5, 1.2, 2.2, 2.5, 2.8])
-            self._make_signal(f'6001{i}0', base_date)
-        return base_date
+            code = f'{prefix}{i:02d}'
+            base_date = _TODAY - timedelta(days=10 if same_day else 10 + 2 * i)
+            self._make_stock_with_moves(code, moves, history=history, base_date=base_date)
+            self._make_signal(code, base_date)
 
-    def test_hit_confirms_and_adjusts_weight_up(self):
-        self._seed_hit_signals('6001')
+    def _review(self):
         configs = {c['key']: c for c in scan.load_configs()}
         with patch('stocks.trading_calendar.is_trading_day', _trading_true):
-            summary = review.review_pending(_TODAY, configs)
+            return review.review_pending(_TODAY, configs)
+
+    @override_settings(DETECTOR_AUTO_TUNE=True)
+    def test_hit_confirms_and_adjusts_weight_up(self):
+        self._seed_days('6001', [0.5, 1.2, 2.2, 2.5, 2.8])
+        summary = self._review()
         n = review.MIN_ADJ_SAMPLES
         self.assertEqual(summary['reviewed'], n)
         self.assertEqual(summary['hits'], n)
@@ -393,44 +429,50 @@ class ReviewTests(TestCase):
         for sig in DetectorSignal.objects.all():
             self.assertEqual(sig.status, DetectorSignal.STATUS_CONFIRMED)
             self.assertTrue(sig.review_hit)
+            self.assertEqual(sig.review_version, review.REVIEW_VERSION)
+            self.assertEqual(sig.review_date, _TODAY)
         cfg = DetectorDimConfig.objects.get(key='vol_ratio_slope')
         self.assertGreater(cfg.weight, 1.0)
+        # 真正决定投票的噪声闸门放宽（分位下降），且不越下限
+        self.assertLess(cfg.params['noise_pct'], 0.8)
+        self.assertGreaterEqual(cfg.params['noise_pct'], review.TUNE_PARAMS['noise_pct']['bounds'][0])
+        log = DetectorTuneLog.objects.get(dim_key='vol_ratio_slope')
+        self.assertEqual(log.source, DetectorTuneLog.SOURCE_AUTO)
+        self.assertTrue(log.applied)
+        self.assertEqual(log.stats['samples'], n)
 
+    @override_settings(DETECTOR_AUTO_TUNE=True)
     def test_miss_marks_and_adjusts_weight_down(self):
-        # 后续 5 日完整、一路下跌；历史稳步上行，做多基线≈1 → 明显跑输基线
-        for i in range(review.MIN_ADJ_SAMPLES):
-            _stock, base_date = self._make_stock_with_moves(
-                f'6002{i}0', [-0.5, -1.0, -1.5, -1.8, -2.0], history='up')
-            self._make_signal(f'6002{i}0', base_date)
-        configs = {c['key']: c for c in scan.load_configs()}
-        with patch('stocks.trading_calendar.is_trading_day', _trading_true):
-            summary = review.review_pending(_TODAY, configs)
+        # 后续 5 日完整、一路下跌；历史稳步上行，做多基线≈1 → 显著跑输基线
+        self._seed_days('6002', [-0.5, -1.0, -1.5, -1.8, -2.0], history='up')
+        summary = self._review()
         self.assertEqual(summary['hits'], 0)
         self.assertEqual(summary['reviewed'], review.MIN_ADJ_SAMPLES)
         cfg = DetectorDimConfig.objects.get(key='vol_ratio_slope')
         self.assertLess(cfg.weight, 1.0)
+        self.assertGreater(cfg.params['noise_pct'], 0.8)
 
+    @override_settings(DETECTOR_AUTO_TUNE=True)
     def test_weight_adjustment_is_bounded(self):
-        for i in range(review.MIN_ADJ_SAMPLES):
-            _stock, base_date = self._make_stock_with_moves(f'6003{i}0', [3.0, 3.0, 3.0, 3.5, 4.0])
-            self._make_signal(f'6003{i}0', base_date)
+        self._seed_days('6003', [3.0, 3.0, 3.0, 3.5, 4.0])
         DetectorDimConfig.objects.create(
             key='vol_ratio_slope', name='量比斜率', weight=1.98,
             params={'window': 10, 'slope_days': 3, 'mild': 0.15, 'min': 0.02, 'max': 0.5},
         )
-        configs = {c['key']: c for c in scan.load_configs()}
-        with patch('stocks.trading_calendar.is_trading_day', _trading_true):
-            summary = review.review_pending(_TODAY, configs)
+        summary = self._review()
         self.assertTrue(summary['adjustments'])
         cfg = DetectorDimConfig.objects.get(key='vol_ratio_slope')
-        self.assertLessEqual(cfg.weight, 2.0)
+        self.assertLessEqual(cfg.weight, review.WEIGHT_BOUNDS[1])
+        lo, hi = review.TUNE_PARAMS['noise_pct']['bounds']
+        self.assertTrue(lo <= cfg.params['noise_pct'] <= hi)
+        # min 不再被调（被噪声闸门覆盖，调它是空操作）
+        self.assertEqual(cfg.params['min'], 0.02)
 
+    @override_settings(DETECTOR_AUTO_TUNE=True)
     def test_single_sample_does_not_adjust(self):
         _stock, base_date = self._make_stock_with_moves('600004', [2.0, 2.1, 2.2, 2.3, 2.4])
         self._make_signal('600004', base_date)
-        configs = {c['key']: c for c in scan.load_configs()}
-        with patch('stocks.trading_calendar.is_trading_day', _trading_true):
-            summary = review.review_pending(_TODAY, configs)
+        summary = self._review()
         self.assertEqual(summary['reviewed'], 1)
         cfg = DetectorDimConfig.objects.get(key='vol_ratio_slope')
         self.assertEqual(cfg.weight, 1.0)
@@ -439,9 +481,7 @@ class ReviewTests(TestCase):
         # 没有后续行情 → 不把「查不到」当「没兑现」，信号保持待回看
         _stock, base_date = self._make_stock_with_moves('600005', [])
         self._make_signal('600005', base_date)
-        configs = {c['key']: c for c in scan.load_configs()}
-        with patch('stocks.trading_calendar.is_trading_day', _trading_true):
-            summary = review.review_pending(_TODAY, configs)
+        summary = self._review()
         self.assertEqual(summary['reviewed'], 0)
         self.assertEqual(
             DetectorSignal.objects.get().status, DetectorSignal.STATUS_ACTIVE
@@ -574,7 +614,7 @@ class DetectorApiTests(TestCase):
         resp = self.client.get(reverse('detector-config'))
         body = resp.json()
         disabled = {d['key'] for d in body['dims'] if not d['enabled']}
-        self.assertEqual(disabled, {'order_imbalance', 'sector_dispersion'})
+        self.assertEqual(disabled, {'order_imbalance', 'sector_dispersion', 'vp_corr'})
         for dim in body['dims']:
             if not dim['enabled']:
                 self.assertTrue(dim['disabled_reason'])

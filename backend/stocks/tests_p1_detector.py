@@ -7,7 +7,7 @@
 from datetime import timedelta
 from unittest.mock import patch
 
-from django.test import TestCase
+from django.test import TestCase, override_settings
 
 from .detector import dimensions, review, scan, signals
 from .models import DetectorDimConfig, DetectorSignal
@@ -66,11 +66,15 @@ class SectorPriceGapTests(TestCase):
         pcts[5] = None  # 缺口在均线窗口之前
         res = dimensions.eval_ma_relation(self._ctx(pcts), params)
         self.assertTrue(res['available'], res['note'])
-        # level 跨缺口保持：窗口全在缺口之后时，结果与该日涨跌 0% 的完整序列一致
+        # level 跨缺口保持：窗口全在缺口之后时，均线距离与该日涨跌 0% 的完整序列一致
+        # （value 是 z 值，σ 估计少一个样本会略有差别，#13）
         filled = list(pcts)
         filled[5] = 0.0
         clean = dimensions.eval_ma_relation(self._ctx(filled), params)
-        self.assertAlmostEqual(res['value'], clean['value'], places=6)
+        tail = [p['value'] for p in res['series'][-5:]]
+        self.assertEqual(tail, [p['value'] for p in clean['series'][-5:]])
+        self.assertEqual(res['direction'], clean['direction'])
+        self.assertAlmostEqual(res['value'], clean['value'], delta=1.0)
 
     def test_price_series_keeps_level_across_gap(self):
         out = dimensions._sector_price_series({'change_pct': [1.0, None, 1.0]})
@@ -102,6 +106,9 @@ def _scan_patches(targets=None, ctx_builder=None, calm_result=(False, {'reason':
     stack.enter_context(patch.object(scan, 'timezone', _after_close_clock()))
     stack.enter_context(patch.object(scan, 'save_margin_snapshot', return_value=0))
     stack.enter_context(patch.object(scan, 'build_index_context', return_value=(None, '指数日线不可用')))
+    # 回看的相对基准（沪深300）与指数日线预热同样断开上游（#12）
+    stack.enter_context(patch('stocks.market.indices.fetch_index_daily_series',
+                              return_value={'available': False, 'items': []}))
     if targets is not None:
         stack.enter_context(patch.object(scan, '_collect_targets', return_value=targets))
     if ctx_builder is not None:
@@ -171,12 +178,14 @@ class SameDayRerunTests(TestCase):
         return {'kind': t['kind'], 'code': t['code'], 'name': t['name'],
                 'as_of': _TODAY.isoformat()}, ''
 
+    @override_settings(DETECTOR_AUTO_TUNE=True)
     def test_rerun_keeps_adjustments_and_review_counts(self):
-        from .models import DetectorRun
+        from .models import DetectorRun, DetectorTuneLog
         from .tests_detector import ReviewTests
 
         seeder = ReviewTests()
-        seeder._seed_hit_signals('6001')  # MIN_ADJ_SAMPLES 条可回看且全部命中的 active 信号
+        # MIN_ADJ_SAMPLES 条分布在不同交易日、可回看且全部命中的 active 信号
+        seeder._seed_days('6001', [0.5, 1.2, 2.2, 2.5, 2.8])
         n = review.MIN_ADJ_SAMPLES
         with _scan_patches(targets=[]):
             first = scan.run_scan()
@@ -185,6 +194,12 @@ class SameDayRerunTests(TestCase):
         run = DetectorRun.objects.get(trade_date=_TODAY)
         audit = list(run.adjustments)
         self.assertTrue(audit)
+        # 基线/超额/独立样本数落库（#7）
+        self.assertEqual(run.independent_samples, n)
+        self.assertLess(run.baseline_rate, 0.2)
+        self.assertAlmostEqual(run.excess_rate, 1.0 - run.baseline_rate, places=3)
+        self.assertIsNone(run.avg_excess_return)  # 基准断网：超额收益留空而不是编造
+        logs = DetectorTuneLog.objects.count()
 
         with _scan_patches(targets=[]):
             second = scan.run_scan()
@@ -194,6 +209,8 @@ class SameDayRerunTests(TestCase):
         self.assertEqual(run.reviewed_count, n)
         self.assertEqual(run.hit_count, n)
         self.assertEqual(run.hit_rate, 1.0)
+        self.assertEqual(run.independent_samples, n)  # 按判定日重算，不重复累加
+        self.assertEqual(DetectorTuneLog.objects.count(), logs)
 
     def test_rerun_without_signal_deletes_today_row(self):
         old = DetectorSignal.objects.create(**{

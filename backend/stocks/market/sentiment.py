@@ -120,12 +120,18 @@ def fetch_zt_sentiment(ttl=600, force=False):
     return data
 
 
-def _sh_margin_rows():
-    """沪市两融近况：{yyyymmdd: {rz, rq, total}}（元 → 亿）。"""
+def _sh_margin_rows(start=None, end=None):
+    """沪市两融：{yyyymmdd: {rz, rq, total}}（元 → 亿）。
+
+    缺省取最近 _MARGIN_LOOKBACK_DAYS 个自然日；start/end（date）给定时按区间
+    批量拉历史（上交所接口一次返回整段，回补命令 backfill_margin 用，#9）。
+    """
+    end = end or timezone.localdate()
+    start = start or (end - timedelta(days=_MARGIN_LOOKBACK_DAYS))
     df = _safe_df_call(
         ak.stock_margin_sse,
-        start_date=(timezone.localdate() - timedelta(days=_MARGIN_LOOKBACK_DAYS)).strftime('%Y%m%d'),
-        end_date=timezone.localdate().strftime('%Y%m%d'),
+        start_date=start.strftime('%Y%m%d'),
+        end_date=end.strftime('%Y%m%d'),
         source_name='sse_margin',
     )
     if df is None or df.empty or '信用交易日期' not in df.columns or '融资融券余额' not in df.columns:

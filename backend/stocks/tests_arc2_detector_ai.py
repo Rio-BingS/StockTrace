@@ -13,11 +13,17 @@ class DetectorConstantsTests(SimpleTestCase):
 
     def test_values_unchanged(self) -> None:
         # 逐项写死迁移前的数值：常量被误改时这里先失败
+        # 平静闸门 regime 化（#2）后的口径：滞后窗口 + 迟滞 + 价格尚未大动
         self.assertEqual(constants.PRICE_CALM_PARAMS, {
-            'rvol_window': 10, 'cv_window': 5, 'rvol_min': 0.7, 'rvol_max': 1.5,
-            'lookback': 60, 'vol_cv_pct': 0.4, 'amp_pct': 0.4,
+            'rvol_window': 10, 'cv_window': 5, 'rvol_min': 0.7, 'rvol_max': 2.5,
+            'lookback': 60, 'vol_cv_pct': 0.4, 'amp_pct': 0.4, 'exit_pct': 0.6,
+            'calm_lag': 3, 'hysteresis_days': 20, 'regime_min_samples': 20,
+            'move_z': 2.5, 'tr_spike_pct': 0.9,
         })
-        self.assertEqual(constants.SECTOR_CALM_PARAMS, {'window': 5, 'flow_pct': 0.5, 'chg_pct': 0.4})
+        self.assertEqual(constants.SECTOR_CALM_PARAMS, {
+            'window': 5, 'flow_pct': 0.5, 'chg_pct': 0.4, 'exit_pct': 0.6, 'calm_lag': 3,
+            'hysteresis_days': 15, 'regime_min_samples': 8, 'move_z': 2.5, 'flow_spike_pct': 0.95,
+        })
         self.assertEqual((constants.CALM_MIN_AMP_SAMPLES, constants.SECTOR_FLOW_DAYS), (10, 3))
         self.assertEqual(constants.VOTE_MIN_DIMS, 2)
         self.assertEqual(constants.SEVERITY_RULES, {'high_score': 55.0, 'medium_score': 40.0})
@@ -28,16 +34,25 @@ class DetectorConstantsTests(SimpleTestCase):
         self.assertEqual(
             (constants.REVIEW_LOOKBACK, constants.HIT_SIGMA_K, constants.SIGMA_WINDOW, constants.HIT_PCT,
              constants.BASELINE_DAYS, constants.MIN_BASELINE_WINDOWS, constants.REVIEW_MAX_AGE_DAYS,
-             constants.MIN_ADJ_SAMPLES, constants.STEP, constants.WEIGHT_BOUNDS, constants.MIN_SCALE_BOUNDS,
-             constants.WEIGHT_BAND, constants.EXCESS_LOW, constants.EXCESS_HIGH, constants.SEGMENT_HEAD_CYCLES),
-            (5, 1.0, 20, 1.5, 60, 20, 60, 10, 1.05, (0.5, 2.0), (0.5, 2.0), 0.05, -0.15, 0.15, 2),
+             constants.MIN_ADJ_SAMPLES, constants.WEIGHT_BOUNDS, constants.SEGMENT_HEAD_CYCLES),
+            (5, 1.0, 20, 1.5, 60, 20, 60, 10, (0.5, 2.0), 2),
         )
+        # 复盘口径 v2 与自动调参（#5/#12）
+        self.assertEqual(
+            (constants.REVIEW_VERSION, constants.BENCHMARK_CODE, constants.TUNE_WINDOW_DAYS,
+             constants.TUNE_CONFIDENCE, constants.TUNE_PRIOR_N, constants.WEIGHT_GAIN),
+            (2, 'sh000300', 180, 0.95, 20, 3.0),
+        )
+        self.assertEqual(constants.TUNE_PARAMS['noise_pct']['bounds'], (0.6, 0.95))
         self.assertEqual(
             (constants.MIN_PRICE_BARS, constants.MIN_SECTOR_POINTS, constants.MARGIN_VOTE_CODES,
              constants.SECTOR_LOOKBACK_DAYS),
             (30, 12, ('sh000300',), 45),
         )
-        self.assertEqual(constants.NOISE_DEFAULTS, {'noise_pct': 0.8, 'noise_window': 60, 'noise_min': 15})
+        # #10/#1：噪声窗口取满 120（约 250 根上下文时），上限 noise_hi 倍自身噪声带
+        self.assertEqual(constants.NOISE_DEFAULTS,
+                         {'noise_pct': 0.8, 'noise_window': 120, 'noise_min': 15, 'noise_hi': 2.5})
+        self.assertEqual(constants.SIGMA_DEFAULTS, {'sigma_window': 60, 'sigma_min': 20})
         self.assertEqual((constants.COMPRESS_PCT_DEFAULT, constants.SPLIT_RATIO_DEFAULT), (0.25, 1.2))
 
     def test_old_module_names_point_to_constants(self) -> None:
@@ -46,7 +61,7 @@ class DetectorConstantsTests(SimpleTestCase):
         self.assertIs(signals.SEVERITY_RULES, constants.SEVERITY_RULES)
         self.assertEqual(signals.VOTE_MIN_DIMS, constants.VOTE_MIN_DIMS)
         for name in ('REVIEW_LOOKBACK', 'HIT_SIGMA_K', 'SIGMA_WINDOW', 'HIT_PCT', 'MIN_ADJ_SAMPLES',
-                     'WEIGHT_BOUNDS', 'MIN_SCALE_BOUNDS', 'WEIGHT_BAND', 'EXCESS_LOW', 'EXCESS_HIGH'):
+                     'WEIGHT_BOUNDS', 'REVIEW_VERSION', 'BENCHMARK_CODE', 'TUNE_PARAMS'):
             self.assertEqual(getattr(review, name), getattr(constants, name), name)
         for name in ('MIN_PRICE_BARS', 'MIN_SECTOR_POINTS', 'MARGIN_VOTE_CODES', 'SECTOR_LOOKBACK_DAYS'):
             self.assertEqual(getattr(dimensions, name), getattr(constants, name), name)
@@ -55,12 +70,16 @@ class DetectorConstantsTests(SimpleTestCase):
         spec = registry.DIMENSION_MAP
         self.assertEqual(spec['vol_compress']['defaults']['compress_pct'], 0.25)
         self.assertEqual(spec['turnover_pct']['defaults']['split_ratio'], 1.2)
-        for key in ('big_order_net', 'vol_ratio_slope', 'turnover_pct', 'margin_north', 'ma_relation'):
+        for key in ('big_order_net', 'vol_ratio_slope', 'turnover_pct', 'margin_north'):
             for k, v in constants.NOISE_DEFAULTS.items():
                 self.assertEqual(spec[key]['defaults'][k], v, (key, k))
-        self.assertEqual(spec['vol_compress']['defaults']['noise_window'], 60)
+        self.assertEqual(spec['vol_compress']['defaults']['noise_window'], 120)
         self.assertEqual(spec['vol_compress']['defaults']['noise_min'], 15)
-        self.assertNotIn('noise_pct', spec['vol_compress']['defaults'])
+        # 价格类维度改用 σ60 解析 z 闸门（#1/#3/#13），不再走经验分位噪声闸门
+        for key in ('vol_compress', 'ma_relation'):
+            self.assertNotIn('noise_pct', spec[key]['defaults'])
+            for k, v in constants.SIGMA_DEFAULTS.items():
+                self.assertEqual(spec[key]['defaults'][k], v, (key, k))
 
 
 class AiQuotesFinalOnlyTests(TestCase):
