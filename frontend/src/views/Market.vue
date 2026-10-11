@@ -13,14 +13,12 @@ import { CanvasRenderer } from 'echarts/renderers'
 import { marketApi } from '../api/stocks.js'
 import PeriodPicker from '../components/PeriodPicker.vue'
 import { formatPct, formatNum, formatSigned, pctClass } from '../utils/format.js'
-import { formatYiAxis, formatTurnover, formatAmount } from '../utils/marketFormat.js'
+import { formatTurnover, formatAmount } from '../utils/marketFormat.js'
 import { errorMessage } from '../utils/errorMessage.js'
 import { useAsync } from '../composables/useAsync.js'
 import { FLOW_PERIODS } from '../constants/periods.js'
 import { usePolling } from '../composables/usePolling.js'
-import { DOWN, FLAT, UP, trendColor } from '../constants/colors.js'
-// 图表 tooltip / 坐标轴配色统一取自 charts/theme.js（ARC-06）
-import { TOOLTIP_STYLE, AXIS_LABEL_COLOR, AXIS_LINE_COLOR, SPLIT_LINE_COLOR } from '../charts/theme.js'
+import { buildActivityOption, buildFundFlowOption } from '../charts/marketOptions.js'
 
 // 显式组件名：App.vue 的 KeepAlive include 按它匹配，不依赖文件名推断（FEF-15）
 defineOptions({ name: 'Market' })
@@ -76,65 +74,9 @@ const concept = computed(() => fund.value.concept || { available: false, inflow_
 const modules = computed(() => overview.value?.modules || defaultModules)
 const northNet = computed(() => fund.value.northbound_net_buy)
 
-const fundChartOption = computed(() => {
-  const items = mainHist.value.items || []
-  if (!items.length) return {}
-  const dates = items.map(i => String(i.date).slice(0, 10))
-  // 统一按"元"作图：东财 fflow / stock_market_fund_flow 主力净流入单位为元；
-  // 北向兜底源（stock_hsgt_hist_em 净买额）单位为亿元，换算回元
-  const factor = mainHist.value.source === 'eastmoney_hsgt_hist_north' ? 1e8 : 1
-  const main = items.map(i => (i.main_net == null ? null : i.main_net * factor))
-  const colors = main.map(v => trendColor(v))
-  return {
-    backgroundColor: 'transparent',
-    tooltip: {
-      trigger: 'axis',
-      ...TOOLTIP_STYLE,
-      valueFormatter: (v) => formatAmount(v, { signed: true }),
-    },
-    grid: { left: '8%', right: '4%', top: '12%', bottom: '18%' },
-    xAxis: {
-      type: 'category',
-      data: dates,
-      axisLabel: { color: AXIS_LABEL_COLOR, fontSize: 11, rotate: 30 },
-      axisLine: { lineStyle: { color: AXIS_LINE_COLOR } },
-    },
-    yAxis: {
-      type: 'value',
-      axisLabel: { color: AXIS_LABEL_COLOR, fontSize: 11, formatter: formatYiAxis },
-      splitLine: { lineStyle: { color: SPLIT_LINE_COLOR } },
-    },
-    series: [{
-      name: '主力净流入',
-      type: 'bar',
-      data: main,
-      itemStyle: { color: (p) => colors[p.dataIndex] || FLAT },
-    }],
-  }
-})
-
-const activityChartOption = computed(() => {
-  const a = activity.value
-  const up = a.up ?? 0
-  const down = a.down ?? 0
-  const flat = a.flat ?? 0
-  if (!up && !down && !flat) return {}
-  return {
-    backgroundColor: 'transparent',
-    tooltip: { trigger: 'item', ...TOOLTIP_STYLE },
-    series: [{
-      type: 'pie',
-      radius: ['42%', '68%'],
-      center: ['50%', '52%'],
-      label: { color: '#ccc', fontSize: 12 },
-      data: [
-        { name: '上涨', value: up, itemStyle: { color: UP } },
-        { name: '下跌', value: down, itemStyle: { color: DOWN } },
-        { name: '平盘', value: flat, itemStyle: { color: FLAT } },
-      ],
-    }],
-  }
-})
+// 图表配置拼装见 charts/marketOptions（ARC-09）
+const fundChartOption = computed(() => buildFundFlowOption(mainHist.value))
+const activityChartOption = computed(() => buildActivityOption(activity.value))
 
 async function loadMarket() {
   loading.value = true
