@@ -94,3 +94,22 @@ class EnvelopeTests(SimpleTestCase):
             envelope([], key_order=('items', 'meta'))
         with self.assertRaises(ValueError):
             envelope([], key_order=('items', 'pagination', 'meta', 'ghost'))
+
+
+class ResolvePeriodYtdTests(SimpleTestCase):
+    """FULL_PRESETS 含 ytd，但 _PRESET_DAYS 缺项导致 KeyError（大盘资金流/北向 ?period=ytd 502）。"""
+
+    def test_ytd_preset_no_longer_keyerror(self):
+        from .market.periods import FULL_PRESETS, resolve_period
+
+        today = date(2026, 9, 4)
+        w = resolve_period(lambda k: {'period': 'ytd'}.get(k), FULL_PRESETS, today=today)
+        self.assertEqual((w.preset, w.start, w.end), ('ytd', date(2026, 1, 1), today))
+
+    def test_market_flow_ytd_endpoint_resolves(self):
+        from unittest import mock
+
+        with mock.patch('stocks.views.market.get_market_fund_flow_window', return_value={'ok': 1}) as m:
+            r = self.client.get('/api/market/market-flow/?period=ytd')
+        self.assertEqual(r.status_code, 200)
+        self.assertEqual(m.call_args.args[0].preset, 'ytd')

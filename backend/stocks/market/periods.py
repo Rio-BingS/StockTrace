@@ -11,7 +11,7 @@
 
 from __future__ import annotations
 
-from datetime import datetime, timedelta
+from datetime import date, datetime, timedelta
 
 from django.utils import timezone
 
@@ -81,6 +81,9 @@ def resolve_period(params_get, allowed, default='1m', allow_custom=True,
 
     if preset not in allowed:
         raise ValueError(f'period 仅支持 {"/".join(allowed)}')
+    if preset == 'ytd':
+        # 旧实现 _PRESET_DAYS 缺 ytd，FULL_PRESETS 声明支持却抛 KeyError（→502）
+        return PeriodWindow(preset, date(today.year, 1, 1), today)
     days = _PRESET_DAYS[preset]
     start = today if days == 1 else today - timedelta(days=days - 1)
     return PeriodWindow(preset, start, today)
