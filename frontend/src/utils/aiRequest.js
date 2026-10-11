@@ -1,4 +1,5 @@
 // AI 请求的前端公共小工具（AIX-04/05）
+import { isCanceled } from './errorMessage.js'
 
 // 免责声明以后端返回的 disclaimer 为准；仅在响应缺字段时兜底
 export const AI_DISCLAIMER_FALLBACK = 'AI 生成内容，仅供参考，不构成任何投资建议'
@@ -8,10 +9,9 @@ export function aiDisclaimer(data) {
   return typeof text === 'string' && text.trim() ? text : AI_DISCLAIMER_FALLBACK
 }
 
-// 主动取消（AbortController.abort）的请求：调用方应静默丢弃，不提示错误
-export function isCanceled(err) {
-  return !!err && (err.code === 'ERR_CANCELED' || err.name === 'CanceledError' || err.name === 'AbortError')
-}
+// 主动取消（AbortController.abort）的请求：调用方应静默丢弃，不提示错误；
+// 判定与通用 errorMessage.js 共用一份，避免两处规则漂移
+export { isCanceled }
 
 const AI_STATUS_TEXT = {
   400: '请求参数有误',
@@ -25,7 +25,8 @@ const AI_STATUS_TEXT = {
 
 /**
  * AI 请求错误 → 一行可展示的文字（AIX-05）；永远返回字符串，不会出现 [object Object]。
- * 合并后可替换为前端通用的 errorMessage()；先认拦截器挂好的 err.userMessage。
+ * 经 api 实例发出的请求已由拦截器用通用 errorMessage() 挂好 err.userMessage，
+ * 这里优先用它；下面的解析只兜底未经拦截器的错误（保留 AI 场景专用文案）。
  */
 export function aiErrorText(err) {
   if (!err) return '请求失败'
