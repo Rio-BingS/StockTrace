@@ -1074,7 +1074,12 @@ def eval_turnover_pct(ctx, params):
     raw = raws[-1]
     last = pct_series[-1]
     value, direction, note = _gated(raw, raws[:-1], params)
-    # 位置闸门：分位 >70 时再抬升就是「热」而非「微变」；<30 时再降温即冰点
+    # 位置闸门：分位 >70 时再抬升就是「热」而非「微变」；<30 时再降温即冰点。
+    # 依据复核（2026-10，回测原型 40 股 + 5 指数、3 年）：时序上「自身分位 5 日
+    # 抬升」对后续价格并不反向（个股约中性、指数同向），与截面「低换手异象/
+    # 异常换手跑输」（月频、比较的是股票之间）不是同一个量，方向语义保留；
+    # 被 70/30 拦下的样本在回测里也不比放行的差，但外部实证（换手倒 U 形、
+    # 放量上涨后跑输）支持「高位不再计 up」，作为先验约束保留，样本足够后再校准
     if direction == 'up' and last > params['pos_cap']:
         direction, note = None, f'分位已达 {last:.0f}，超出温和区间'
     elif direction == 'down' and last < params['pos_floor']:

@@ -243,3 +243,34 @@ class LongContextNoiseTests(SimpleTestCase):
     def test_70_and_250_bars(self):
         self.assertLess(self._rate(70, 400), 0.05)
         self.assertLess(self._rate(250, 150), 0.05)
+
+
+class TurnoverDirectionReviewTests(SimpleTestCase):
+    """换手率方向语义复核后保留（见 eval_turnover_pct 位置闸门注释）：
+
+    自身分位从低位温和抬升 = up；抬升到 pos_cap 以上不再计 up；降到 pos_floor
+    以下不再计 down。只验证方向与位置闸门（关闭噪声闸门以隔离）。
+    """
+
+    def _res(self, tail):
+        base = [100 + (i * 37 % 50) for i in range(64)]
+        vols = base + tail
+        n = len(vols)
+        dates = [str(i) for i in range(n)]
+        ctx = {'kind': 'index', 'code': 'sh000001', 'name': 'x', 'dates': dates,
+               'volume': vols, 'close': [1.0] * n, 'as_of': dates[-1]}
+        return D.eval_turnover_pct(ctx, _params('turnover_pct', noise_pct=0))
+
+    def test_rise_from_low_votes_up(self):
+        res = self._res([105, 104, 103, 120, 125, 128])     # 分位约 8 → 58
+        self.assertEqual(res['direction'], 'up', res['note'])
+
+    def test_rise_into_hot_zone_does_not_vote_up(self):
+        res = self._res([125, 124, 123, 140, 143, 146])     # 分位约 48 → 92
+        self.assertIsNone(res['direction'])
+        self.assertIn('分位已达', res['note'])
+
+    def test_fall_into_cold_zone_does_not_vote_down(self):
+        res = self._res([115, 112, 110, 101, 100.5, 100.2])  # 分位约 28 → 2
+        self.assertIsNone(res['direction'])
+        self.assertIn('分位已低至', res['note'])
