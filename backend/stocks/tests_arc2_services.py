@@ -201,3 +201,22 @@ class FetchStockAllDataNameTests(TestCase):
         self.assertTrue(any('600000' in m and 'name down' in m for m in cm.output))
         stock.refresh_from_db()
         self.assertEqual(stock.name, '600000')
+
+
+class DailySummaryLocalDateTests(TestCase):
+    """收盘汇总的日期区间按北京时间取今天（DAT-18 口径，防回退到 timezone.now().date()）"""
+
+    def test_summary_range_uses_local_date(self):
+        from stocks import jobs
+        from stocks.models import Stock
+
+        Stock.objects.create(code='600000', name='浦发银行')
+        utc_now = datetime(2026, 9, 7, 17, 0, tzinfo=dt_timezone.utc)  # 北京 09-08 01:00
+        with patch('django.utils.timezone.now', return_value=utc_now), \
+                patch('stocks.trading_calendar.is_trading_day', return_value=True), \
+                patch('stocks.jobs.fetch_daily_data') as daily, \
+                patch('stocks.jobs.fetch_minute_data'), \
+                patch('stocks.jobs.time.sleep'):
+            jobs.fetch_daily_summary()
+        self.assertEqual(daily.call_args.kwargs,
+                         {'start_date': '20260905', 'end_date': '20260908'})
