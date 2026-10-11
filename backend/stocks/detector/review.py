@@ -35,31 +35,27 @@ from django.utils import timezone
 
 from ..models import DailyQuote, DetectorDimConfig, DetectorSignal
 from ..trading_calendar import recent_trading_days
+# 阈值数值集中在 constants.py（ARC-06），这里保留同名引用，review.X 旧路径照常可用
+from .constants import (
+    BASELINE_DAYS,
+    EXCESS_HIGH,
+    EXCESS_LOW,
+    HIT_PCT,
+    HIT_SIGMA_K,
+    MIN_ADJ_SAMPLES,
+    MIN_BASELINE_WINDOWS,
+    MIN_SCALE_BOUNDS,
+    REVIEW_LOOKBACK,
+    REVIEW_MAX_AGE_DAYS,
+    SEGMENT_HEAD_CYCLES as _SEGMENT_HEAD_CYCLES,
+    SIGMA_WINDOW,
+    STEP,
+    WEIGHT_BAND,
+    WEIGHT_BOUNDS,
+)
 from .dimensions import _std, load_sector_snapshots
 
 logger = logging.getLogger(__name__)
-
-# 回看窗口与兑现口径（见模块 docstring）
-REVIEW_LOOKBACK = 5
-HIT_SIGMA_K = 1.0       # 兑现阈值 = k × σ20
-SIGMA_WINDOW = 20       # σ 取 T 日及之前 20 个日涨跌幅
-HIT_PCT = 1.5           # σ 不可得时的兜底阈值（%）
-BASELINE_DAYS = 60      # 无条件基线的起点数上限（T 日之前）
-MIN_BASELINE_WINDOWS = 20
-# 待回看信号只追溯这么多自然日：数据缺口长期补不齐的信号不再每天重试
-REVIEW_MAX_AGE_DAYS = 60
-# 样本不足不动参数；同标的连续信号只计段首，样本量门槛相应提高
-MIN_ADJ_SAMPLES = 10
-# 有界调整：步长 5%，权重/阈值的绝对边界
-STEP = 1.05
-WEIGHT_BOUNDS = (0.5, 2.0)
-MIN_SCALE_BOUNDS = (0.5, 2.0)
-# 超额命中率（命中率 − 基线）：±WEIGHT_BAND 之外才调权重；低于 EXCESS_LOW →
-# 投票太宽松（提高阈值），高于 EXCESS_HIGH → 太苛刻（放宽）
-WEIGHT_BAND = 0.05
-EXCESS_LOW, EXCESS_HIGH = -0.15, 0.15
-# 段首 active 信号的周期数（周期 1 是 watching，2 是首个 active 日）
-_SEGMENT_HEAD_CYCLES = 2
 
 
 def _next_trading_days(after, n):

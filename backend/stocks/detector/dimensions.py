@@ -15,6 +15,16 @@
 from __future__ import annotations
 
 from ..models import DailyQuote, MarketDailySnapshot
+# 阈值数值集中在 constants.py（ARC-06），这里保留同名引用，dimensions.X 旧路径照常可用
+from .constants import (
+    COMPRESS_PCT_DEFAULT,
+    MARGIN_VOTE_CODES,
+    MIN_PRICE_BARS,
+    MIN_SECTOR_POINTS,
+    NOISE_DEFAULTS,
+    SECTOR_LOOKBACK_DAYS,
+    SPLIT_RATIO_DEFAULT,
+)
 
 # ============================================================
 # 数学小工具（只依赖纯 Python，方便离线单测）
@@ -106,8 +116,8 @@ def _noise_gate(raw, history, params):
     q = params.get('noise_pct')
     if not q:
         return ''
-    window = int(params.get('noise_window', 60))
-    need = int(params.get('noise_min', 15))
+    window = int(params.get('noise_window', NOISE_DEFAULTS['noise_window']))
+    need = int(params.get('noise_min', NOISE_DEFAULTS['noise_min']))
     sample = [abs(v) for v in history if v is not None][-window:]
     if len(sample) < need:
         return f'噪声基线样本不足（{len(sample)}/{need}），不投票'
@@ -167,15 +177,8 @@ def _series_points(dates, values, count=20):
 # 对象序列构建（scan 与 signal 详情共用）
 # ============================================================
 
-# index/stock 目标的最低历史门槛：低于它连平静判定的滚动窗口都凑不齐，
-# 整个对象跳过（如实在 run.degraded 里记录原因）。
-MIN_PRICE_BARS = 30
-# sector 目标（快照派生序列）的最低有效天数：覆盖 ma20/波动窗口的底线。
-MIN_SECTOR_POINTS = 12
-# 融资余额只在这些指数上投票（ALG-09）：两融是沪深合计的全市场口径，对 5 个
-# 指数完全相同，逐个投票等于同一事实计 5 票、信号高度相关并在回看里被当成独立
-# 样本；沪深300 横跨沪深两市，作为全市场的代表。
-MARGIN_VOTE_CODES = ('sh000300',)
+# 最低历史门槛 MIN_PRICE_BARS / MIN_SECTOR_POINTS 与融资余额投票范围
+# MARGIN_VOTE_CODES（ALG-09）见 constants.py。
 
 
 def build_index_context(code, name):
@@ -258,9 +261,6 @@ def _price_ctx(kind, code, name, items):
         'volume': [it.get('volume') for it in items],
         'as_of': items[-1]['date'],
     }
-
-
-SECTOR_LOOKBACK_DAYS = 45
 
 
 def _sector_kind_db(kind):
@@ -509,11 +509,11 @@ def eval_vol_compress(ctx, params):
     # 详情曲线：k 日滚动漂移（带方向的量），压缩状态用 note 表达
     series = _series_points(ctx['dates'], drift_series)
 
-    base = [w for w in widths[:-1] if w is not None][-int(params.get('noise_window', 60)):]
-    need = int(params.get('noise_min', 15))
+    base = [w for w in widths[:-1] if w is not None][-int(params.get('noise_window', NOISE_DEFAULTS['noise_window'])):]
+    need = int(params.get('noise_min', NOISE_DEFAULTS['noise_min']))
     if len(base) < need:
         return _unavailable(f'波动基线样本不足（{len(base)}/{need}）')
-    thr = _percentile(base, params.get('compress_pct', 0.25))
+    thr = _percentile(base, params.get('compress_pct', COMPRESS_PCT_DEFAULT))
     if widths[-1] > thr:
         return _result(0.0, None, '波动未压缩，不构成蓄势形态', series)
 
@@ -584,7 +584,7 @@ def eval_turnover_pct(ctx, params):
     # 时成交量整体抬升一个台阶，分位会把股本扩大误读成关注度回升，维度暂停
     # 直到断层滚出 window 日窗口
     if ctx.get('kind') == 'stock':
-        broke = _share_basis_break(ctx, window, params.get('split_ratio', 1.2))
+        broke = _share_basis_break(ctx, window, params.get('split_ratio', SPLIT_RATIO_DEFAULT))
         if broke:
             return _unavailable(f'{broke} 前后疑似送转/股本变动（量价基准断层），换手率分位暂停至滚出窗口')
 

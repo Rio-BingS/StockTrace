@@ -4,7 +4,7 @@
 相对平稳区间时，监测其他维度的渐进变化」。平静是前提条件（过滤宇宙），
 不是投票维度——把它放进投票会稀释「≥2 维同向」的方向性语义。
 
-阈值依据（平静参数不参与自动迭代，理由在文件尾）：
+阈值依据（数值在 constants.py；平静参数不参与自动迭代，理由在文件尾）：
 - RVOL 0.7~1.5：任务明确给定的平静区间；
 - 量能波动收窄 / 振幅低位：取自身历史的 40 分位——「低位」必须是相对
   自己的历史而言（高波动股与低波动股的「平静」标准不同）。三个条件同时
@@ -14,24 +14,13 @@
 
 from __future__ import annotations
 
+from .constants import (
+    CALM_MIN_AMP_SAMPLES,
+    PRICE_CALM_PARAMS,
+    SECTOR_CALM_PARAMS,
+    SECTOR_FLOW_DAYS,
+)
 from .dimensions import _mean, _percentile, _std
-
-# 指数/个股：成交量口径的平静判定参数
-PRICE_CALM_PARAMS = {
-    'rvol_window': 10,   # RVOL 基期：前 N 日均量
-    'cv_window': 5,      # 量能波动收窄的「周尺度」窗口
-    'rvol_min': 0.7,     # 当日量 / 前10日均量 下限
-    'rvol_max': 1.5,     # 上限：超过 1.5 已经「不平静」
-    'lookback': 60,      # 自身历史分位的取样窗口
-    'vol_cv_pct': 0.4,   # 近5日量能变异系数 ≤ 自身历史 40 分位 → 收窄
-    'amp_pct': 0.4,      # 当日振幅 ≤ 自身历史 40 分位 → 振幅低位
-}
-# 板块：快照口径（无成交量）的平静判定参数
-SECTOR_CALM_PARAMS = {
-    'window': 5,
-    'flow_pct': 0.5,   # 近3日平均|净额| ≤ 自身历史中位数 → 资金面平稳
-    'chg_pct': 0.4,    # 近5日涨跌幅标准差 ≤ 自身历史 40 分位 → 波动低位
-}
 
 
 def _rvol(volumes, i, window=10):
@@ -105,7 +94,7 @@ def is_calm_price(ctx, params=None):
         return False, {'reason': '当日振幅缺失，无法判定振幅低位'}
     amp_now = amps[-1]
     amp_base = [a for a in amps[:-1][-lookback:] if a is not None]
-    if len(amp_base) < 10:
+    if len(amp_base) < CALM_MIN_AMP_SAMPLES:
         return False, {'reason': '振幅样本不足'}
     if amp_now > _percentile(amp_base, params['amp_pct']):
         reasons.append(f'振幅 {amp_now:.2f}% 非低位')
@@ -125,16 +114,17 @@ def is_calm_sector(ctx, params=None):
     nets, pcts = ctx.get('net') or [], ctx.get('change_pct') or []
     window = params['window']
 
-    if len(nets) < window + 3:
+    flow_days = SECTOR_FLOW_DAYS
+    if len(nets) < window + flow_days:
         return False, {'reason': '净额快照窗口不足'}
 
     # 近 3 日平均|净额| 对比自身滚动 3 日均值的历史分位；基线不含当前 3 日窗口（ALG-10）
     roll = []
-    for i in range(len(nets) - 3):
-        win = nets[i:i + 3]
+    for i in range(len(nets) - flow_days):
+        win = nets[i:i + flow_days]
         if all(v is not None for v in win):
             roll.append(_mean([abs(v) for v in win]))
-    tail = nets[-3:]
+    tail = nets[-flow_days:]
     if any(v is None for v in tail) or not roll:
         return False, {'reason': '净额窗口存在缺失快照'}
     flow_now = _mean([abs(v) for v in tail])

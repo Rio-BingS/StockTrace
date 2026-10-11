@@ -28,9 +28,12 @@ params 约定：
 from __future__ import annotations
 
 from . import dimensions as _dims
-
-# 噪声闸门默认值（各价量维度共用，见模块 docstring）
-_NOISE = {'noise_pct': 0.8, 'noise_window': 60, 'noise_min': 15}
+# 噪声闸门默认值（各价量维度共用，见模块 docstring），数值在 constants.py
+from .constants import (
+    COMPRESS_PCT_DEFAULT,
+    NOISE_DEFAULTS as _NOISE,
+    SPLIT_RATIO_DEFAULT,
+)
 
 DIMENSIONS = [
     {
@@ -67,7 +70,7 @@ DIMENSIONS = [
             '相对窗口波动显著（t≥2.13）；未压缩不投票。'
         ),
         'defaults': {'window': 5, 'mild': 2.0, 'min': 0.2, 'max': 6.0,
-                     'compress_pct': 0.25, 'drift_z': 2.13,
+                     'compress_pct': COMPRESS_PCT_DEFAULT, 'drift_z': 2.13,
                      'noise_window': _NOISE['noise_window'], 'noise_min': _NOISE['noise_min']},
         'evaluate': _dims.eval_vol_compress,
     },
@@ -82,7 +85,7 @@ DIMENSIONS = [
             '指数无股本概念，为活跃度代理。分位从低位缓升（不热）/高位缓降（不死）才投票。'
         ),
         'defaults': {'window': 60, 'delta_days': 5, 'mild': 30.0, 'min': 8.0, 'max': 60.0,
-                     'pos_cap': 70.0, 'pos_floor': 30.0, 'split_ratio': 1.2, **_NOISE},
+                     'pos_cap': 70.0, 'pos_floor': 30.0, 'split_ratio': SPLIT_RATIO_DEFAULT, **_NOISE},
         'evaluate': _dims.eval_turnover_pct,
     },
     {
