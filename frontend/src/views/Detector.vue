@@ -276,9 +276,10 @@ onUnmounted(() => { signalsGuard.abort(); heatmapGuard.abort() })
           </table>
         </div>
         <p class="hint">
-          迭代规则：每交易日回看 5 个交易日前信号（兑现=方向上最大有利波动 ≥ {{ config.review_rules.hit_pct }}%），
-          命中主导的维度权重 ×1.05、未兑现主导 ×0.95（边界 [{{ config.review_rules.weight_bounds[0] }}, {{ config.review_rules.weight_bounds[1] }}]），
-          投票门槛随维度命中率有界微调；每次调整都记录在扫描日志里。
+          迭代规则：每交易日回看 {{ config.review_rules.lookback_days }} 个交易日前的维持信号（后续交易日凑齐才判定；以次日开盘为基期，
+          方向上先达到 {{ config.review_rules.hit_sigma_k }}×σ20 且不利波动未先触及同等幅度记为兑现，σ 不可得时按 {{ config.review_rules.hit_pct }}%），
+          命中率与同标的历史基线比较，明显跑赢/跑输的维度权重 ×1.05 / ÷1.05（边界 [{{ config.review_rules.weight_bounds[0] }}, {{ config.review_rules.weight_bounds[1] }}]），
+          投票门槛有界微调；每次调整都记录在扫描日志里。
         </p>
         <div v-if="config.runs.length" class="table-wrap">
           <table>
