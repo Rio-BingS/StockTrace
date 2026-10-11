@@ -178,12 +178,21 @@ def _sort_matrix_key(row):
     return max(values) if values else 0.0
 
 
-def run_scan(trade_date=None):
-    """执行一次完整扫描；返回摘要 dict（也作为命令行输出）。"""
+def run_scan(trade_date=None, calendar=None):
+    """执行一次完整扫描；返回摘要 dict（也作为命令行输出）。
+
+    calendar：可注入交易日历（带三态 is_trading_day(day) 的对象），透传给守卫、
+    周期计数与回看；缺省走 stocks.trading_calendar（生产行为不变）。
+    """
     trade_date = trade_date or timezone.localdate()
 
     # ---- 守卫（与快照落库同一时纪律）----
-    from ..trading_calendar import is_trading_day
+    if calendar is not None:
+        is_trading_day = calendar.is_trading_day
+    else:
+        from ..trading_calendar import is_trading_day
+    # 只在注入时透传，缺省调用与旧签名完全一致（测试替身不必认识 calendar）
+    cal_kwargs = {'calendar': calendar} if calendar is not None else {}
 
     if not is_trading_day(trade_date):
         return {'skipped': 'non_trading_day', 'date': trade_date.isoformat()}
@@ -243,7 +252,7 @@ def run_scan(trade_date=None):
         calm_count += 1
 
         try:
-            signal_data, dim_results = signals.evaluate_target(ctx, configs)
+            signal_data, dim_results = signals.evaluate_target(ctx, configs, **cal_kwargs)
         except Exception as e:  # 边界：单对象异常只降级自己
             logger.exception("探测器维度评估异常 %s", target_key)
             degraded.append({'target': target_key, 'reason': f'维度评估异常: {e}'})
@@ -298,7 +307,9 @@ def run_scan(trade_date=None):
         if cleared_count:
             message_parts.append(f'重跑清除当日失效信号 {cleared_count} 条')
 
-        review_summary = review.review_pending(trade_date, {c['key']: c for c in configs})
+        review_summary = review.review_pending(
+            trade_date, {c['key']: c for c in configs}, **cal_kwargs,
+        )
         adjustments = review_summary.pop('adjustments', [])
         note = review_summary.pop('note', '')
         if note:

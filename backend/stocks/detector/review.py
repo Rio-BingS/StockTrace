@@ -34,7 +34,7 @@ from datetime import timedelta
 from django.utils import timezone
 
 from ..models import DailyQuote, DetectorDimConfig, DetectorSignal
-from ..trading_calendar import recent_trading_days
+from ..trading_calendar import MAX_LOOKBACK_DAYS, recent_trading_days
 # 阈值数值集中在 constants.py（ARC-06），这里保留同名引用，review.X 旧路径照常可用
 from .constants import (
     BASELINE_DAYS,
@@ -58,9 +58,16 @@ from .dimensions import _std, load_sector_snapshots
 logger = logging.getLogger(__name__)
 
 
-def _next_trading_days(after, n):
-    """after 之后（不含）的 n 个交易日，升序；日历给不出结论（None/异常）返回 None。"""
-    from ..trading_calendar import is_trading_day
+def _next_trading_days(after, n, calendar=None):
+    """after 之后（不含）的 n 个交易日，升序；日历给不出结论（None/异常）返回 None。
+
+    calendar：可注入的交易日历（带三态 is_trading_day(day) 的对象，离线回测用），
+    缺省走 stocks.trading_calendar。
+    """
+    if calendar is not None:
+        is_trading_day = calendar.is_trading_day
+    else:
+        from ..trading_calendar import is_trading_day
 
     days, day = [], after
     for _ in range(n * 3 + 15):
@@ -128,14 +135,18 @@ def _baseline(bars, direction, thr, base_is_open):
     return hits / total
 
 
-def _evaluate_bars(signal, before, after, base_is_open):
+def _evaluate_bars(signal, before, after, base_is_open, calendar=None):
     """统一判定：before = T 及之前的 bars（末根必须是 T），after = T 之后的 bars。
 
     返回 None（保持待回看）或 dict(hit, hit_date, mfe, thr, baseline)。
+    calendar 见 _next_trading_days（缺省不透传，测试 patch 旧签名照常生效）。
     """
     if not before or before[-1][0] != signal.trade_date:
         return None
-    expected = _next_trading_days(signal.trade_date, REVIEW_LOOKBACK)
+    if calendar is not None:
+        expected = _next_trading_days(signal.trade_date, REVIEW_LOOKBACK, calendar=calendar)
+    else:
+        expected = _next_trading_days(signal.trade_date, REVIEW_LOOKBACK)
     window = after[:REVIEW_LOOKBACK]
     # 后续必须是连续的 5 个交易日（数据缺口/不足都保持待回看）
     if expected is None or [b[0] for b in window] != expected:
@@ -224,13 +235,28 @@ def _sector_outcome(signal, cache):
     return _evaluate_bars(signal, before, after, base_is_open=False)
 
 
-def review_pending(scan_date, configs):
+def _recent_days(n, end_date, calendar=None):
+    """截止 end_date（含）的 n 个交易日升序；calendar 为可注入日历，缺省走全局日历。"""
+    if calendar is None:
+        return recent_trading_days(n, end_date=end_date)
+    days, day = [], end_date
+    for _ in range(MAX_LOOKBACK_DAYS):
+        if calendar.is_trading_day(day):
+            days.append(day)
+            if len(days) == n:
+                return days[::-1]
+        day -= timedelta(days=1)
+    return None
+
+
+def review_pending(scan_date, configs, calendar=None):
     """回看并调参。返回 summary（写进 DetectorRun）。
 
     只回看 status=active 的信号：watching（周期 1）从未满足「维持」，
     不算一次真正的信号假设，不参与命中率统计，也不调参。
+    calendar：可注入交易日历（回看截止日计算用），缺省行为不变。
     """
-    days = recent_trading_days(REVIEW_LOOKBACK + 1, end_date=scan_date)
+    days = _recent_days(REVIEW_LOOKBACK + 1, scan_date, calendar)
     if days is None:
         return {'reviewed': 0, 'hits': 0, 'hit_rate': None,
                 'note': '交易日历不可用，本轮跳过回看'}

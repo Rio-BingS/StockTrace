@@ -32,13 +32,19 @@ def _as_date(value):
     return _date.fromisoformat(value) if isinstance(value, str) else value
 
 
-def _previous_trading_days(before_date, n):
+def _previous_trading_days(before_date, n, calendar=None):
     """before_date 之前（不含）的最近 n 个交易日，降序；日历给不出结论时返回 None。
 
     is_trading_day 是三态：None（未知）或抛异常都视为「日历不可用」——旧实现在
     这种情况下把自然日当交易日推进（ALG-15），节假日会被当成「当天没信号」而断链。
+
+    calendar：可注入的交易日历（任何带三态 is_trading_day(day) 方法的对象），
+    离线回测用本地日线日期构造，不触网；缺省走 stocks.trading_calendar。
     """
-    from ..trading_calendar import is_trading_day
+    if calendar is not None:
+        is_trading_day = calendar.is_trading_day
+    else:
+        from ..trading_calendar import is_trading_day
 
     days = []
     day = before_date
@@ -59,7 +65,7 @@ def _previous_trading_days(before_date, n):
     return None
 
 
-def _count_cycles(target_kind, target_code, direction, before_date):
+def _count_cycles(target_kind, target_code, direction, before_date, calendar=None):
     """信号日之前连续多少个交易日存在同方向信号行（周期维持计数）。
 
     为什么按信号行而非「微变状态」计数：状态没有被持久化，信号行本身就是
@@ -68,9 +74,9 @@ def _count_cycles(target_kind, target_code, direction, before_date):
 
     一次查询取回看窗口内该对象同方向的信号日期，再与交易日序列逐日比对
     （PERF-08：旧实现逐日单查，每个对象最多 20 次查询）。交易日历不可用时
-    返回 None（未知），不再按自然日推进（ALG-15）。
+    返回 None（未知），不再按自然日推进（ALG-15）。calendar 见 _previous_trading_days。
     """
-    days = _previous_trading_days(before_date, _CYCLE_LOOKBACK)
+    days = _previous_trading_days(before_date, _CYCLE_LOOKBACK, calendar=calendar)
     if days is None:
         return None
     present = set(
@@ -100,8 +106,13 @@ def _severity(score, cycles, vote_count):
     return DetectorSignal.SEVERITY_LOW
 
 
-def evaluate_target(ctx, configs):
+def evaluate_target(ctx, configs, cycle_counter=None, calendar=None):
     """对一个已通过平静判定的对象跑全部适用维度并投票。
+
+    注入点（离线回测用，缺省行为不变）：
+    - cycle_counter(target_kind, target_code, direction, before_date)：替代查库的
+      _count_cycles（回测用内存信号表），返回值语义相同（None=日历不可用）；
+    - calendar：只在走默认 _count_cycles 时透传给它的交易日历。
 
     返回 (signal_data | None, dim_results)：
     - signal_data 为 None 表示当日不构成信号（票数不足 / 有反向票），
@@ -151,7 +162,14 @@ def evaluate_target(ctx, configs):
         sum(abs(res['value'] or 0.0) * res['weight'] for _k, res in votes) / total_w, 1
     ) if total_w else 0.0
 
-    prev_cycles = _count_cycles(ctx['kind'], ctx['code'], direction, _as_date(ctx['as_of']))
+    if cycle_counter is None:
+        # 运行时按模块属性查找：测试 patch signals._count_cycles 照常生效
+        cycle_kwargs = {'calendar': calendar} if calendar is not None else {}
+        prev_cycles = _count_cycles(
+            ctx['kind'], ctx['code'], direction, _as_date(ctx['as_of']), **cycle_kwargs,
+        )
+    else:
+        prev_cycles = cycle_counter(ctx['kind'], ctx['code'], direction, _as_date(ctx['as_of']))
     # 日历不可用：周期无法确认，按 1 记（只会少算），并让 scan 记一条降级
     cycles = (prev_cycles or 0) + 1
     signal_data = {
