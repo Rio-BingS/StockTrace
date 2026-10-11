@@ -566,6 +566,11 @@ class FinalBarReadersTests(TestCase):
         self.assertEqual(len(ctx['close']), MIN_PRICE_BARS)
         self.assertNotIn(20.0, ctx['close'])
 
+    def test_rolling_mean_not_rounded_to_2_decimals(self):
+        from .detector.dimensions import _rolling_mean_series
+        ma = _rolling_mean_series([1.001, 1.002, 1.004], 3, strict=True)
+        self.assertAlmostEqual(ma[-1], 3.007 / 3)
+
     @patch('stocks.ai.valuation.fetch_valuation_map', new=lambda codes: {})
     def test_screener_uses_latest_final_bar(self):
         from .ai.screener import run_screener

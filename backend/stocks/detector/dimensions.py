@@ -294,8 +294,9 @@ def _rolling_mean_series(vals, k, strict=False):
         if strict and any(v is None for v in window):
             out.append(None)
             continue
-        m = _mean(window)
-        out.append(round(m, 2) if m is not None else None)
+        # 不在计算层舍入（DAT-11/DET-09）：价格已是 3 位小数，round(m, 2) 会让
+        # 低价 ETF 的均线距离产生系统误差；展示层（_series_points/_result）再舍入
+        out.append(_mean(window))
     return out
 
 
