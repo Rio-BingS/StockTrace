@@ -105,3 +105,61 @@ class ExchangeRouteTests(SimpleTestCase):
                                                '2026-09-02 15:00:00'))
             self.assertIsNone(src.fetch_stock_name('830799'))
         login.assert_not_called()
+
+
+class BaoStockSessionTests(SimpleTestCase):
+    """REL-06：多线程 BaoStock 调用串行化，不会互相登出。"""
+
+    def test_sessions_do_not_interleave(self):
+        import threading
+        import time as _time
+
+        state = {'logged_in': 0, 'max': 0, 'broken': 0}
+        lock = threading.Lock()
+
+        def login():
+            with lock:
+                state['logged_in'] += 1
+                state['max'] = max(state['max'], state['logged_in'])
+
+        def logout():
+            with lock:
+                state['logged_in'] -= 1
+
+        class _RS:
+            fields = ['date', 'open', 'high', 'low', 'close', 'volume', 'amount']
+
+            def __init__(self):
+                self.n = 0
+
+            def next(self):
+                _time.sleep(0.005)
+                if state['logged_in'] != 1:
+                    state['broken'] += 1
+                self.n += 1
+                return self.n <= 2
+
+            def get_row_data(self):
+                return ['2026-09-01', '1', '1', '1', '1', '100', '100']
+
+        src = services.BaoStockSource()
+        with patch('baostock.login', side_effect=login), \
+                patch('baostock.logout', side_effect=logout), \
+                patch('baostock.query_history_k_data_plus', side_effect=lambda *a, **k: _RS()):
+            ts = [threading.Thread(target=src.fetch_daily, args=('600000', '20260901', '20260901'))
+                  for _ in range(5)]
+            for t in ts:
+                t.start()
+            for t in ts:
+                t.join()
+        self.assertEqual(state['max'], 1)
+        self.assertEqual(state['broken'], 0)
+        self.assertEqual(state['logged_in'], 0)
+
+    def test_logout_runs_and_lock_released_on_error(self):
+        with patch('baostock.login'), patch('baostock.logout') as logout, \
+                patch('baostock.query_stock_basic', side_effect=RuntimeError('boom')):
+            with self.assertRaises(RuntimeError):
+                services.BaoStockSource().fetch_stock_name('600000')
+        logout.assert_called_once()
+        self.assertFalse(services._bs_lock.locked())
