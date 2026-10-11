@@ -16,7 +16,7 @@ StockTrace：个人 A 股自选监控 + 行情中心。Django REST + SQLite（`b
 | `PROJECT_PROGRESS.md` | 当前状态、**待办与已知问题**、极简历史 | 接手任务前 |
 | `README.md` | 面向人的功能介绍 | 向用户解释项目时 |
 | `deploy/DEPLOY.md` | VPS 部署步骤与模板 | 部署/换机时 |
-| `handoff_cn.md` | v1.01 时代交接（陈旧，仅考古） | 一般不用 |
+| `docs/archive/handoff*.md` | v1.01 时代交接（已过时，仅考古） | 一般不用 |
 
 ## 命令
 

@@ -459,3 +459,27 @@ class DeployProcedureTests(TestCase):
             self.assertIn('RuntimeDirectory=stocktrace', text, unit)
             self.assertIn('RuntimeDirectoryPreserve=yes', text, unit)
             self.assertIn('RuntimeDirectoryMode=0755', text, unit)
+
+
+class RepoHygieneTests(TestCase):
+    """SEC-06：高风险运维文档已删、handoff 已归档、.gitignore 覆盖密钥与运行产物"""
+
+    def test_gitignore_covers_secrets_and_artifacts(self):
+        lines = (REPO_DIR / '.gitignore').read_text(encoding='utf-8').splitlines()
+        for pat in ('*.pem', '*.key', '.htpasswd*', '.env.*', '!deploy/env.example', '*.log',
+                    'backend/staticfiles/'):
+            self.assertIn(pat, lines)
+
+    def test_dangerous_download_recipes_removed(self):
+        notes = (REPO_DIR / 'vps-download-notes.md').read_text(encoding='utf-8')
+        # 文中允许以警示形式提到这些命令，但不能再作为可执行步骤出现（命令行以它们开头）
+        cmds = [ln.strip() for ln in notes.splitlines()]
+        self.assertFalse([c for c in cmds if c.startswith(('git init', 'git push', 'python3 -m http.server'))])
+        self.assertIn('安全警示', notes.split('## 核心原则', 1)[0])
+
+    def test_handoff_archived_and_marked_outdated(self):
+        self.assertFalse((REPO_DIR / 'handoff.md').exists())
+        for name in ('handoff.md', 'handoff_cn.md'):
+            first = (REPO_DIR / 'docs' / 'archive' / name).read_text(encoding='utf-8').splitlines()[0]
+            self.assertIn('已过时', first)
+        self.assertIn('docs/archive/handoff', (REPO_DIR / 'CLAUDE.md').read_text(encoding='utf-8'))
