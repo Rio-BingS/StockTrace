@@ -148,3 +148,88 @@ class FreshnessGateTests(TestCase):
 
         reasons = {d['target']: d['reason'] for d in DetectorRun.objects.get(trade_date=_TODAY).degraded}
         self.assertIn('数据过期', reasons['industry:测试行业'])
+
+
+_CALM = (True, {'reason': '平静'})
+
+
+def _signal_data(code, direction='up'):
+    return {
+        'target_kind': 'stock', 'target_code': code, 'target_name': code,
+        'trade_date': _TODAY.isoformat(), 'direction': direction, 'cycles': 1,
+        'score': 42.0, 'severity': DetectorSignal.SEVERITY_LOW,
+        'status': DetectorSignal.STATUS_WATCHING,
+    }
+
+
+class SameDayRerunTests(TestCase):
+    """ALG-08：同日重跑幂等——调参流水不丢、失效信号删除、降级对象保留旧行。"""
+
+    _targets = [{'kind': 'stock', 'code': '000001', 'name': '甲'}]
+
+    def _fresh_ctx(self, t):
+        return {'kind': t['kind'], 'code': t['code'], 'name': t['name'],
+                'as_of': _TODAY.isoformat()}, ''
+
+    def test_rerun_keeps_adjustments_and_review_counts(self):
+        from .models import DetectorRun
+        from .tests_detector import ReviewTests
+
+        seeder = ReviewTests()
+        seeder._seed_hit_signals('6001')  # 3 条可回看且全部命中的 active 信号
+        with _scan_patches(targets=[]):
+            first = scan.run_scan()
+        self.assertEqual(first['reviewed'], 3)
+        self.assertTrue(first['adjustments'])
+        run = DetectorRun.objects.get(trade_date=_TODAY)
+        audit = list(run.adjustments)
+        self.assertTrue(audit)
+
+        with _scan_patches(targets=[]):
+            second = scan.run_scan()
+        self.assertEqual(second['reviewed'], 0)
+        run.refresh_from_db()
+        self.assertEqual(run.adjustments, audit)  # 第二次没有用空值覆盖
+        self.assertEqual(run.reviewed_count, 3)
+        self.assertEqual(run.hit_count, 3)
+        self.assertEqual(run.hit_rate, 1.0)
+
+    def test_rerun_without_signal_deletes_today_row(self):
+        old = DetectorSignal.objects.create(**{
+            **_signal_data('000001'), 'trade_date': _TODAY - timedelta(days=1)})
+        with _scan_patches(self._targets, self._fresh_ctx, _CALM), \
+                patch.object(scan.signals, 'evaluate_target',
+                             return_value=(_signal_data('000001'), {})):
+            first = scan.run_scan()
+        self.assertEqual(first['signals_new'], 1)
+        self.assertTrue(DetectorSignal.objects.filter(trade_date=_TODAY).exists())
+
+        with _scan_patches(self._targets, self._fresh_ctx, _CALM), \
+                patch.object(scan.signals, 'evaluate_target', return_value=(None, {})):
+            second = scan.run_scan()
+        self.assertEqual(second['signals_new'], 0)
+        self.assertFalse(DetectorSignal.objects.filter(trade_date=_TODAY).exists())
+        self.assertTrue(DetectorSignal.objects.filter(pk=old.pk).exists())  # 历史日不动
+
+    def test_rerun_not_calm_also_clears_today_row(self):
+        with _scan_patches(self._targets, self._fresh_ctx, _CALM), \
+                patch.object(scan.signals, 'evaluate_target',
+                             return_value=(_signal_data('000001'), {})):
+            scan.run_scan()
+        with _scan_patches(self._targets, self._fresh_ctx, calm_result=(False, {})):
+            scan.run_scan()
+        self.assertFalse(DetectorSignal.objects.filter(trade_date=_TODAY).exists())
+
+    def test_degraded_target_keeps_today_row(self):
+        from .models import DetectorRun
+
+        with _scan_patches(self._targets, self._fresh_ctx, _CALM), \
+                patch.object(scan.signals, 'evaluate_target',
+                             return_value=(_signal_data('000001'), {})):
+            scan.run_scan()
+        with _scan_patches(self._targets, lambda t: (None, '日线拉取失败')):
+            summary = scan.run_scan()
+        self.assertEqual(summary['status'], 'partial')
+        self.assertTrue(DetectorSignal.objects.filter(trade_date=_TODAY,
+                                                      target_code='000001').exists())
+        self.assertEqual(DetectorRun.objects.count(), 1)
