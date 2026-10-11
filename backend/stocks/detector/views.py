@@ -9,6 +9,7 @@
 
 from __future__ import annotations
 
+import logging
 from datetime import timedelta
 
 from django.utils import timezone
@@ -27,6 +28,8 @@ from .dimensions import (
     build_sector_context,
     build_stock_context,
 )
+
+logger = logging.getLogger(__name__)
 
 _META_SOURCE = '本站探测器日度扫描（上游：东财/同花顺/新浪/沪深交易所公开数据，经日度快照积累）'
 _META_DISCLAIMER = (
@@ -61,7 +64,7 @@ def _meta(latest_run, message=''):
             if expected and latest_run.trade_date >= expected:
                 cache_status = 'fresh'
         except Exception:
-            pass
+            logger.warning("探测器 meta 时效判定失败，按 stale 处理", exc_info=True)
     return {
         'available': latest_run is not None and latest_run.status != 'failed',
         'source': _META_SOURCE,
@@ -242,7 +245,8 @@ def detector_signal_detail(request, pk):
             try:
                 res = spec['evaluate'](ctx, params)
                 dimension_series[key] = res['series']
-            except Exception:  # noqa: BLE001  曲线重算失败不影响已落库明细
+            except Exception:  # 边界：曲线重算失败不影响已落库明细
+                logger.warning("探测器维度 %s 曲线重算失败", key, exc_info=True)
                 dimension_series[key] = []
 
     return Response({

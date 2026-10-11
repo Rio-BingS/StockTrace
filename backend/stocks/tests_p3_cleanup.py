@@ -199,3 +199,30 @@ class MarketLoggingTests(TestCase):
         with patch('stocks.market.holders.requests.get', side_effect=requests.Timeout('t')):
             d = holders.fetch_holder_structure('510300', force=True)
         self.assertFalse(d['available'])
+
+
+class DetectorLoggingTests(SimpleTestCase):
+    """5d 探测器：原先静默降级的分支补日志，降级结果不变"""
+
+    def test_dimension_exception_logged_and_degraded(self):
+        from stocks.detector import signals
+
+        def bad(ctx, params):
+            raise ZeroDivisionError('div')
+
+        cfg = {'key': 'k1', 'name': '维度', 'weight': 1, 'params': {}, 'targets': ['stock'],
+               'evaluate': bad}
+        ctx = {'kind': 'stock', 'code': '600000', 'as_of': '2026-09-01'}
+        with patch('stocks.detector.signals._count_cycles', return_value=0), \
+                self.assertLogs('stocks.detector.signals', level='WARNING') as cm:
+            _sig, dims = signals.evaluate_target(ctx, [cfg])
+        self.assertFalse(dims['k1']['available'])
+        self.assertIn('k1', cm.output[0])
+
+    def test_previous_trading_days_unexpected_error_logged(self):
+        from stocks.detector import signals
+
+        with patch('stocks.trading_calendar.is_trading_day', side_effect=RuntimeError('x')), \
+                self.assertLogs('stocks.detector.signals', level='WARNING'):
+            self.assertIsNone(signals._previous_trading_days(date(2026, 9, 10), 3))
+

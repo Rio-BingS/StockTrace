@@ -12,6 +12,7 @@
 
 from __future__ import annotations
 
+import logging
 from datetime import date as _date, timedelta
 
 from ..models import DetectorSignal
@@ -22,6 +23,8 @@ from .constants import (
     SEVERITY_RULES,
     VOTE_MIN_DIMS,
 )
+
+logger = logging.getLogger(__name__)
 
 
 def _as_date(value):
@@ -43,7 +46,9 @@ def _previous_trading_days(before_date, n):
         day -= timedelta(days=1)
         try:
             flag = is_trading_day(day)
-        except Exception:  # noqa: BLE001
+        except Exception:
+            # is_trading_day 已吞掉上游异常，走到这里是意外错误：按日历未知处理并留痕
+            logger.warning("周期回看的交易日判定失败，按日历未知处理", exc_info=True)
             return None
         if flag is None:
             return None
@@ -115,7 +120,8 @@ def evaluate_target(ctx, configs):
             continue
         try:
             res = cfg['evaluate'](ctx, cfg['params'])
-        except Exception as e:  # noqa: BLE001  单维度异常不拖垮整个对象
+        except Exception as e:  # 边界：单维度异常不拖垮整个对象
+            logger.warning("探测器维度 %s 计算异常: %s", cfg['key'], e, exc_info=True)
             res = {
                 'available': False, 'value': None, 'direction': None,
                 'note': f'维度计算异常: {e}', 'series': [],

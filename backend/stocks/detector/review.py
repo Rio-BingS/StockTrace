@@ -67,7 +67,8 @@ def _next_trading_days(after, n):
         day += timedelta(days=1)
         try:
             flag = is_trading_day(day)
-        except Exception:  # noqa: BLE001
+        except Exception:
+            logger.warning("复盘的交易日判定失败，按日历未知处理", exc_info=True)
             return None
         if flag is None:
             return None
@@ -188,7 +189,8 @@ def _index_outcome(signal, _cache):
 
     try:
         data = indices.fetch_index_daily_series(signal.target_code, days=130)
-    except Exception:  # noqa: BLE001
+    except Exception:
+        logger.warning("复盘取指数 %s 日线失败", signal.target_code, exc_info=True)
         return None
     if not data.get('available'):
         return None
