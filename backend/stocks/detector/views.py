@@ -16,7 +16,7 @@ from rest_framework import status
 from rest_framework.decorators import api_view
 from rest_framework.response import Response
 
-from ..market._query import _paginate
+from ..common.pagination import paginate as _paginate
 from ..trading_calendar import expected_latest_date
 from ..models import DetectorDimConfig, DetectorRun, DetectorSignal
 from . import calm, registry, review, signals
