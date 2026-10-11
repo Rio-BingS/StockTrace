@@ -36,9 +36,15 @@ DIMENSIONS = [
     {
         'key': 'big_order_net',
         'name': '大单净流入',
-        'targets': ('index', 'industry', 'concept'),
+        # 指数不在 targets（ALG-09）：build_index_context 从未提供净额序列，指数上
+        # 该维度恒为「不可用」；大盘资金快照是全市场口径，即便接入也会给 5 个
+        # 指数投完全相同的一票（与融资余额同样的相关性放大问题）
+        'targets': ('industry', 'concept'),
         'enabled': True,
-        'note': '指数为本站大盘快照超大单+大单合计，板块为主力净额；均来自收盘后日度快照积累。',
+        'note': (
+            '板块主力净额，来自收盘后日度快照积累。指数暂不参与：大盘资金快照是'
+            '全市场口径，对各指数是同一条序列，接入只会重复计票。'
+        ),
         'defaults': {'window': 15, 'mean_days': 6, 'mild': 0.5, 'min': 0.08, 'max': 2.0, **_NOISE},
         'evaluate': _dims.eval_big_order_net,
     },
@@ -84,7 +90,8 @@ DIMENSIONS = [
         'targets': ('index',),
         'enabled': True,
         'note': (
-            '仅融资余额口径（北向自 2024-08 停止逐日披露，如实缺席）；'
+            '仅融资余额口径（北向自 2024-08 停止逐日披露，如实缺席）；融资余额为沪深'
+            '合计，只在沪深300上投票，其余指数不重复计票；'
             '数据为交易所官方 T+1 披露、经本站日度快照积累；噪声闸门需约 21 个交易日的积累才投票。'
         ),
         'defaults': {'mild': 0.5, 'min': 0.06, 'max': 2.0, **_NOISE},

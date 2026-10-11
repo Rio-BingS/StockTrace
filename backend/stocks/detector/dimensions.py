@@ -172,6 +172,10 @@ def _series_points(dates, values, count=20):
 MIN_PRICE_BARS = 30
 # sector 目标（快照派生序列）的最低有效天数：覆盖 ma20/波动窗口的底线。
 MIN_SECTOR_POINTS = 12
+# 融资余额只在这些指数上投票（ALG-09）：两融是沪深合计的全市场口径，对 5 个
+# 指数完全相同，逐个投票等于同一事实计 5 票、信号高度相关并在回看里被当成独立
+# 样本；沪深300 横跨沪深两市，作为全市场的代表。
+MARGIN_VOTE_CODES = ('sh000300',)
 
 
 def build_index_context(code, name):
@@ -186,6 +190,9 @@ def build_index_context(code, name):
         return None, f'指数日线仅 {len(items)} 根，历史不足'
 
     ctx = _price_ctx('index', code, name, items)
+    ctx['margin'] = []
+    if code not in MARGIN_VOTE_CODES:
+        return ctx, ''  # 只有沪深300用融资余额（ALG-09），其余指数不必读快照
     # 融资余额序列：本站日度快照积累（T+1 披露），给 margin_north 维度用；
     # 积累不足时维度自行 available=False，不影响其他维度。
     rows = (
@@ -557,6 +564,8 @@ def eval_margin_north(ctx, params):
     null），本维度仅融资余额口径；数据来自交易所官方披露、经本站日度
     快照积累，窗口不足 6 行时如实不可用（上线初期约需一周积累）。
     """
+    if ctx.get('kind') == 'index' and ctx.get('code') not in MARGIN_VOTE_CODES:
+        return _unavailable('融资余额为沪深合计口径，仅在沪深300上投票（避免各指数重复计票）')
     margin = ctx.get('margin') or []
     if len(margin) < 6:
         return _unavailable('融资余额快照积累不足（T+1 披露，逐日积累中）')

@@ -284,3 +284,48 @@ class NoiseGateTests(TestCase):
         self.assertIn('样本不足', note)
         _v, direction, _n = _gated(0.9, [0.1] * 5, {**params, 'noise_pct': 0})
         self.assertEqual(direction, 'up')
+
+
+class IndexDimensionCoverageTests(TestCase):
+    """ALG-09：指数不再挂永远不可用的大单维度；融资余额只在沪深300上投票。"""
+
+    def test_big_order_net_not_targeted_at_index(self):
+        from .detector import registry
+
+        self.assertNotIn('index', registry.DIMENSION_MAP['big_order_net']['targets'])
+        self.assertNotIn('big_order_net', [d['key'] for d in registry.specs_for_target('index')])
+
+    def _margin_ctx(self, code):
+        totals = [1.0e12 * (1 + 0.0005 * i) for i in range(30)]
+        totals[-1] *= 1.01  # 末端明显抬升
+        return {'kind': 'index', 'code': code, 'margin': [
+            {'date': d, 'total': t} for d, t in zip(_dates(30), totals)]}
+
+    def test_margin_votes_only_on_hs300(self):
+        from .detector.dimensions import eval_margin_north
+        from .detector.registry import DIMENSION_MAP
+
+        params = dict(DIMENSION_MAP['margin_north']['defaults'])
+        others = [eval_margin_north(self._margin_ctx(c), params)
+                  for c in ('sh000001', 'sz399001', 'sz399006', 'sh000688')]
+        for res in others:
+            self.assertFalse(res['available'])
+            self.assertIsNone(res['direction'])
+        hs300 = eval_margin_north(self._margin_ctx('sh000300'), params)
+        self.assertTrue(hs300['available'], hs300)
+        self.assertEqual(hs300['direction'], 'up', hs300)
+
+    def test_build_index_context_reads_margin_only_for_hs300(self):
+        from .detector import dimensions
+        from .models import MarketDailySnapshot
+
+        MarketDailySnapshot.objects.create(
+            kind=MarketDailySnapshot.KIND_MARGIN, trade_date=_TODAY, payload=[{'total': 1.0}])
+        items = [{'date': d, 'open': 1.0, 'high': 1.0, 'low': 1.0, 'close': 1.0, 'volume': 1.0}
+                 for d in _dates(40)]
+        with patch('stocks.market.indices.fetch_index_daily_series',
+                   return_value={'available': True, 'items': items}):
+            ctx, _ = dimensions.build_index_context('sh000001', '上证指数')
+            self.assertEqual(ctx['margin'], [])
+            ctx, _ = dimensions.build_index_context('sh000300', '沪深300')
+            self.assertEqual(len(ctx['margin']), 1)
