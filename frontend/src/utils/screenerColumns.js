@@ -25,7 +25,9 @@ export function extraColumnsFor(spec) {
 }
 
 // 按字段类型选格式（成交量带单位、成交额换算万/亿、振幅不带正号）
-const AMOUNT_FIELDS = new Set(['turnover', 'turnover_5d_avg'])
+const AMOUNT_FIELDS = new Set(['turnover', 'turnover_5d_avg', 'float_mv', 'total_mv'])
+// 非负比率：不加正号
+const RATE_FIELDS = new Set(['high_low_pct', 'turnover_rate'])
 const PCT_FIELDS = new Set(['change_pct', 'open_close_pct', 'pct_5d', 'pct_10d', 'pct_20d', 'pct_60d', 'pct_from_high_20d'])
 
 export function fmtCell(row, col) {
@@ -34,7 +36,7 @@ export function fmtCell(row, col) {
   if (col.bool) return v === 1 ? '是' : '否'
   if (col.key === 'volume') return formatVolume(v)
   if (col.key === 'up_days') return String(v)
-  if (col.key === 'high_low_pct') return formatRate(v)
+  if (RATE_FIELDS.has(col.key)) return formatRate(v)
   if (AMOUNT_FIELDS.has(col.key)) return formatAmount(v)
   if (PCT_FIELDS.has(col.key)) return formatPct(v)
   return formatNum(v)

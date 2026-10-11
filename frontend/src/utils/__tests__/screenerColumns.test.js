@@ -22,3 +22,10 @@ test('fmtCell：按字段类型格式化', () => {
   assert.equal(fmtCell(row, { key: 'turnover_5d_avg' }), '2.50 亿')
   assert.equal(fmtCell(row, { key: 'x' }), '-')
 })
+
+test('fmtCell：换手率不加正号，市值换算万/亿（FEF-11）', () => {
+  const row = { turnover_rate: 3.2, float_mv: 1.23e10, total_mv: 5e11 }
+  assert.equal(fmtCell(row, { key: 'turnover_rate' }), '3.20%')
+  assert.equal(fmtCell(row, { key: 'float_mv' }), '123.00 亿')
+  assert.equal(fmtCell(row, { key: 'total_mv' }), '5000.00 亿')
+})
