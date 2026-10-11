@@ -1,6 +1,7 @@
 """探测器优化集成（feat/det）的回归测试：跨方向衔接点。
 
 - 0021 数据迁移：维度改名、失效/过时参数重置为新默认、权重保留、可回滚；
+- settings.DETECTOR_SECTOR_SIGNAL_CAP：环境变量接线，默认 10，0 关闭截断；
 """
 
 from __future__ import annotations
@@ -8,7 +9,8 @@ from __future__ import annotations
 import importlib
 
 from django.apps import apps
-from django.test import TestCase
+from django.conf import settings
+from django.test import TestCase, override_settings
 
 from .detector import registry, scan
 from .models import DetectorDimConfig, DetectorTuneLog
@@ -77,3 +79,17 @@ class DimConfigMigrationTests(TestCase):
         _MIG.refresh_configs(apps, None)
         self.assertFalse(DetectorDimConfig.objects.exists())
         self.assertFalse(DetectorTuneLog.objects.exists())
+
+
+class SectorSignalCapSettingTests(TestCase):
+    def test_default_is_ten(self):
+        self.assertEqual(settings.DETECTOR_SECTOR_SIGNAL_CAP, 10)
+        self.assertEqual(scan._sector_signal_cap(), 10)
+
+    @override_settings(DETECTOR_SECTOR_SIGNAL_CAP=0)
+    def test_zero_disables_truncation(self):
+        self.assertEqual(scan._sector_signal_cap(), 0)
+        collected = [(('industry', f'b{i}'), {'target_kind': 'industry', 'strength': i, 'status': 'watching'})
+                     for i in range(15)]
+        kept, cut = scan.truncate_by_strength(collected, scan._sector_signal_cap())
+        self.assertEqual((len(kept), len(cut)), (15, 0))

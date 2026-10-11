@@ -111,6 +111,9 @@ DETECTOR_AUTO_TUNE = os.environ.get('DETECTOR_AUTO_TUNE', '0').strip().lower() i
 DETECTOR_TUNE_WINDOW_DAYS = int(os.environ.get('DETECTOR_TUNE_WINDOW_DAYS', '180'))
 # 复盘兑现阈值 = k × σ20 × √5（#12），k 默认 1.0
 DETECTOR_REVIEW_SIGMA_K = float(os.environ.get('DETECTOR_REVIEW_SIGMA_K', '1.0'))
+# 每日板块信号按强度截断的上限（#11 多重检验）：约 500 个板块同日检验、彼此相关，
+# 只保留最强的前 N 个；0 = 不截断。指数与自选股不截
+DETECTOR_SECTOR_SIGNAL_CAP = int(os.environ.get('DETECTOR_SECTOR_SIGNAL_CAP', '10'))
 # 分钟 K 线保留天数（PERF-02）：每日 02:30 分批清理更早的 MinuteBar
 MINUTE_BAR_RETENTION_DAYS = int(os.environ.get('MINUTE_BAR_RETENTION_DAYS', '120'))
 # 市场日度快照保留天数（OPS-06）：之前文档写了该变量但 settings 未接线，环境变量从不生效。
