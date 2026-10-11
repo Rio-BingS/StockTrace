@@ -257,6 +257,7 @@ def get_market_fund_flow_window(window, ttl=300):
         upstream_rows = [merged[d] for d in sorted(merged)]
         if not upstream_rows and errors:
             upstream_error = '；'.join(errors)
+            logger.warning('大盘资金流窗口上游无数据: %s', upstream_error)
     except Exception as e:  # noqa: BLE001  线路降级
         upstream_error = str(e)
         logger.warning('大盘资金流窗口获取失败: %s', e)
@@ -286,7 +287,8 @@ def get_market_fund_flow_window(window, ttl=300):
             '（每个收盘后自动积累，上游恢复后自动回补历史）'
         )
     elif upstream_error:
-        message = f'大盘资金流获取失败（{upstream_error}），稍后可重试'
+        # 上游错误原文已写日志，对外不回显（SEC-07）
+        message = '大盘资金流获取失败，稍后可重试'
     else:
         message = '区间内暂无数据'
 

@@ -283,7 +283,8 @@ def _unavailable_payload(cache_key, ttl, period, start, reason):
             'outflow_count': 0,
         },
         'failed_codes': [],
-        'message': f'东财资金流线路当前不可达（{reason}），稍后可重试',
+        # reason 只进日志（调用方已记录），不回显上游异常原文（SEC-07）
+        'message': '东财资金流线路当前不可达，稍后可重试',
         'meta': _cache_meta(
             cache_key, ttl, _flow_source(), False,
             disclaimer='历史主力净流入来自东方财富，上游仅提供最近约 120 个交易日。',

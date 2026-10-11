@@ -10,6 +10,7 @@ from datetime import date, datetime, timedelta
 import logging
 import threading
 import time
+import uuid
 
 from .models import Stock, DailyQuote, MinuteBar
 from .serializers import (
@@ -376,12 +377,23 @@ def _market_response(loader, label):
         return Response(_call_with_deadline(loader, label))
     except (UpstreamTimeout, UpstreamCircuitOpen) as e:
         return _deadline_error_response(e, label)
-    except Exception as e:
-        logger.exception(f'获取{label}失败')
-        return Response(
-            {'detail': f'获取{label}失败: {e}'},
-            status=status.HTTP_502_BAD_GATEWAY,
-        )
+    except Exception:
+        return _upstream_failed(label)
+
+
+def _upstream_failed(label):
+    """上游/内部异常的统一出口：对外只给通用文案与 error_id，详情进日志（SEC-07）。
+
+    异常原文可能含上游响应片段、内网地址或文件路径，不回显给客户端；
+    error_id 同时写进日志，排障时按它在日志里定位堆栈。
+    """
+    error_id = uuid.uuid4().hex[:12]
+    logger.exception(f'获取{label}失败 error_id={error_id}')
+    return Response(
+        {'detail': f'获取{label}失败，请稍后重试（错误编号 {error_id}）',
+         'error_id': error_id},
+        status=status.HTTP_502_BAD_GATEWAY,
+    )
 
 
 @api_view(['GET'])
@@ -464,9 +476,8 @@ def _market_bad_request(loader, label='市场数据'):
         return _deadline_error_response(e, label)
     except ValueError as e:
         return Response({'detail': str(e)}, status=status.HTTP_400_BAD_REQUEST)
-    except Exception as e:
-        logger.exception('获取市场数据失败')
-        return Response({'detail': f'获取市场数据失败: {e}'}, status=status.HTTP_502_BAD_GATEWAY)
+    except Exception:
+        return _upstream_failed(label)
 
 
 @api_view(['GET'])
@@ -568,12 +579,8 @@ def market_institutions(request):
         return _deadline_error_response(e, '机构持仓')
     except ValueError as e:
         return Response({'detail': str(e)}, status=status.HTTP_400_BAD_REQUEST)
-    except Exception as e:
-        logger.exception('获取机构持仓失败')
-        return Response(
-            {'detail': f'获取机构持仓失败: {e}'},
-            status=status.HTTP_502_BAD_GATEWAY,
-        )
+    except Exception:
+        return _upstream_failed('机构持仓')
 
 
 # ============================================================
