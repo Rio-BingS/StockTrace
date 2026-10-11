@@ -314,6 +314,9 @@ STOCKTRACE_REQUEST_DEADLINE = float(os.environ.get('STOCKTRACE_REQUEST_DEADLINE'
 # 市场缓存是否用交易日历判断新鲜度 / data_as_of（ARC-02）：生产恒为 True；
 # 测试 runner（IsolatedTestRunner）关掉它以免触网、保持确定性，取代原先嗅探 sys.argv
 STOCKTRACE_MARKET_CALENDAR_ENABLED = True
+# 探测器换手率维度是否拉取新浪流通股本（ALG-13）：生产为 True；测试 runner 关掉以免隐式触网，
+# 需要的用例自行 override_settings 并 mock 上游
+STOCKTRACE_FLOAT_SHARES_ENABLED = True
 
 
 # Logging（REL-02）
@@ -341,7 +344,7 @@ LOGGING = {
     },
     'root': {'handlers': ['console'], 'level': 'WARNING'},
     'loggers': {
-        # 业务日志（stocks.scheduler / stocks.services / stocks.market.* / stocks.detector.* ...）
+        # 业务日志（stocks.scheduler / stocks.ingest / stocks.jobs / stocks.datasources.* / stocks.market.* / stocks.detector.* ...）
         'stocks': {'level': STOCKTRACE_LOGLEVEL},
         'django.request': {'level': 'WARNING'},
         # 只要 WARNING：job 异常/错过（misfire）会以 ERROR/WARNING 记录

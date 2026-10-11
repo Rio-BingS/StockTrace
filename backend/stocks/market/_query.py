@@ -1,11 +1,6 @@
-"""列表排序与分页（板块、ETF 雷达共用）。"""
+"""列表排序（板块、ETF 雷达共用；分页见 stocks.common.pagination）。"""
 
 from __future__ import annotations
-
-from ..common.pagination import paginate
-
-# 旧私有名保留一版（ARC-01），新代码请用 stocks.common.pagination.paginate
-_paginate = paginate
 
 
 def _sort_items(items, field, order):

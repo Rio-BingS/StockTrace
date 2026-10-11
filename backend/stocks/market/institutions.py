@@ -9,7 +9,7 @@ import pandas as pd
 from django.utils import timezone
 
 from ..errors import BadRequest
-from ._cache import _cache_get, _cache_set, _now_str, _stale_or, _to_float
+from ._cache import cache_get, cache_set, _now_str, stale_or, _to_float
 from ._sources import _safe_df_call, get_source_health
 
 # 2024-08 披露调整后上游不再提供北向净买额（快照以 0 占位、历史序列整列为空），
@@ -85,7 +85,7 @@ def fetch_institute_hold_stocks(limit=40, ttl=600, quarter=None):
     """
     quarter_fixed = _normalize_quarter(quarter) if quarter else None
     cache_key = f'inst_hold_stocks_{limit}_{quarter_fixed or "latest"}'
-    cached = _cache_get(cache_key, ttl)
+    cached = cache_get(cache_key, ttl)
     if cached is not None:
         return cached
 
@@ -110,7 +110,7 @@ def fetch_institute_hold_stocks(limit=40, ttl=600, quarter=None):
             'items': [],
             'message': '机构持股季报暂不可用',
         }
-        return _stale_or(cache_key, data)
+        return stale_or(cache_key, data)
 
     work = df.copy()
     for col in ('机构数', '机构数变化', '持股比例', '持股比例增幅', '占流通股比例', '占流通股比例增幅'):
@@ -149,7 +149,7 @@ def fetch_institute_hold_stocks(limit=40, ttl=600, quarter=None):
         'message': '',
         'source': 'stock_institute_hold',
     }
-    _cache_set(cache_key, data)
+    cache_set(cache_key, data)
     return data
 
 
@@ -160,7 +160,7 @@ def fetch_institution_shareholder_changes(limit=40, ttl=900):
     过滤掉纯「个人」股东，保留基金/保险/社保/QFII/券商/信托/国家队/其他机构等。
     """
     cache_key = f'inst_shareholder_chg_{limit}'
-    cached = _cache_get(cache_key, ttl)
+    cached = cache_get(cache_key, ttl)
     if cached is not None:
         return cached
 
@@ -188,7 +188,7 @@ def fetch_institution_shareholder_changes(limit=40, ttl=900):
             'items': [],
             'message': '机构股东变动统计暂不可用（接口重或限流）',
         }
-        return _stale_or(cache_key, data)
+        return stale_or(cache_key, data)
 
     work = df.copy()
     if '股东类型' in work.columns:
@@ -243,14 +243,14 @@ def fetch_institution_shareholder_changes(limit=40, ttl=900):
         'source': 'stock_gdfx_free_holding_change_em',
         'disclaimer': '来自股东户数/流通股东统计，披露滞后；「其他」含香港中央结算等通道型股东。',
     }
-    _cache_set(cache_key, data)
+    cache_set(cache_key, data)
     return data
 
 
 def fetch_northbound_flow_series(days=60, ttl=300):
     """北向资金历史序列（机构外资维度）。"""
     cache_key = f'north_series_{days}'
-    cached = _cache_get(cache_key, ttl)
+    cached = cache_get(cache_key, ttl)
     if cached is not None:
         return cached
 
@@ -261,7 +261,7 @@ def fetch_northbound_flow_series(days=60, ttl=300):
     )
     if df is None or df.empty:
         data = {'available': False, 'items': [], 'message': '北向资金历史暂不可用'}
-        return _stale_or(cache_key, data)
+        return stale_or(cache_key, data)
 
     work = df.copy()
     # 列名已在探测中确认
@@ -286,7 +286,7 @@ def fetch_northbound_flow_series(days=60, ttl=300):
         'message': '' if has_net else NORTH_DISCLOSURE_MSG,
         'source': 'stock_hsgt_hist_em',
     }
-    _cache_set(cache_key, data)
+    cache_set(cache_key, data)
     return data
 
 
@@ -295,7 +295,7 @@ def fetch_stock_institution_detail(code, ttl=600):
     _ensure_stock_code(code)
     code = str(code).zfill(6)
     cache_key = f'inst_detail_{code}'
-    cached = _cache_get(cache_key, ttl)
+    cached = cache_get(cache_key, ttl)
     if cached is not None:
         return cached
 
@@ -358,7 +358,7 @@ def fetch_stock_institution_detail(code, ttl=600):
         'top_holders': holders,
         'message': '' if (inst_items or holders) else '未查到该股机构/股东数据',
     }
-    _cache_set(cache_key, data)
+    cache_set(cache_key, data)
     return data
 
 

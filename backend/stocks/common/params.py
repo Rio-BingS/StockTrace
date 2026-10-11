@@ -19,8 +19,12 @@ def _empty(raw):
     return raw is None or raw == ''
 
 
-def positive_int(params, key, default, maximum=None, *, strict=False):
-    """正整数参数；缺省或空串返回 default，maximum 为上限（超出时截断，不报错）。"""
+def positive_int(params, key, default, maximum=None, *, strict=False, clamp=False):
+    """正整数参数；缺省或空串返回 default，maximum 为上限（超出时截断，不报错）。
+
+    clamp=True 时小于 1 的整数钳到 1，而不是回退 default（detector 的 page_size
+    口径：page_size=0/-5 返回 1 条/页）；非整数仍按 strict 处理。
+    """
     raw = params.get(key)
     if _empty(raw):
         return default
@@ -31,9 +35,12 @@ def positive_int(params, key, default, maximum=None, *, strict=False):
             raise BadRequest(f'{key} 必须是正整数')
         return default
     if value < 1:
-        if strict:
+        if clamp:
+            value = 1
+        elif strict:
             raise BadRequest(f'{key} 必须是正整数')
-        return default
+        else:
+            return default
     return min(value, maximum) if maximum else value
 
 

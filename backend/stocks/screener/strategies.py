@@ -1,6 +1,6 @@
 """内置选股策略模板：问财/东财常用的经典条件组合，一键载入可再改。
 
-（ARC-07：原 stocks/ai/strategies.py，stocks.ai.strategies 保留为兼容别名。）
+（ARC-07：原 stocks/ai/strategies.py，旧路径别名已在 v1.6.0 之后删除。）
 
 与用户自存预设（ScreenerPreset）区分：模板只读、随代码更新。
 spec 里的字段与操作符全部经 run_screener 校验，保证可执行。

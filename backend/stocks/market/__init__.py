@@ -2,7 +2,7 @@
 大盘 / 市场数据服务（进程内缓存，适合 1H2G VPS）。
 
 数据源策略：
-- 与 stocks.services 类似：多源 failover，而不是死磕东财。
+- 与个股数据源（stocks.datasources）类似：多源 failover，而不是死磕东财。
 - 源池冷却（cooldown）：某源连续失败后暂时跳过，降低东财限流概率（简易「负载均衡」）。
 - 指数优先新浪；北向历史可用；大盘主力东财失败则用北向净买额序列兜底。
 
@@ -24,11 +24,10 @@
 
 from . import etf, etf_flow, flows, indices, institutions, overview, sectors  # noqa: F401
 from ._cache import _cache  # noqa: F401  tests 直接清空共享缓存
-from ._cache import _is_fresh  # noqa: F401  tests 使用
 from ._sources import get_source_health  # noqa: F401
 from .etf import (
     NATIONAL_TEAM_ETFS,
-    _etf_row_to_item,  # noqa: F401  旧名保留一版，tests 使用
+    etf_row_to_item,
     get_etf_detail,
     get_etf_share_radar,
     get_national_team_etfs,
@@ -52,17 +51,12 @@ from .institutions import (
 )
 from .overview import get_market_overview, get_market_trend, warm_post_close_lagging
 from .sectors import (
-    _parse_fund_flow_table,  # noqa: F401  旧名保留一版，tests 使用
-    _parse_sector_rank_table,  # noqa: F401  tests 使用
+    parse_fund_flow_table,
     _sector_payload,  # noqa: F401  tests 使用
     fetch_concept_fund_flow,
     fetch_industry_fund_flow,
     get_sector_rotation,
 )
-
-# 口径解析的公开名（validate_market_sources 使用，ARC-01）
-etf_row_to_item = _etf_row_to_item
-parse_fund_flow_table = _parse_fund_flow_table
 
 __all__ = [
     # 视图 / 调度主入口

@@ -272,40 +272,14 @@ class PeriodSnapshotTests(SnapshotMixin, SimpleTestCase):
         rows = _flow_rows()
         out = []
         with mock.patch.object(etf_flow, 'flow_history', return_value=rows), \
-                mock.patch.object(etf_flow, '_cache_get', return_value=None), \
-                mock.patch.object(etf_flow, '_cache_set'), \
+                mock.patch.object(etf_flow, 'cache_get', return_value=None), \
+                mock.patch.object(etf_flow, 'cache_set'), \
                 mock.patch.object(etf_flow, '_cache_meta', side_effect=_meta_stub), \
                 mock.patch.object(etf_flow.time, 'sleep'):
             for q in _FLOW_QUERIES:
                 r = self.client.get(f'/api/market/national-etf/flow/?{q}')
                 out.append([q, r.status_code, r.content.decode()])
         self.assertSnapshot('flow_queries', _dump(out))
-
-
-class QuoteRowEquivalenceTests(TestCase):
-    """QuoteRowSerializer 与旧 DashboardStockSerializer(_quote_row()) 输出一致（含高低点时间）。"""
-
-    def test_same_as_legacy_dict_path(self):
-        from .serializers import DashboardStockSerializer, QuoteRowSerializer
-        from .views import _quote_row
-
-        group = StockGroup.objects.create(name='g')
-        stock = Stock.objects.create(code='600519', name='茅台', group=group, cost_price=Decimal('1500.1'))
-        quote = DailyQuote.objects.create(
-            stock=stock, trade_date=date(2026, 9, 4),
-            open_price=Decimal('1.1'), close_price=Decimal('1.2'), high_price=Decimal('1.3'),
-            low_price=Decimal('1.0'), high_time=_FIXED_NOW, low_time=_FIXED_NOW,
-            open_close_diff=Decimal('0.1'), open_close_pct=Decimal('9.0909'),
-            high_low_diff=Decimal('0.3'), high_low_pct=Decimal('30'),
-            volume=7, turnover=Decimal('8.5'),
-        )
-        for q in (quote, None):
-            with self.subTest(quote=q):
-                stock.latest_quote = q
-                self.assertEqual(
-                    json.dumps(QuoteRowSerializer(stock).data),
-                    json.dumps(DashboardStockSerializer(_quote_row(stock, q)).data),
-                )
 
 
 class StockEndpointErrorTextTests(TestCase):

@@ -3,6 +3,7 @@ import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
 import { useRouter } from 'vue-router'
 import { aiApi, presetApi, stockApi } from '../api/stocks.js'
 import { aiDisclaimer, aiErrorText, createAiTask, isCanceled } from '../utils/aiRequest.js'
+import { aiJobPhaseText, runAiJob } from '../utils/aiJob.js'
 import { formatPct, formatNum, formatRate, pctClass } from '../utils/format.js'
 import { formatAmount } from '../utils/marketFormat.js'
 import { errorMessage } from '../utils/errorMessage.js'
@@ -15,7 +16,9 @@ import {
 } from '../utils/screenerConditions.js'
 import { BOOL_FIELDS, ORDER_OPTIONS } from '../constants/screenerFields.js'
 import { extraColumnsFor, fmtCell } from '../utils/screenerColumns.js'
+import { pickScreenerMeta } from '../utils/screenerMeta.js'
 import ScreenerConditionList from '../components/ScreenerConditionList.vue'
+import ScreenerResultMeta from '../components/ScreenerResultMeta.vue'
 
 const router = useRouter()
 
@@ -34,6 +37,8 @@ const manualLoading = ref(false)
 const results = ref([])
 const appliedConditions = ref(null)
 const resultCount = ref(0)
+// 横截面元信息：数据截至日 as_of 与未参与的股票 excluded（ALG-12）
+const resultMeta = ref(null)
 const errorMsg = ref('')
 const notice = ref('')
 
@@ -48,6 +53,9 @@ const aiTask = createAiTask()
 const commentTask = createAiTask()
 const aiElapsed = ref(0)
 const commentElapsed = ref(0)
+// 后台任务阶段（P3：翻译/点评走后台排队）：queued 时按钮显示「已排队（前面 N 个）」
+const aiJob = ref(null)
+const commentJob = ref(null)
 const tickers = new Map()
 
 function startTicker(counter) {
@@ -197,6 +205,7 @@ async function runManual() {
     const res = await aiApi.screener(spec)
     results.value = res.data.results
     resultCount.value = res.data.count
+    resultMeta.value = pickScreenerMeta(res.data)
     appliedConditions.value = spec
     resultDisclaimer.value = ''
   } catch (e) {
@@ -214,14 +223,21 @@ async function runAi() {
   notice.value = ''
   comment.value = ''
   aiLoading.value = true
+  aiJob.value = null
   startTicker(aiElapsed)
   try {
-    const res = await aiApi.screenerAi(query.value.trim(), { signal })
+    const q = query.value.trim()
+    const data = await runAiJob(
+      () => aiApi.screenerAiAsync(q, { signal }),
+      (jobId) => aiApi.aiJob(jobId, { signal }),
+      { signal, onStatus: (job) => isCurrent() && (aiJob.value = job) },
+    )
     if (!isCurrent()) return
-    results.value = res.data.results
-    resultCount.value = res.data.count
-    appliedConditions.value = res.data.conditions
-    resultDisclaimer.value = aiDisclaimer(res.data)
+    results.value = data.results
+    resultCount.value = data.count
+    resultMeta.value = pickScreenerMeta(data)
+    appliedConditions.value = data.conditions
+    resultDisclaimer.value = aiDisclaimer(data)
     notice.value = 'AI 已把需求翻译为可复现的结构化条件并执行'
   } catch (e) {
     if (!isCurrent() || isCanceled(e)) return
@@ -239,16 +255,20 @@ async function runComment() {
   const { signal, isCurrent } = commentTask.start()
   comment.value = ''
   commentLoading.value = true
+  commentJob.value = null
   startTicker(commentElapsed)
   try {
     // 后端只认代码并按代码从库里取数，最多 50 只（AIX-01）
     const codes = results.value.slice(0, COMMENT_MAX_ROWS).map((r) => ({ code: r.code }))
-    const res = await aiApi.screenerComment((query.value || '自定义条件').slice(0, 200), codes, {
-      signal,
-    })
+    const q = (query.value || '自定义条件').slice(0, 200)
+    const data = await runAiJob(
+      () => aiApi.screenerCommentAsync(q, codes, { signal }),
+      (jobId) => aiApi.aiJob(jobId, { signal }),
+      { signal, onStatus: (job) => isCurrent() && (commentJob.value = job) },
+    )
     if (!isCurrent()) return
-    comment.value = res.data.comment
-    commentDisclaimer.value = aiDisclaimer(res.data)
+    comment.value = data.comment
+    commentDisclaimer.value = aiDisclaimer(data)
   } catch (e) {
     if (!isCurrent() || isCanceled(e)) return
     errorMsg.value = aiErrorText(e)
@@ -301,7 +321,7 @@ function goDetail(row) {
           @keyup.enter="runAi"
         />
         <button class="btn primary" :disabled="aiLoading || !query.trim()" @click="runAi">
-          {{ aiLoading ? `AI 翻译中… ${aiElapsed} 秒` : 'AI 选股' }}
+          {{ aiLoading ? `${aiJobPhaseText(aiJob, 'AI 翻译中')}… ${aiElapsed} 秒` : 'AI 选股' }}
         </button>
         <button v-if="aiLoading" class="btn" @click="cancelAi">取消</button>
       </div>
@@ -370,7 +390,11 @@ function goDetail(row) {
         <div class="comment-actions">
           <button v-if="commentLoading" class="btn" @click="cancelComment">取消</button>
           <button class="btn" :disabled="commentLoading" @click="runComment">
-            {{ commentLoading ? `AI 点评中… ${commentElapsed} 秒` : 'AI 点评' }}
+            {{
+              commentLoading
+                ? `${aiJobPhaseText(commentJob, 'AI 点评中')}… ${commentElapsed} 秒`
+                : 'AI 点评'
+            }}
           </button>
         </div>
       </div>
@@ -380,6 +404,7 @@ function goDetail(row) {
       <div v-if="resultDisclaimer" class="disclaimer">
         条件由 AI 翻译生成。{{ resultDisclaimer }}
       </div>
+      <ScreenerResultMeta :meta="resultMeta" />
       <!-- 窄屏下表格横向滚动，不撑宽整页（FEX-05） -->
       <div class="table-scroll">
         <table class="result-table">
@@ -427,6 +452,7 @@ function goDetail(row) {
       </div>
     </div>
     <div v-else-if="appliedConditions && !results.length" class="card hint">
+      <ScreenerResultMeta :meta="resultMeta" />
       没有符合条件的股票。
     </div>
   </div>

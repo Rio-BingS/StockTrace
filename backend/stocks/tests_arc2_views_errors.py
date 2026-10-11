@@ -153,7 +153,6 @@ class ErrorHierarchyTests(SimpleTestCase):
     def test_hierarchy_and_legacy_paths(self):
         from . import errors
         from .common import upstream
-        from . import views
 
         self.assertTrue(issubclass(errors.BadRequest, errors.StockTraceError))
         self.assertTrue(issubclass(errors.BadRequest, ValueError))  # 旧 except ValueError 仍能接住
@@ -162,7 +161,7 @@ class ErrorHierarchyTests(SimpleTestCase):
             self.assertFalse(issubclass(cls, ValueError))
         # 旧导入路径与新定义是同一个类
         self.assertIs(upstream.UpstreamTimeout, errors.UpstreamTimeout)
-        self.assertIs(views.UpstreamCircuitOpen, errors.UpstreamCircuitOpen)
+        self.assertIs(upstream.UpstreamCircuitOpen, errors.UpstreamCircuitOpen)
         self.assertEqual(
             [errors.BadRequest.status_code, errors.UpstreamError.status_code,
              errors.UpstreamTimeout.status_code, errors.UpstreamCircuitOpen.status_code],

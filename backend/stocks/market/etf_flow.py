@@ -24,7 +24,7 @@ from datetime import date, timedelta
 import requests
 from django.utils import timezone
 
-from ._cache import _cache_get, _cache_meta, _cache_set, _to_float
+from ._cache import cache_get, _cache_meta, cache_set, _to_float
 from .etf import NATIONAL_TEAM_ETFS
 from .periods import resolve_period
 
@@ -112,19 +112,17 @@ def parse_flow_kline(row):
     }
 
 
-# 兼容旧名
-_parse_kline = parse_flow_kline
 
 
 def flow_history(code, ttl=_FLOW_HIST_TTL):
     """单只 ETF 的历史每日资金流（进程内缓存，日历感知保鲜）。"""
     cache_key = f'em_fflow_hist_{code}'
-    cached = _cache_get(cache_key, ttl)
+    cached = cache_get(cache_key, ttl)
     if cached is not None:
         return cached
-    rows = [r for r in (_parse_kline(k) for k in _fetch_klines(code)) if r]
+    rows = [r for r in (parse_flow_kline(k) for k in _fetch_klines(code)) if r]
     if rows:
-        _cache_set(cache_key, rows)
+        cache_set(cache_key, rows)
     return rows
 
 
@@ -148,7 +146,7 @@ def get_national_team_flow(period='3m', start=None, end=None, ttl=1800):
     else:
         period = window.preset
         cache_key = f'ntf_flow_{period}'
-        cached = _cache_get(cache_key, ttl)
+        cached = cache_get(cache_key, ttl)
         if cached is not None:
             return cached
         days = _FLOW_PERIODS[period]
@@ -168,7 +166,7 @@ def get_national_team_flow(period='3m', start=None, end=None, ttl=1800):
     # 探针：整条线路不可达时立即返回，避免 18 连发空耗
     try:
         flow_history(NATIONAL_TEAM_ETFS[0][0])
-    except Exception as e:  # noqa: BLE001
+    except Exception as e:  # noqa: BLE001 上游边界：探针任何失败都视为线路不可达
         logger.warning('国家队资金流探针失败，跳过本轮: %s', e)
         return _unavailable_payload(cache_key, ttl, 'custom' if custom else period, window_start, str(e))
 
@@ -259,7 +257,7 @@ def get_national_team_flow(period='3m', start=None, end=None, ttl=1800):
     }
     # 只缓存完整结果；部分失败时下次请求仅重试失败标的（成功的走单只缓存）
     if fetched == len(NATIONAL_TEAM_ETFS):
-        _cache_set(cache_key, data)
+        cache_set(cache_key, data)
     return data
 
 

@@ -65,36 +65,8 @@ class StockSearchSerializer(serializers.Serializer):
     name = serializers.CharField()
 
 
-class DashboardStockSerializer(serializers.Serializer):
-    """Dashboard 聚合数据 - 当日所有关注股票摘要（含可选持仓成本）"""
-    id = serializers.IntegerField()
-    code = serializers.CharField()
-    name = serializers.CharField(allow_blank=True)
-    group_id = serializers.IntegerField(allow_null=True)
-    group_name = serializers.CharField(allow_null=True)
-    cost_price = serializers.DecimalField(max_digits=10, decimal_places=3, allow_null=True)
-    quantity = serializers.IntegerField(allow_null=True)
-    trade_date = serializers.DateField(allow_null=True)
-    # 价格类 3 位小数，与 DailyQuote 一致（DAT-11）
-    open_price = serializers.DecimalField(max_digits=10, decimal_places=3, allow_null=True)
-    close_price = serializers.DecimalField(max_digits=10, decimal_places=3, allow_null=True)
-    high_price = serializers.DecimalField(max_digits=10, decimal_places=3, allow_null=True)
-    low_price = serializers.DecimalField(max_digits=10, decimal_places=3, allow_null=True)
-    high_time = serializers.DateTimeField(allow_null=True)
-    low_time = serializers.DateTimeField(allow_null=True)
-    open_close_diff = serializers.DecimalField(max_digits=10, decimal_places=3, allow_null=True)
-    open_close_pct = serializers.DecimalField(max_digits=8, decimal_places=4, allow_null=True)
-    high_low_diff = serializers.DecimalField(max_digits=10, decimal_places=3, allow_null=True)
-    high_low_pct = serializers.DecimalField(max_digits=8, decimal_places=4, allow_null=True)
-    prev_close = serializers.DecimalField(max_digits=10, decimal_places=3, allow_null=True)
-    change_diff = serializers.DecimalField(max_digits=10, decimal_places=3, allow_null=True)
-    change_pct = serializers.DecimalField(max_digits=8, decimal_places=4, allow_null=True)
-    volume = serializers.IntegerField(allow_null=True)
-    turnover = serializers.DecimalField(max_digits=15, decimal_places=2, allow_null=True)
-
-
 # ------------------------------------------------------------
-# 只读行序列化器（ARC-01）：取代 views 里手写的 _quote_row/_alert_row/_group_row。
+# 只读行序列化器（ARC-01）：取代 views 里手写的行字典（旧 _quote_row 等已删除）。
 # 字段顺序与类型和旧字典逐一对应，tests_arc2_snapshots 锁定输出逐字节不变。
 # ------------------------------------------------------------
 
@@ -107,7 +79,7 @@ class QuoteRowSerializer(serializers.Serializer):
     """Dashboard 行：自选股票 + 最新一天日线。
 
     instance 是带 `latest_quote` 属性（DailyQuote 或 None）的 Stock；
-    输出与旧 `DashboardStockSerializer(_quote_row(stock, quote))` 完全一致。
+    输出与旧 DashboardStockSerializer + 行字典的组合完全一致（快照测试锁定）。
     """
     id = serializers.IntegerField(read_only=True)
     code = serializers.CharField(read_only=True)

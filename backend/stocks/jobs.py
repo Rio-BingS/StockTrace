@@ -34,9 +34,9 @@ def fetch_stock_all_data(stock, days_back=5, light=False):
             if real_name and real_name != stock.code:
                 stock.name = real_name
                 stock.save(update_fields=['name'])
-        except Exception as e:
+        except Exception as e:  # noqa: BLE001 上游边界：名称源异常类型不固定，失败只降级
             # 名称补全失败不影响数据拉取，但要留痕便于排查
-            logger.warning(f"补全 {stock.code} 名称失败（不影响行情拉取）: {e}")
+            logger.warning("补全 %s 名称失败（不影响行情拉取）: %s", stock.code, e)
 
     daily_count = fetch_daily_data(stock)
 
@@ -62,7 +62,7 @@ def fetch_stock_all_data(stock, days_back=5, light=False):
 def _fetch_active_stocks(light, error_fmt):
     """逐只拉取全部活跃关注股（fetch_stock_all_data），单只失败只记日志不中断。
 
-    error_fmt：单只失败时的日志模板（含 {code} / {e}），保持两个入口原有日志文案。
+    error_fmt：单只失败时的日志模板（% 参数：代码、异常），保持两个入口原有日志文案。
     """
     results = []
     for stock in Stock.objects.filter(is_active=True):
@@ -70,7 +70,8 @@ def _fetch_active_stocks(light, error_fmt):
             count = fetch_stock_all_data(stock, light=light)
             results.append({'code': stock.code, 'status': 'success', 'count': count})
         except Exception as e:
-            logger.error(error_fmt.format(code=stock.code, e=e))
+            # 批量边界：单只失败（上游/解析/入库任一环节）不中断其余股票
+            logger.exception(error_fmt, stock.code, e)
             results.append({'code': stock.code, 'status': 'error', 'message': str(e)})
         time.sleep(1)
     return results
@@ -78,7 +79,7 @@ def _fetch_active_stocks(light, error_fmt):
 
 def fetch_all_active_stocks(light=True):
     """拉取所有活跃关注股票的数据。默认 light，避免手动全量一次打爆接口。"""
-    return _fetch_active_stocks(light, '拉取 {code} 数据失败: {e}')
+    return _fetch_active_stocks(light, '拉取 %s 数据失败: %s')
 
 
 def fetch_keep_fresh(light=True):
@@ -88,8 +89,8 @@ def fetch_keep_fresh(light=True):
 
     与 fetch_all_active_stocks 同一实现（A-28），只是日志文案不同并多记一条汇总。
     """
-    results = _fetch_active_stocks(light, '保活拉取 {code} 失败: {e}')
-    logger.info(f"保活拉取完成: {len(results)} 只")
+    results = _fetch_active_stocks(light, '保活拉取 %s 失败: %s')
+    logger.info("保活拉取完成: %s 只", len(results))
     return results
 
 
@@ -109,7 +110,8 @@ def fetch_intraday_update():
         try:
             fetch_minute_data(stock)
         except Exception as e:
-            logger.error(f"盘中更新 {stock.code} 失败: {e}")
+            # 批量边界：单只失败不中断其余股票
+            logger.exception("盘中更新 %s 失败: %s", stock.code, e)
         time.sleep(0.8)
 
 
@@ -129,7 +131,8 @@ def fetch_daily_summary():
             fetch_daily_data(stock, start_date=start, end_date=today_str)
             fetch_minute_data(stock)
         except Exception as e:
-            logger.error(f"收盘汇总 {stock.code} 失败: {e}")
+            # 批量边界：单只失败不中断其余股票
+            logger.exception("收盘汇总 %s 失败: %s", stock.code, e)
         time.sleep(1)
 
 
@@ -144,10 +147,11 @@ def fetch_incremental_daily_all():
         try:
             n = fetch_daily_data(stock)
             ok += 1
-            logger.info(f"增量日线 {stock.code}: {n} 条")
+            logger.info("增量日线 %s: %s 条", stock.code, n)
         except Exception as e:
+            # 批量边界：单只失败只计数，不中断其余股票
             fail += 1
-            logger.error(f"增量日线 {stock.code} 失败: {e}")
+            logger.exception("增量日线 %s 失败: %s", stock.code, e)
         time.sleep(0.8)
-    logger.info(f"增量日线完成 ok={ok} fail={fail}")
+    logger.info("增量日线完成 ok=%s fail=%s", ok, fail)
     return {'ok': ok, 'fail': fail}

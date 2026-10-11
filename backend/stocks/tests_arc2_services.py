@@ -25,25 +25,21 @@ def _imported_names(rel_path):
 class PublicApiTests(SimpleTestCase):
     def test_paginate_clamps_and_reports(self):
         from stocks.common.pagination import paginate
-        from stocks.market._query import _paginate
 
-        self.assertIs(_paginate, paginate)
         items, info = paginate(list(range(5)), 9, 2)
         self.assertEqual(items, [4])
         self.assertEqual(info, {'page': 3, 'page_size': 2, 'total': 5, 'total_pages': 3})
         items, info = paginate([], 1, 50)
         self.assertEqual((items, info['total_pages'], info['page']), ([], 1, 1))
 
-    def test_cache_public_names_alias_private(self):
+    def test_cache_public_names(self):
         import importlib
 
         # stocks.market 包把 _cache（字典）导出到了包命名空间，须按模块路径取
         c = importlib.import_module('stocks.market._cache')
 
-        self.assertIs(c._cache_get, c.cache_get)
-        self.assertIs(c._cache_set, c.cache_set)
-        self.assertIs(c._is_fresh, c.is_fresh)
-        self.assertIs(c._stale_or, c.stale_or)
+        for old in ('_cache_get', '_cache_set', '_is_fresh', '_stale_or'):
+            self.assertFalse(hasattr(c, old), old)  # 旧私有别名已删除（P3 cleanup）
         c.cache_set('arc2_k', [1])
         self.assertEqual(c.cache_get('arc2_k', 60), [1])
         self.assertEqual(c.stale_or('arc2_k', None), [1])
@@ -59,13 +55,10 @@ class PublicApiTests(SimpleTestCase):
             self.assertEqual(exchange_prefix(code, sep='.'), f'{ex}.{code}')
         self.assertEqual(exchange_prefix('1'), 'sz000001')
 
-    def test_old_code_helpers_match_new(self):
-        from stocks import services
-        from stocks.common.codes import exchange_prefix
+    def test_baostock_format_code_uses_exchange_prefix(self):
+        from stocks.datasources import BaoStockSource
 
-        for code in ('600000', '000001', '830799', '510300', '1'):
-            self.assertEqual(services._to_shsz_prefix(code), exchange_prefix(code))
-        src = services.BaoStockSource()
+        src = BaoStockSource()
         self.assertEqual(src._format_code('600000'), 'sh.600000')
         self.assertEqual(src._format_code('1'), 'sz.000001')
         self.assertIsNone(src._format_code('830799'))
@@ -73,8 +66,8 @@ class PublicApiTests(SimpleTestCase):
     def test_market_exports_public_parsers(self):
         from stocks import market
 
-        self.assertIs(market.etf_row_to_item, market._etf_row_to_item)
-        self.assertIs(market.parse_fund_flow_table, market._parse_fund_flow_table)
+        self.assertFalse(hasattr(market, '_etf_row_to_item'))
+        self.assertFalse(hasattr(market, '_parse_fund_flow_table'))
         self.assertIn('etf_row_to_item', market.__all__)
         self.assertIn('parse_fund_flow_table', market.__all__)
 

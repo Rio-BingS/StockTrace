@@ -2,7 +2,7 @@
 
 某源连续失败后暂时跳过，降低东财限流概率（简易「负载均衡」）。
 SourceChain 是全项目唯一的多源 failover 实现：市场接口（_first_ok/_safe_df_call）
-与个股行情（services._try_sources）共用（ARC-03）。
+与个股行情（datasources.chain._try_sources）共用（ARC-03）。
 """
 
 from __future__ import annotations
@@ -57,10 +57,10 @@ def _source_mark_fail(name, err):
         if st['fails'] >= _SOURCE_FAIL_THRESHOLD:
             st['cool_until'] = time.time() + _SOURCE_COOLDOWN_SEC
             logger.warning(
-                f"数据源 {name} 连续失败 {st['fails']} 次，冷却 {_SOURCE_COOLDOWN_SEC}s: {err}"
+                "数据源 %s 连续失败 %s 次，冷却 %ss: %s", name, st['fails'], _SOURCE_COOLDOWN_SEC, err
             )
         else:
-            logger.warning(f"数据源 {name} 失败 ({st['fails']}): {err}")
+            logger.warning("数据源 %s 失败 (%s): %s", name, st['fails'], err)
         _source_state_put(name, st)
 
 
@@ -106,17 +106,17 @@ class SourceChain:
             forced = candidates[-1][1] if candidates else None
         for i, (fn, name) in enumerate(candidates):
             if _source_is_cool(name) and name != forced:
-                logger.debug(f"跳过冷却中的数据源 {name}")
+                logger.debug("跳过冷却中的数据源 %s", name)
                 continue
             if self.deadline is not None and time.monotonic() - started >= self.deadline:
-                logger.warning(f"多源链路超过总时限 {self.deadline}s，不再尝试 {name} 及之后的源")
+                logger.warning("多源链路超过总时限 %ss，不再尝试 %s 及之后的源", self.deadline, name)
                 break
             if pending_wait:
                 self.sleep(pending_wait)
                 pending_wait = 0
             try:
                 result = fn(*args, **kwargs)
-            except Exception as e:
+            except Exception as e:  # noqa: BLE001 上游边界：异常类型不固定，记入冷却统计后换下一个源
                 _source_mark_fail(name, e)
                 pending_wait = self.backoff(i) if self.backoff else 0
                 continue
@@ -127,7 +127,7 @@ class SourceChain:
                 if self.empty_is_failure:
                     _source_mark_fail(name, 'empty')
                 else:
-                    logger.debug(f"数据源 {name} 返回空数据，尝试下一个")
+                    logger.debug("数据源 %s 返回空数据，尝试下一个", name)
                 pending_wait = self.backoff(i) if self.backoff else 0
                 continue
             _source_mark_ok(name)

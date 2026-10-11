@@ -14,7 +14,7 @@ VPS 上的 `/opt/stocktrace` 是本仓库的 git 工作副本，按发布标签�
 | 2 | 升级与回滚 |
 | 3 | 运维命令与调度器 |
 | 4 | 低配建议 |
-| 5 | HTTPS 回源、限流、防火墙、systemd 沙箱 |
+| 5 | HTTPS 回源、限流、防火墙、systemd 沙箱、CSP |
 | 6 | 数据库备份与恢复演练 |
 | 7 | 依赖锁定与升级 |
 | 8 | 日志与健康检查 |
@@ -275,7 +275,7 @@ sudo systemctl stop stocktrace-scheduler
 | 项 | 建议 |
 |----|------|
 | 自选数量 | 尽量 ≤ 20，盘中任务按股串行 |
-| Gunicorn workers | 保持 1；内存仍紧再降 threads。AI 分析的后台任务队列与结果存在 Web 进程内存里（`/api/ai/jobs/<id>/`），多 worker 时轮询可能打到别的 worker 而 404，进程重启会丢失排队中的任务 |
+| Gunicorn workers | 1H2G 保持 1（省内存）；内存仍紧再降 threads。AI 后台任务（个股分析、AI 选股翻译/点评，`/api/ai/jobs/<id>/`）已落库到 `AiJob`，不再要求单 worker：加 worker 时任务由各 worker 的后台线程从库里抢占执行、不会重复，轮询打到任一 worker 都能查到；重启后排队中的任务继续执行，执行中被打断的标为失败（需重新发起）。AI 并发上限 `STOCKTRACE_AI_MAX_CONCURRENCY` 对后台任务跨 worker 生效，对同步接口仍是每进程 |
 | 调度进程 | `stocktrace-scheduler` 单独计内存（`MemoryMax=700M`），与 Web 互不拖累 |
 | 勿在 VPS 上 `npm run dev` | 只用 `dist` |
 | 勿提交 | `db.sqlite3`、`.env`、htpasswd（含用户名）、真实 SECRET_KEY |
@@ -324,6 +324,7 @@ sudo nginx -t && sudo systemctl reload nginx
   `X-Frame-Options: DENY`、`Referrer-Policy: same-origin`；`/assets/`（带哈希的构建产物）一年
   `immutable` 缓存，`index.html` `no-cache`，发版后不会因旧入口页引用已删除的资源而白屏。
   验证：`curl -sI -u <user>:<pass> https://<域名>/ | grep -iE 'server|x-frame|nosniff|referrer|cache-control'`
+- **Content-Security-Policy**（P3）：默认以 `Content-Security-Policy-Report-Only` 观察，策略与切换强制的步骤见 5.6
 
 ### 5.3 切换 Cloudflare SSL 模式（后台操作）
 
@@ -396,6 +397,72 @@ sudo journalctl -u stocktrace -u stocktrace-scheduler -n 100 --no-pager | grep -
 
 出现 `Read-only file system` / `Permission denied` 时，说明有代码写到了上表以外的位置：先记下路径，
 临时在对应单元加 `ReadWritePaths=<路径>` 恢复服务，再反馈修正代码或单元文件。
+
+### 5.6 Content-Security-Policy：先 Report-Only 观察，再改为强制（P3）
+
+策略写在 `nginx-stocktrace.conf` 顶部的两个 `map` 里，按 `npm run build` 产物实测收紧：
+
+```
+default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self';
+font-src 'self'; connect-src 'self'; object-src 'none'; base-uri 'none';
+frame-ancestors 'none'; form-action 'self'
+```
+
+| 指令 | 为什么这样写 |
+|---|---|
+| `script-src 'self'` | `dist/index.html` 只有外链 `/assets/*.js`，无内联脚本；产物无 `eval`/`new Function`；Django admin（6.x）脚本也全部外链 |
+| `style-src 'self' 'unsafe-inline'` | ECharts tooltip（默认与自定义 formatter）用 innerHTML 写入带 `style=""` 的 HTML，不放开 tooltip 会丢样式；Vue `:style` 走 CSSOM 不受限 |
+| `img-src` / `font-src` / `connect-src 'self'` | 站内没有外部字体和图片（系统字体、favicon 同源）；接口只走同源 `/api/`，LLM 由后端代发；没有 websocket |
+| `frame-ancestors 'none'` | 与现有 `X-Frame-Options: DENY` 等价；两者并存（老浏览器只认 XFO），不算重复定义 |
+| `object-src 'none'`、`base-uri 'none'`、`form-action 'self'` | 无插件、无 `<base>`；表单只有 admin 登录/登出，提交到同源 |
+
+与既有安全头的关系：`X-Content-Type-Options`、`X-Frame-Options`、`Referrer-Policy` 不变；CSP 两条头
+与它们一样在 server 级、`= /index.html`、`/assets/` 三处声明（location 一旦写 `add_header` 就不继承上层）；
+反代到 Django 的 location 额外 `proxy_hide_header` 掉 CSP 两个头（Django 6 自带 CSP 中间件，日后启用也不会出现两份）。
+`map` 值为空字符串时 nginx 不下发该头，所以任何时刻只有一条 CSP 头生效。
+
+**第 1 步：以 Report-Only 上线**（模板默认如此：`$stocktrace_csp_report_only` 有值、`$stocktrace_csp` 为空）
+
+```bash
+sudo cp /opt/stocktrace/deploy/nginx-stocktrace.conf /etc/nginx/sites-available/stocktrace   # 域名不同先按第 1 节 sed
+sudo nginx -t && sudo systemctl reload nginx
+curl -sI -u <user>:<pass> https://<域名>/ | grep -i content-security
+# 期望只有一行：content-security-policy-report-only: default-src 'self'; ...
+```
+
+**第 2 步：观察一两天**。没有配上报地址（应用不新增接收接口），违规只出现在浏览器开发者工具 Console，
+形如 `[Report Only] Refused to ... because it violates the following Content Security Policy directive`。
+桌面浏览器打开 DevTools → Console（勾选 Preserve log），逐个走一遍：看板（等一次 60s 轮询）、自选/个股详情
+（K 线与分时图悬停 tooltip）、选股（手动与 AI 选股、AI 点评）、探测器、市场各子页（ETF 详情图表悬停、
+自定义区间）、设置页（AI 配置保存/测试）、`/admin/` 登录与一个列表页。手机端至少打开看板与 ETF 详情。
+
+- 有违规：记下被拦的指令与地址。确属站点需要的（例如日后接入外部图片）再在 map 里最小放开；
+  浏览器插件注入的（`chrome-extension://` 等）忽略。
+- Cloudflare 的 Rocket Loader（改写脚本加载）与 Web Analytics 自动注入（`static.cloudflareinsights.com`）
+  会触发违规：建议在 Cloudflare 后台关掉这些功能，而不是给 CSP 加白名单。
+
+**第 3 步：改为强制**。编辑 `/etc/nginx/sites-available/stocktrace`（并同步回仓库模板）：把
+`$stocktrace_csp_report_only` 那个 map 里的策略串剪切到 `$stocktrace_csp` 的 map，前者改回 `""`：
+
+```nginx
+map $host $stocktrace_csp_report_only {
+    default "";
+}
+map $host $stocktrace_csp {
+    default "default-src 'self'; script-src 'self'; ... form-action 'self'";
+}
+```
+
+```bash
+sudo nginx -t && sudo systemctl reload nginx      # nginx -t 不通过绝不 reload
+curl -sI -u <user>:<pass> https://<域名>/ | grep -i content-security
+# 期望只有一行：content-security-policy: default-src 'self'; ...（不再有 report-only）
+```
+
+强制后再按第 2 步的清单完整走一遍；页面白屏或图表 tooltip 无样式时，Console 会显示被拦的指令。
+
+**回滚**：把策略串移回 `$stocktrace_csp_report_only`、`$stocktrace_csp` 置 `""`，`sudo nginx -t && sudo systemctl reload nginx`。
+Report-Only 只报不拦，不影响任何功能。
 
 ---
 

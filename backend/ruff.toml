@@ -9,7 +9,14 @@ select = ["E4", "E7", "E9", "F"]
 
 # 类型注解（ARC-07）：ANN 只对新文件启用，旧文件整体豁免，避免大面积改动。
 # 下面是取反匹配：不在花括号列表里的文件都忽略 ANN；新建的文件加进列表即可。
-extend-select = ["ANN"]
+#
+# 日志与异常（步骤 5d）：G004 禁止 f-string 日志（用 % 参数，便于日志聚合按模板归并）；
+# TRY400 要求 except 里用 logger.exception（或 warning(..., exc_info=True)）保留堆栈；
+# BLE001 禁止无日志的 except Exception。确需宽捕获的上游/批量/视图边界写
+# `# noqa: BLE001 原因`，或在 except 内 logger.exception / exc_info=True 留痕。
+extend-select = ["ANN", "G004", "TRY400", "BLE001"]
 
 [lint.per-file-ignores]
 "!{stocks/ai/serializers.py,stocks/detector/constants.py,stocks/screener/*.py,stocks/tests_arc2_detector_ai.py}" = ["ANN"]
+# 测试里模拟「吞异常」场景、收集工作线程异常需要宽捕获
+"stocks/tests*.py" = ["BLE001"]

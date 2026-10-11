@@ -4,6 +4,14 @@ import { useDialog } from '../composables/useDialog.js'
 import { confirmDialog } from '../stores/feedback.js'
 import { aiApi } from '../api/stocks.js'
 import { aiErrorText, fieldErrorText } from '../utils/aiRequest.js'
+import {
+  PARAM_STYLE_OPTIONS,
+  PRIORITY_MAX,
+  PRIORITY_MIN,
+  normalizePriority,
+  paramStyleLabel,
+  providerForm,
+} from '../constants/aiProvider.js'
 
 const providers = ref([])
 const loading = ref(false)
@@ -11,7 +19,7 @@ const errorMsg = ref('')
 const notice = ref('')
 
 // 表单状态：编辑时保留 id；api_key 为空表示不修改
-const form = ref({ id: null, name: '', base_url: '', model: '', api_key: '', is_enabled: true })
+const form = ref(providerForm())
 const showForm = ref(false)
 const saving = ref(false)
 const testingId = ref(null)
@@ -42,19 +50,12 @@ function errText(e) {
 }
 
 function openCreate() {
-  form.value = { id: null, name: '', base_url: '', model: '', api_key: '', is_enabled: true }
+  form.value = providerForm()
   showForm.value = true
 }
 
 function openEdit(p) {
-  form.value = {
-    id: p.id,
-    name: p.name,
-    base_url: p.base_url,
-    model: p.model,
-    api_key: '',
-    is_enabled: p.is_enabled,
-  }
+  form.value = providerForm(p)
   showForm.value = true
 }
 
@@ -68,6 +69,8 @@ async function save() {
       base_url: form.value.base_url,
       model: form.value.model,
       is_enabled: form.value.is_enabled,
+      priority: normalizePriority(form.value.priority),
+      param_style: form.value.param_style,
     }
     if (form.value.api_key) data.api_key = form.value.api_key
     if (form.value.id) {
@@ -124,7 +127,7 @@ onMounted(load)
       <h1>设置</h1>
       <p class="hint">
         配置 AI 服务商（OpenAI 兼容协议，如 DeepSeek / Kimi / Qwen / GLM）。API Key
-        加密存储，仅显示尾四位。
+        加密存储，仅显示尾四位。启用多个时按优先级从小到大依次调用，鉴权、限流、网络等失败会回退到下一个。
       </p>
     </div>
 
@@ -141,9 +144,11 @@ onMounted(load)
       <table class="provider-table">
         <thead>
           <tr>
+            <th>优先级</th>
             <th>名称</th>
             <th>接口地址</th>
             <th>模型</th>
+            <th>参数风格</th>
             <th>API Key</th>
             <th>状态</th>
             <th>操作</th>
@@ -151,9 +156,11 @@ onMounted(load)
         </thead>
         <tbody>
           <tr v-for="p in providers" :key="p.id">
+            <td class="mono">{{ p.priority ?? '-' }}</td>
             <td>{{ p.name }}</td>
             <td class="mono">{{ p.base_url }}</td>
             <td class="mono">{{ p.model }}</td>
+            <td>{{ paramStyleLabel(p.param_style) }}</td>
             <td class="mono">{{ p.api_key_masked }}</td>
             <td>
               <span :class="p.is_enabled ? 'tag on' : 'tag off'">{{
@@ -216,6 +223,25 @@ onMounted(load)
               autocomplete="new-password"
               placeholder="sk-..."
             />
+          </div>
+          <div class="field">
+            <label for="provider-priority">优先级（数字越小越优先）</label>
+            <input
+              id="provider-priority"
+              v-model.number="form.priority"
+              type="number"
+              :min="PRIORITY_MIN"
+              :max="PRIORITY_MAX"
+              step="1"
+            />
+          </div>
+          <div class="field">
+            <label for="provider-param-style">参数风格</label>
+            <select id="provider-param-style" v-model="form.param_style">
+              <option v-for="o in PARAM_STYLE_OPTIONS" :key="o.value" :value="o.value">
+                {{ o.label }}
+              </option>
+            </select>
           </div>
           <div class="field row">
             <label class="checkbox">
@@ -353,7 +379,8 @@ onMounted(load)
   color: #aaa;
   margin-bottom: 4px;
 }
-.field input {
+.field input,
+.field select {
   width: 100%;
   box-sizing: border-box;
   padding: 8px 10px;

@@ -150,8 +150,8 @@ def _warm_review_sources():
     for code in codes:
         try:
             indices.fetch_index_daily_series(code, days=130)
-        except Exception as e:  # noqa: BLE001
-            logger.warning(f'回看指数日线预热失败 {code}: {e}')
+        except Exception as e:  # noqa: BLE001 上游边界：预热失败不影响扫描，取数时各维度自行降级
+            logger.warning("回看指数日线预热失败 %s: %s", code, e)
 
 
 def _clear_stale_signals(trade_date, cleared):
@@ -200,7 +200,7 @@ def run_scan(trade_date=None):
         if margin_rows:
             message_parts.append(f'融资余额快照新增 {margin_rows} 行')
     except Exception as e:  # noqa: BLE001  快照失败不阻断扫描，维度自行降级
-        logger.warning(f'融资余额快照落库失败: {e}')
+        logger.warning("融资余额快照落库失败: %s", e)
         degraded.append({'target': 'snapshot:margin', 'reason': str(e)})
 
     configs = load_configs()
@@ -214,7 +214,8 @@ def run_scan(trade_date=None):
     for target in targets:
         try:
             ctx, err = _build_context(target)
-        except Exception as e:  # noqa: BLE001  单对象异常只降级自己
+        except Exception as e:  # 边界：单对象异常只降级自己
+            logger.warning("探测器序列构建异常 %s:%s: %s", target['kind'], target['code'], e, exc_info=True)
             ctx, err = None, f'序列构建异常: {e}'
         target_key = f"{target['kind']}:{target['code']}"
         if ctx is None:
@@ -232,8 +233,8 @@ def run_scan(trade_date=None):
         # 平静判定与维度评估同样按单对象隔离：一个对象的脏序列不能让整轮扫描崩溃（P0 ALG-01）
         try:
             is_calm, _meta = calm_mod.is_calm(ctx)
-        except Exception as e:  # noqa: BLE001
-            logger.exception(f'探测器平静判定异常 {target_key}')
+        except Exception as e:  # 边界：单对象异常只降级自己
+            logger.exception("探测器平静判定异常 %s", target_key)
             degraded.append({'target': target_key, 'reason': f'平静判定异常: {e}'})
             continue
         if not is_calm:
@@ -243,8 +244,8 @@ def run_scan(trade_date=None):
 
         try:
             signal_data, dim_results = signals.evaluate_target(ctx, configs)
-        except Exception as e:  # noqa: BLE001
-            logger.exception(f'探测器维度评估异常 {target_key}')
+        except Exception as e:  # 边界：单对象异常只降级自己
+            logger.exception("探测器维度评估异常 %s", target_key)
             degraded.append({'target': target_key, 'reason': f'维度评估异常: {e}'})
             continue
 
@@ -284,8 +285,8 @@ def run_scan(trade_date=None):
                 # 嵌套 atomic = savepoint：单条失败只回滚自己，外层事务可继续
                 with transaction.atomic():
                     signals.upsert_signal(signal_data, dim_results)
-            except Exception as e:  # noqa: BLE001
-                logger.exception(f'探测器信号落库异常 {target_key}')
+            except Exception as e:  # 边界：单条落库失败只回滚自己的 savepoint
+                logger.exception("探测器信号落库异常 %s", target_key)
                 degraded.append({'target': target_key, 'reason': f'信号落库异常: {e}'})
                 continue
             if signal_data['cycles'] >= 2:
@@ -342,7 +343,7 @@ def run_scan(trade_date=None):
         'degraded_count': len(degraded),
         'adjustments': len(adjustments),
     }
-    logger.info(f'探测器扫描完成: {summary}')
+    logger.info("探测器扫描完成: %s", summary)
     return summary
 
 
@@ -357,4 +358,4 @@ def _cleanup(trade_date):
         trade_date__lt=trade_date - timedelta(days=run_days)
     ).delete()
     if deleted_sig or deleted_run:
-        logger.info(f'探测器清理: 信号 {deleted_sig} 行 / 运行记录 {deleted_run} 行')
+        logger.info("探测器清理: 信号 %s 行 / 运行记录 %s 行", deleted_sig, deleted_run)

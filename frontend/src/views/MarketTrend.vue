@@ -16,6 +16,7 @@ import { marketApi } from '../api/stocks.js'
 import { formatPct, pctClass } from '../utils/format.js'
 import { errorMessage, isCanceled } from '../utils/errorMessage.js'
 import { createRequestGuard } from '../utils/requestGuard.js'
+import { beijingToday } from '../utils/tradingTime.js'
 import { ACCENT } from '../constants/colors.js'
 // 图表 tooltip / 坐标轴配色统一取自 charts/theme.js（ARC-06）
 import {
@@ -57,6 +58,8 @@ const data = ref(null)
 const period = ref('3m')
 const customStart = ref('')
 const customEnd = ref('')
+// 后端拒绝晚于今天的结束日，输入框同步限制
+const maxDate = beijingToday()
 
 const seriesList = computed(() => data.value?.series || [])
 const rangeLabel = computed(() => {
@@ -198,9 +201,9 @@ onUnmounted(() => guard.abort())
         @update:model-value="setPeriod"
       />
       <div v-if="period === 'custom'" class="custom-range">
-        <input v-model="customStart" type="date" aria-label="开始日期" />
+        <input v-model="customStart" type="date" :max="maxDate" aria-label="开始日期" />
         <span>至</span>
-        <input v-model="customEnd" type="date" aria-label="结束日期" />
+        <input v-model="customEnd" type="date" :max="maxDate" aria-label="结束日期" />
         <button class="apply-btn" :disabled="loading" @click="applyCustom">查询</button>
       </div>
     </div>

@@ -168,7 +168,8 @@ def fetch_daily_data(stock, start_date=None, end_date=None, full=False, sources=
     source, df = _try_sources('fetch_daily', symbol, start_date, end_date, sources=sources)
 
     if df is None or df.empty:
-        logger.error(f"获取 {stock.code} 日K线失败：所有数据源均不可用")
+        # 上游故障已由 _try_sources 记 ERROR；这里多为空结果（无成交/冷却），只记 warning
+        logger.warning("获取 %s 日K线失败：所有数据源均不可用", stock.code)
         return 0
 
     # 按日期正序排列，以便计算昨收价
@@ -179,8 +180,9 @@ def fetch_daily_data(stock, start_date=None, end_date=None, full=False, sources=
         if changed:
             # 增量结果不落库：若全量重拉失败，下次增量仍能再次检测到并重试
             logger.warning(
-                f"[{source.name}] {stock.code} 复权基准已变化：重叠窗口 {len(changed)} 个交易日"
-                f"收盘价与库内不一致（{changed[0]}~{changed[-1]}），触发全量重拉"
+                "[%s] %s 复权基准已变化：重叠窗口 %s 个交易日"
+                "收盘价与库内不一致（%s~%s），触发全量重拉",
+                source.name, stock.code, len(changed), changed[0], changed[-1]
             )
             return fetch_daily_data(stock, end_date=end_date, full=True, sources=sources)
     # 同时查库获取该股票最早的日K记录之前的最后一条，作为 prev_close 兜底
@@ -201,7 +203,7 @@ def fetch_daily_data(stock, start_date=None, end_date=None, full=False, sources=
             trade_date = pd.to_datetime(row['日期']).date()
             # 价格缺失（NaN）的行跳过：Decimal('nan') 不抛错会污染库，价格缺失的日K也无意义
             if not all(pd.notna(row[k]) for k in ('开盘', '收盘', '最高', '最低')):
-                logger.warning(f"{stock.code} {trade_date} 日线价格缺失，跳过该行")
+                logger.warning("%s %s 日线价格缺失，跳过该行", stock.code, trade_date)
                 continue
             open_price = Decimal(str(row['开盘']))
             close_price = Decimal(str(row['收盘']))
@@ -247,8 +249,9 @@ def fetch_daily_data(stock, start_date=None, end_date=None, full=False, sources=
             )
             # 当前条目的收盘价作为下一条的昨收
             prev_close_val = close_price
-        except Exception as e:
-            logger.warning(f"解析 {stock.code} 日K行数据失败: {e}")
+        except (KeyError, TypeError, ValueError, ArithmeticError) as e:
+            # 单行字段缺失/格式异常/昨收为 0（Decimal 除零）时跳过该行
+            logger.warning("解析 %s 日K行数据失败: %s", stock.code, e)
             continue
 
     count = len(objs)
@@ -266,11 +269,11 @@ def fetch_daily_data(stock, start_date=None, end_date=None, full=False, sources=
             stock=stock, trade_date__gte=min(objs), trade_date__lte=max(objs),
         ).exclude(trade_date__in=list(objs)).count() if objs else 0
         logger.warning(
-            f"[{source.name}] {stock.code} 日线全量重拉 {count} 条（{start_date}~{end_date}），"
-            f"prev_close/change_pct 已重算"
-            + (f"；区间内仍有 {stale} 条库内行源端未返回，保留旧值" if stale else '')
+            "[%s] %s 日线全量重拉 %s 条（%s~%s），prev_close/change_pct 已重算%s",
+            source.name, stock.code, count, start_date, end_date,
+            f"；区间内仍有 {stale} 条库内行源端未返回，保留旧值" if stale else '',
         )
-    logger.info(f"[{source.name}] 获取 {stock.code} 日K线数据 {count} 条")
+    logger.info("[%s] 获取 %s 日K线数据 %s 条", source.name, stock.code, count)
     return count
 
 
@@ -320,21 +323,21 @@ def _save_minute_bars(stock, df, date_obj, source_name='', freq=1):
                 int(vol) if vol is not None and pd.notna(vol) else 0,
                 _dec2(amt) if amt is not None and pd.notna(amt) else None,
             )
-        except Exception as e:
-            logger.warning(f"解析 {stock.code} 分钟数据行失败: {e}")
+        except (KeyError, TypeError, ValueError, ArithmeticError) as e:
+            logger.warning("解析 %s 分钟数据行失败: %s", stock.code, e)
     if skipped:
-        logger.warning(f"{stock.code} {date_obj} 有 {skipped} 根分钟 bar 价格缺失，已跳过")
+        logger.warning("%s %s 有 %s 根分钟 bar 价格缺失，已跳过", stock.code, date_obj, skipped)
     if not rows:
         return 0
 
     with transaction.atomic():
         day_qs = MinuteBar.objects.filter(stock=stock, datetime__gte=day_start, datetime__lt=day_end)
         if freq > 1 and day_qs.filter(freq__lt=freq).exists():
-            logger.info(f"{stock.code} {date_obj} 已有更细周期分钟 bar，不写入 {freq} 分钟 bar")
+            logger.info("%s %s 已有更细周期分钟 bar，不写入 %s 分钟 bar", stock.code, date_obj, freq)
             return 0
         if day_qs.filter(freq__gt=freq).exists():
             removed, _ = day_qs.filter(freq__gt=freq).delete()
-            logger.info(f"{stock.code} {date_obj} 用 {freq} 分钟 bar 替换 {removed} 根更粗周期 bar")
+            logger.info("%s %s 用 %s 分钟 bar 替换 %s 根更粗周期 bar", stock.code, date_obj, freq, removed)
         existing = {
             r[0]: tuple(r[1:]) for r in day_qs.values_list(
                 'datetime', *_MINUTE_VALUE_FIELDS, 'source')
@@ -350,7 +353,7 @@ def _save_minute_bars(stock, df, date_obj, source_name='', freq=1):
                 unique_fields=['stock', 'datetime'],
                 update_fields=_MINUTE_UPDATE_FIELDS,
             )
-    logger.debug(f"{stock.code} {date_obj} 分钟 bar 共 {len(rows)} 根，写入 {len(objs)} 根")
+    logger.debug("%s %s 分钟 bar 共 %s 根，写入 %s 根", stock.code, date_obj, len(rows), len(objs))
     return len(objs)
 
 
@@ -374,7 +377,8 @@ def fetch_minute_data(stock, trade_date=None):
     source, df = _try_sources('fetch_minute', symbol, start_dt, end_dt)
 
     if df is None or df.empty:
-        logger.error(f"获取 {stock.code} 分钟K线失败：所有数据源均不可用")
+        # 同 fetch_daily_data：上游故障已由 _try_sources 记 ERROR
+        logger.warning("获取 %s 分钟K线失败：所有数据源均不可用", stock.code)
         return None
 
     # 纵深防御：求极值前再按交易日过滤一次，绝不拿别的交易日的 bar 求高低点
@@ -383,7 +387,7 @@ def fetch_minute_data(stock, trade_date=None):
     df['时间'] = pd.to_datetime(df['时间'], errors='coerce')
     df = df[df['时间'].dt.date == date_obj].sort_values('时间').reset_index(drop=True)
     if df.empty:
-        logger.warning(f"[{source.name}] {stock.code} {trade_date} 无当日分钟数据")
+        logger.warning("[%s] %s %s 无当日分钟数据", source.name, stock.code, trade_date)
         return None
 
     # 保存分钟数据：每股一个事务 + 批量 upsert，只写新增/变化的 bar（PERF-01）
@@ -392,7 +396,7 @@ def fetch_minute_data(stock, trade_date=None):
     if freq > 1 and not written and MinuteBar.objects.filter(
             stock=stock, datetime__date=date_obj, freq__lt=freq).exists():
         # 粗周期兜底不覆盖已由 1 分钟 bar 算出的更精确高低点时间
-        logger.info(f"[{source.name}] {stock.code} {trade_date} 保留已有 1 分钟 bar 的高低点时间")
+        logger.info("[%s] %s %s 保留已有 1 分钟 bar 的高低点时间", source.name, stock.code, trade_date)
         return None
 
     # 推算最高/最低点精确时间（只用当日 bar，并列取最早一根）
@@ -403,7 +407,7 @@ def fetch_minute_data(stock, trade_date=None):
             if pd.notna(t) and pd.notna(h) and pd.notna(lo)
         )
         if hl is None:
-            logger.warning(f"{stock.code} {trade_date} 分钟数据无有效价格，无法推算高低点")
+            logger.warning("%s %s 分钟数据无有效价格，无法推算高低点", stock.code, trade_date)
             return None
         high_time, low_time, high_val, low_val = hl
 
@@ -413,13 +417,14 @@ def fetch_minute_data(stock, trade_date=None):
         )
         if not updated:
             logger.warning(
-                f"{stock.code} {trade_date} 日K线数据不存在，无法更新高低点时间"
+                "%s %s 日K线数据不存在，无法更新高低点时间", stock.code, trade_date
             )
 
         logger.info(
-            f"[{source.name}] {stock.code} {trade_date} "
-            f"最高点 {high_val} @ {high_time}, "
-            f"最低点 {low_val} @ {low_time}"
+            "[%s] %s %s "
+            "最高点 %s @ %s, "
+            "最低点 %s @ %s",
+            source.name, stock.code, trade_date, high_val, high_time, low_val, low_time
         )
 
         return {
@@ -429,5 +434,6 @@ def fetch_minute_data(stock, trade_date=None):
             'low_price': Decimal(str(low_val)),
         }
     except Exception as e:
-        logger.error(f"推算 {stock.code} 高低点时间失败: {e}")
+        # 边界：分钟 bar 已入库，推算/回写高低点失败只影响这两个字段，不让整次拉取失败
+        logger.exception("推算 %s 高低点时间失败: %s", stock.code, e)
         return None

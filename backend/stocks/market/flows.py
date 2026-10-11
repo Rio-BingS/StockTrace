@@ -7,7 +7,7 @@ import logging
 import akshare as ak
 import pandas as pd
 
-from ._cache import _cache_get, _cache_meta, _cache_set, _stale_or, _to_float
+from ._cache import cache_get, _cache_meta, cache_set, stale_or, _to_float
 from ._sources import SourceChain, _safe_df_call
 from .periods import period_cache_key
 
@@ -16,13 +16,13 @@ logger = logging.getLogger(__name__)
 
 def fetch_hsgt_flow(ttl=120, force=False):
     if not force:
-        cached = _cache_get('hsgt', ttl)
+        cached = cache_get('hsgt', ttl)
         if cached is not None:
             return cached
 
     df = _safe_df_call(ak.stock_hsgt_fund_flow_summary_em, source_name='em_hsgt_summary')
     if df is None or df.empty:
-        return _stale_or('hsgt', [])
+        return stale_or('hsgt', [])
 
     rows = []
     for _, r in df.iterrows():
@@ -51,18 +51,18 @@ def fetch_hsgt_flow(ttl=120, force=False):
                 row['net_buy'] = None
             if row.get('net_inflow') == 0:
                 row['net_inflow'] = None
-    _cache_set('hsgt', rows)
+    cache_set('hsgt', rows)
     return rows
 
 
 def fetch_market_activity(ttl=120):
-    cached = _cache_get('activity', ttl)
+    cached = cache_get('activity', ttl)
     if cached is not None:
         return cached
 
     df = _safe_df_call(ak.stock_market_activity_legu, source_name='legu_activity')
     if df is None or df.empty:
-        return _stale_or('activity', {})
+        return stale_or('activity', {})
 
     raw = {}
     for _, r in df.iterrows():
@@ -88,7 +88,7 @@ def fetch_market_activity(ttl=120):
         'activity': str(pick('活跃度') or ''),
         'stat_time': str(pick('统计日期') or ''),
     }
-    _cache_set('activity', data)
+    cache_set('activity', data)
     return data
 
 
@@ -187,7 +187,7 @@ def fetch_market_fund_flow_hist(days=30, ttl=300, force=False):
     """
     cache_key = f'market_ff_{days}'
     if not force:
-        cached = _cache_get(cache_key, ttl)
+        cached = cache_get(cache_key, ttl)
         if cached is not None:
             return cached
 
@@ -219,7 +219,7 @@ def fetch_market_fund_flow_hist(days=30, ttl=300, force=False):
         )
 
     if data is None:
-        data = _stale_or(
+        data = stale_or(
             cache_key,
             {
                 'available': False,
@@ -229,7 +229,7 @@ def fetch_market_fund_flow_hist(days=30, ttl=300, force=False):
             },
         )
     else:
-        _cache_set(cache_key, data)
+        cache_set(cache_key, data)
     return data
 
 
@@ -246,7 +246,7 @@ def get_market_fund_flow_window(window, ttl=300):
     from .snapshots import MARKET_FF_SCOPE, MARKET_FF_UNIT, fetch_market_ff_merged_rows, market_ff_snapshot_rows
 
     cache_key = period_cache_key('market_ff_win', window)
-    cached = _cache_get(cache_key, ttl)
+    cached = cache_get(cache_key, ttl)
     if cached is not None:
         return cached
 
@@ -326,7 +326,7 @@ def get_market_fund_flow_window(window, ttl=300):
         ),
     }
     if rows:
-        _cache_set(cache_key, data)
+        cache_set(cache_key, data)
     return data
 
 
@@ -335,7 +335,7 @@ def get_northbound_window(window, ttl=300):
     from .institutions import NORTH_DISCLOSURE_MSG, fetch_northbound_flow_series
 
     cache_key = period_cache_key('north_win', window)
-    cached = _cache_get(cache_key, ttl)
+    cached = cache_get(cache_key, ttl)
     if cached is not None:
         return cached
 
@@ -365,5 +365,5 @@ def get_northbound_window(window, ttl=300):
         ),
     }
     if items:
-        _cache_set(cache_key, data)
+        cache_set(cache_key, data)
     return data

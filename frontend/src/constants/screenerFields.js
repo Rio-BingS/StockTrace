@@ -1,6 +1,6 @@
 /** 选股字段、运算符与排序选项（ARC-09：从 Screener.vue 抽出，条件编辑器与结果表共用） */
 
-// 与后端 stocks/ai/screener.py FIELDS 保持一致
+// 与后端 stocks/screener/engine.py FIELDS 保持一致
 export const FIELDS = [
   { key: 'change_pct', label: '涨跌幅(%)' },
   { key: 'open_close_pct', label: '日内涨幅(%)' },

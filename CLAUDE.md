@@ -42,12 +42,12 @@ npm run lint && npm run build   # eslint（vue essential 档）+ 产物到 dist/
 | 层 | 位置 |
 |---|---|
 | 模型 | `backend/stocks/models.py`（Stock / DailyQuote / MinuteBar / MarketDailySnapshot / PriceAlert / DetectorSignal 等） |
-| 自选行情抓取（多源降级） | `backend/stocks/services.py`（EastMoney→Sina→BaoStock→Tencent） |
+| 自选行情抓取（多源降级） | `backend/stocks/datasources/` 包（四个上游适配器 + `chain` 优先级/failover：EastMoney→Sina→BaoStock→Tencent）；`ingest.py`（日 K/分钟 bar 入库、复权检测、高低点时间）；`jobs.py`（单股/批量拉取与定时入口）；`search.py`（代码/名称搜索）；`trading_calendar.py`（全项目唯一交易日历）。原 `services.py` 兼容外观已删除，按定义模块导入与 patch |
 | 后台拉取线程 | `backend/stocks/tasks.py`（异步 + fetch-status 轮询） |
 | 行情中心 | `backend/stocks/market/` 包：`_cache`（TTL+交易日历保鲜）/`_sources`（冷却+failover）/`_query`/`periods`（**统一区间解析**）+ `indices`/`flows`/`sectors`/`etf`/`etf_flow`/`institutions`/`sentiment`（涨停池情绪/沪深两融汇总）/`margin_stock`（个股两融明细）/`snapshots`（日度快照+自检）/`holders`（定报持有人结构）/`overview` |
 | 探测器（一级模块） | `backend/stocks/detector/` 包：`registry`（维度注册表，单一事实来源）/`dimensions`（维度计算+序列构建）/`calm`（平静判定闸门）/`signals`（同向投票+周期+分级）/`review`（5日回看→权重/阈值有界迭代）/`scan`（编排+降级留痕）/`views`；平静盘面监测渐进微变，17:15 日度扫描 |
 | 调度器 | `backend/stocks/scheduler.py`（APScheduler + 文件锁单实例） |
-| REST + 页面 | `backend/stocks/views.py` `urls.py`；前端 `frontend/src/views/` `components/` |
+| REST + 页面 | `backend/stocks/views/` 包（`watchlist`/`market`/`alerts`/`presets`/`groups`）、`urls.py`；共用工具 `stocks/common/`；前端 `frontend/src/views/` `components/` |
 | 前端 API 封装 | `frontend/src/api/stocks.js`（axios baseURL `/api`） |
 
 ## 行情 API 与区间体系
@@ -57,7 +57,7 @@ npm run lint && npm run build   # eslint（vue essential 档）+ 产物到 dist/
 | 端点 | 区间能力 | 数据深度/边界 |
 |---|---|---|
 | `market/trend/` | period（交易日 5/22/66/130/260）+ 旧 `days=` + 自定义≤3年 | 新浪日线，深度足够 |
-| `market/sectors/?board=&period=` | `day/5d/10d/20d`（**无 3d**） | 当日=同花顺自实现抓取（东财板块路径对境外 502）；5d/10d 快照优先、东财原生排行兜底；20d 仅快照供数 |
+| `market/sectors/?board=&period=` | `day/5d/10d/20d`（**无 3d**） | 当日=同花顺自实现抓取（东财板块路径对境外 502，翻页按板块名稳定排序）；5d/10d/20d 只由日度快照累加供数，窗口不齐如实不可用 |
 | `market/national-etf/flow/?period=` 或 start/end | `1d/3d/5d` 按交易日 + `1w~6m/ytd` 自然日 + 自定义 | push2his 约 120 交易日（境外被掐时 push2delay 兜底仅当日一根），超出标 `coverage_start`+`truncated` |
 | `market/market-flow/` | 全档 + 自定义 | 同上（secid 1.000001 大盘；另有日度快照兜底） |
 | `market/northbound/` | 全档 + 自定义 | 北向净买额历史切片 |
@@ -71,7 +71,7 @@ npm run lint && npm run build   # eslint（vue essential 档）+ 产物到 dist/
 ## 探测器口径与边界（改 detector/ 前必读）
 
 - **数据诚信**：维度只用真实上游/本站快照推导；`委比与挂单结构`（无盘口数据源）、`板块内分化`（快照缺成分股横截面）两维度在 `registry.py` 显式 `enabled=False` 并写明原因，**不得用代理值冒充**，接入数据源后再开启。
-- **换手率分位**＝成交量自身 60 日分位：个股窗口内股本不变时与换手率分位单调等价（口径已在 README/API note 标注）；指数为活跃度代理。
+- **换手率分位**：个股＝真实换手率（成交量 / 新浪 getAmountBySymbol 流通股本，`datasources/float_shares.py`）的 60 日分位；股本取不到时退回成交量分位，note 标「股本数据缺失」，量价断层时暂停（ALG-13）；指数为成交量分位的活跃度代理。
 - **融资余额**：交易所 T+1 披露，`MarketDailySnapshot` 新 kind `margin` 由探测器扫描落库（只写沪深同日齐全行）；北向自 2024-08 停止逐日披露，维度如实仅融资余额口径。
 - **平静参数不参与自动迭代**：review 只调维度权重 [0.5, 2.0] 与投票门槛 min（[0.5×, 2×] 默认值）；调平静闸门会让扫描宇宙随命中率漂移（正反馈失控），只能人工改。
 - 信号 `trade_date` 跟随数据自身日期（`ctx.as_of`），上游晚到不冒充扫描当天；扫描幂等（信号/run 行按日期覆盖），回看只处理 `review_hit` 为 null 的行。

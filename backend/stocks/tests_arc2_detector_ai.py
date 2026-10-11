@@ -63,18 +63,6 @@ class DetectorConstantsTests(SimpleTestCase):
         self.assertNotIn('noise_pct', spec['vol_compress']['defaults'])
 
 
-class AiSerializersMoveTests(SimpleTestCase):
-    """ARC-07：ai_serializers 迁到 stocks.ai.serializers，旧路径是同一个模块对象。"""
-
-    def test_old_path_is_alias(self) -> None:
-        import stocks.ai_serializers as old
-        from stocks.ai import serializers as new
-
-        self.assertIs(old, new)
-        self.assertIs(old.AiProviderSerializer, new.AiProviderSerializer)
-        self.assertIs(old.first_error_text, new.first_error_text)
-
-
 class AiQuotesFinalOnlyTests(TestCase):
     """AI 取行情只用已收盘日线：盘中未定稿（is_final=False）的当日行不能当收盘数据喂给 LLM。
 

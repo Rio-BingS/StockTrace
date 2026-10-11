@@ -1,5 +1,6 @@
 import axios from 'axios'
 import { errorMessage, isCanceled } from '../utils/errorMessage.js'
+import { fetchAllPages, unwrapEnvelope, withEnvelope } from './envelope.js'
 
 const api = axios.create({
   baseURL: '/api',
@@ -19,12 +20,23 @@ api.interceptors.response.use(
   },
 )
 
+// 列表接口统一请求 ?envelope=1 并在这里解包（ARC-04）：返回的 res.data 仍是条目数组，
+// 组件无需改动；分页 / meta（如截断标记）从 res.envelope 读取。
+function getItems(url, { params, ...config } = {}) {
+  return api.get(url, { ...config, params: withEnvelope(params) }).then(unwrapEnvelope)
+}
+
+// 自选列表一页最多取这么多（后端上限 1000），超出时按 total_pages 逐页取齐，不截断
+const STOCK_LIST_PAGE_SIZE = 1000
+
 // 股票相关 API
 // 读接口最后一个参数可传 { signal }（AbortController），用于取消过期请求（FEF-06）
 export const stockApi = {
-  // 获取关注列表
+  // 获取关注列表（全量：后端分页，这里逐页取齐）
   getList({ signal } = {}) {
-    return api.get('/stocks/', { signal })
+    return fetchAllPages((page) =>
+      getItems('/stocks/', { params: { page, page_size: STOCK_LIST_PAGE_SIZE }, signal }),
+    )
   },
 
   // 单只关注详情
@@ -39,7 +51,7 @@ export const stockApi = {
 
   // 搜索股票（代码或名称）
   search(keyword, { signal } = {}) {
-    return api.get('/stocks/search/', { params: { q: keyword }, signal })
+    return getItems('/stocks/search/', { params: { q: keyword }, signal })
   },
 
   // 取消关注
@@ -54,7 +66,7 @@ export const stockApi = {
 
   // 获取日K数据
   getDaily(id, params = {}, { signal } = {}) {
-    return api.get(`/stocks/${id}/daily/`, { params, signal })
+    return getItems(`/stocks/${id}/daily/`, { params, signal })
   },
 
   // 获取最新一天行情
@@ -64,7 +76,7 @@ export const stockApi = {
 
   // 获取分钟K线
   getMinutes(id, params = {}, { signal } = {}) {
-    return api.get(`/stocks/${id}/minutes/`, { params, signal })
+    return getItems(`/stocks/${id}/minutes/`, { params, signal })
   },
 
   // 手动拉取单只股票数据（后台任务，立即返回）
@@ -86,7 +98,7 @@ export const stockApi = {
 // Dashboard
 export const dashboardApi = {
   get({ signal } = {}) {
-    return api.get('/dashboard/', { signal })
+    return getItems('/dashboard/', { signal })
   },
 }
 
@@ -158,7 +170,7 @@ export const detectorApi = {
 // 自选分组
 export const groupApi = {
   list({ signal } = {}) {
-    return api.get('/stock-groups/', { signal })
+    return getItems('/stock-groups/', { signal })
   },
   create(name) {
     return api.post('/stock-groups/', { name })
@@ -186,9 +198,9 @@ export const alertApi = {
   remove(id) {
     return api.delete(`/alerts/${id}/`)
   },
-  // 触发记录；params 传 { unread: 1 } 只看未读
+  // 触发记录（最近 100 条，res.envelope.meta.truncated 表示还有更早的）；params 传 { unread: 1 } 只看未读
   events(params = {}, { signal } = {}) {
-    return api.get('/alerts/events/', { params, signal })
+    return getItems('/alerts/events/', { params, signal })
   },
   // 标记已读；data 传 { ids: [...] } 或 {} 全部已读
   markRead(data = {}) {
@@ -199,7 +211,7 @@ export const alertApi = {
 // 条件选股预设
 export const presetApi = {
   list({ signal } = {}) {
-    return api.get('/screener/presets/', { signal })
+    return getItems('/screener/presets/', { signal })
   },
   create(name, spec) {
     return api.post('/screener/presets/', { name, spec })
@@ -258,6 +270,14 @@ export const aiApi = {
   // 对筛选结果做 AI 点评
   screenerComment(query, results, { signal } = {}) {
     return api.post('/screener/ai/comment/', { query, results }, { ...aiTimeout, signal })
+  },
+
+  // 自然语言选股 / AI 点评（后台排队）：返回 202 + job_id，再用 aiJob 轮询结果
+  screenerAiAsync(query, { signal } = {}) {
+    return api.post('/screener/ai/?async=1', { query }, { timeout: 30000, signal })
+  },
+  screenerCommentAsync(query, results, { signal } = {}) {
+    return api.post('/screener/ai/comment/?async=1', { query, results }, { timeout: 30000, signal })
   },
 }
 

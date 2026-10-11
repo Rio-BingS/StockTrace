@@ -4,19 +4,22 @@
 - @api_view 函数视图 + 统一 meta（available/source/data_as_of/cache_status/
   disclaimer），前端 MarketDataStatus 组件直接可读；
 - 上游/快照不足不报 500，而是在 meta 与 message 里如实降级；
-- 分页复用 market._query 的 _paginate（page/page_size，默认 50 上限 100）。
+- 分页复用 common.pagination.paginate（page/page_size，默认 50 上限 100）。
 """
 
 from __future__ import annotations
 
-from datetime import datetime, timedelta
+import logging
+from datetime import timedelta
 
 from django.utils import timezone
 from rest_framework import status
 from rest_framework.decorators import api_view
 from rest_framework.response import Response
 
-from ..common.pagination import paginate as _paginate
+from ..common.envelope import envelope
+from ..common.pagination import paginate
+from ..common.params import parse_bool, parse_date, positive_int
 from ..trading_calendar import expected_latest_date
 from ..models import DetectorDimConfig, DetectorRun, DetectorSignal
 from . import constants, registry
@@ -26,12 +29,17 @@ from .dimensions import (
     build_stock_context,
 )
 
+logger = logging.getLogger(__name__)
+
 _META_SOURCE = '本站探测器日度扫描（上游：东财/同花顺/新浪/沪深交易所公开数据，经日度快照积累）'
 _META_DISCLAIMER = (
     '信号为盘面形态识别，非买卖建议；维度权重与阈值由 5 日回看命中率自动微调（有界），'
     '历史命中不代表未来表现。委比挂单、板块内分化两维度因无数据源暂未启用。'
 )
 
+
+# 信号列表已上线的 JSON 键顺序，接入 common.envelope 时保持不变（ARC-04）
+_SIGNALS_KEY_ORDER = ('meta', 'trade_date', 'latest_run', 'summary', 'pagination', 'items')
 
 # DetectorRun 里的大 JSON 字段：列表/元信息只用标量，读这些字段纯属浪费（PERF-09）
 _HEAVY_RUN_FIELDS = ('matrix', 'degraded', 'adjustments')
@@ -56,7 +64,7 @@ def _meta(latest_run, message=''):
             if expected and latest_run.trade_date >= expected:
                 cache_status = 'fresh'
         except Exception:
-            pass
+            logger.warning("探测器 meta 时效判定失败，按 stale 处理", exc_info=True)
     return {
         'available': latest_run is not None and latest_run.status != 'failed',
         'source': _META_SOURCE,
@@ -91,13 +99,6 @@ def _signal_row(sig):
     }
 
 
-def _parse_date(raw):
-    try:
-        return datetime.strptime(raw, '%Y-%m-%d').date()
-    except (TypeError, ValueError):
-        return None
-
-
 @api_view(['GET'])
 def detector_signals(request):
     """信号列表：默认返回最近一次扫描交易日的信号。
@@ -108,11 +109,12 @@ def detector_signals(request):
     """
     latest_run = _runs_brief().first()
 
-    all_dates = request.query_params.get('all_dates') in ('1', 'true')
+    # 只认小写 '1'/'true'，与改用 common/params 之前一致
+    all_dates = parse_bool(request.query_params.get('all_dates'), truthy=('1', 'true'), ignore_case=False)
     date_raw = request.query_params.get('date')
     trade_date = None
     if date_raw:
-        trade_date = _parse_date(date_raw)
+        trade_date = parse_date(date_raw)
         if trade_date is None:
             return Response({'detail': 'date 格式应为 YYYY-MM-DD'},
                             status=status.HTTP_400_BAD_REQUEST)
@@ -153,10 +155,11 @@ def detector_signals(request):
     rows = [_signal_row(s) for s in qs]
     if not all_dates and trade_date is None and latest_run is not None:
         rows.sort(key=lambda r: r['score'], reverse=True)
-    items, pagination = _paginate(
+    items, pagination = paginate(
         rows,
-        _positive_int(request, 'page', 1),
-        _page_size(request),
+        positive_int(request.query_params, 'page', 1),
+        # page_size 小于 1 钳到 1（不是回退 50），上限 100：保持接入前的口径
+        positive_int(request.query_params, 'page_size', 50, 100, clamp=True),
     )
 
     summary = {
@@ -170,38 +173,13 @@ def detector_signals(request):
         summary['by_direction'][row['direction']] = summary['by_direction'].get(row['direction'], 0) + 1
         summary['by_status'][row['status']] = summary['by_status'].get(row['status'], 0) + 1
 
-    return Response({
-        'meta': _meta(latest_run),
-        'trade_date': trade_date.isoformat() if trade_date else (latest_run.trade_date.isoformat() if latest_run else None),
-        'latest_run': _run_brief(latest_run) if latest_run else None,
-        'summary': summary,
-        'pagination': pagination,
-        'items': items,
-    })
-
-
-def _page_size(request):
-    raw = request.query_params.get('page_size')
-    if raw in (None, ''):
-        return 50
-    try:
-        value = int(raw)
-    except (TypeError, ValueError):
-        return 50
-    return max(1, min(value, 100))
-
-
-def _positive_int(request, key, default, maximum=None):
-    raw = request.query_params.get(key)
-    if raw in (None, ''):
-        return default
-    try:
-        value = int(raw)
-    except (TypeError, ValueError):
-        return default
-    if value < 1:
-        return default
-    return min(value, maximum) if maximum else value
+    return Response(envelope(
+        items, pagination, _meta(latest_run),
+        key_order=_SIGNALS_KEY_ORDER,
+        trade_date=trade_date.isoformat() if trade_date else (latest_run.trade_date.isoformat() if latest_run else None),
+        latest_run=_run_brief(latest_run) if latest_run else None,
+        summary=summary,
+    ))
 
 
 def _run_brief(run):
@@ -267,7 +245,8 @@ def detector_signal_detail(request, pk):
             try:
                 res = spec['evaluate'](ctx, params)
                 dimension_series[key] = res['series']
-            except Exception:  # noqa: BLE001  曲线重算失败不影响已落库明细
+            except Exception:  # 边界：曲线重算失败不影响已落库明细
+                logger.warning("探测器维度 %s 曲线重算失败", key, exc_info=True)
                 dimension_series[key] = []
 
     return Response({

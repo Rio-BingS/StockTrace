@@ -1,4 +1,7 @@
 from django.db import models
+from django.db.models.functions import Length
+from django.db.models.lookups import Exact
+from rest_framework.utils.encoders import JSONEncoder as DrfJSONEncoder
 
 
 class AiProvider(models.Model):
@@ -13,13 +16,31 @@ class AiProvider(models.Model):
     api_key_encrypted = models.TextField('加密的 API Key')
     model = models.CharField('模型名', max_length=100)
     is_enabled = models.BooleanField('启用', default=True)
+    # 多服务商选择/回退顺序（AIX-07）：数字越小越优先，相同时按录入顺序
+    priority = models.IntegerField('优先级', default=100,
+                                   help_text='数字越小越优先；相同时按录入顺序')
+    # 请求参数风格（AIX-07）：auto 按模型名判断；推理模型不传 temperature，
+    # OpenAI o 系列/gpt-5 还要把 max_tokens 换成 max_completion_tokens
+    PARAM_STYLE_AUTO = 'auto'
+    PARAM_STYLE_STANDARD = 'standard'
+    PARAM_STYLE_REASONING = 'reasoning'
+    PARAM_STYLE_OPENAI_REASONING = 'openai_reasoning'
+    PARAM_STYLE_CHOICES = [
+        (PARAM_STYLE_AUTO, '自动（按模型名判断）'),
+        (PARAM_STYLE_STANDARD, '标准（temperature + max_tokens）'),
+        (PARAM_STYLE_REASONING, '推理模型（不传 temperature）'),
+        (PARAM_STYLE_OPENAI_REASONING, 'OpenAI 推理（max_completion_tokens）'),
+    ]
+    param_style = models.CharField('参数风格', max_length=20, choices=PARAM_STYLE_CHOICES,
+                                   default=PARAM_STYLE_AUTO)
     created_at = models.DateTimeField('创建时间', auto_now_add=True)
     updated_at = models.DateTimeField('更新时间', auto_now=True)
 
     class Meta:
         verbose_name = 'AI 服务商'
         verbose_name_plural = 'AI 服务商'
-        ordering = ['-is_enabled', 'id']
+        # 与调用时的选择/回退顺序一致：启用的在前，再按优先级、录入顺序
+        ordering = ['-is_enabled', 'priority', 'id']
 
     def __str__(self):
         return f"{self.name} ({self.model})"
@@ -79,6 +100,56 @@ class AiCallLog(models.Model):
             models.Index(fields=['created_at'], name='aicalllog_created_idx'),
             models.Index(fields=['stock', 'purpose', 'created_at'], name='aicalllog_stock_purpose_idx'),
         ]
+
+
+class AiJob(models.Model):
+    """AI 后台任务（AIX-08 收尾：原进程内存队列落库）。
+
+    视图同步完成校验与额度预占后写一行 pending 任务并返回 202 + job_id；
+    Web 进程内的后台线程用条件 UPDATE 抢占（pending→running，多 worker 不重复执行），
+    结果与原 HTTP 状态码写回本表，前端轮询 /api/ai/jobs/<job_id>/ 读取。
+    进程重启后 pending 任务由任一 worker 继续执行；running 超过租约的按中断标失败。
+    """
+    STATUS_PENDING = 'pending'
+    STATUS_RUNNING = 'running'
+    STATUS_DONE = 'done'
+    STATUS_FAILED = 'failed'
+    STATUS_CHOICES = [
+        (STATUS_PENDING, '排队中'),
+        (STATUS_RUNNING, '执行中'),
+        (STATUS_DONE, '完成'),
+        (STATUS_FAILED, '失败'),
+    ]
+
+    job_id = models.CharField('任务 ID', max_length=32, unique=True)
+    kind = models.CharField('任务类型', max_length=30)
+    # 执行所需参数（提示词消息、占位流水 id 等）；结果按 DRF 的编码规则存，轮询返回与同步接口同形
+    params = models.JSONField('参数', default=dict, encoder=DrfJSONEncoder)
+    status = models.CharField('状态', max_length=10, choices=STATUS_CHOICES,
+                              default=STATUS_PENDING)
+    http_status = models.PositiveSmallIntegerField('结果状态码', null=True, blank=True)
+    result = models.JSONField('结果', null=True, blank=True, encoder=DrfJSONEncoder)
+    error = models.CharField('失败原因', max_length=200, null=True, blank=True)
+    # 认领者（主机:进程:随机串）与租约到期时刻：租约过期仍是 running 视为执行进程已退出
+    owner = models.CharField('执行者', max_length=80, null=True, blank=True)
+    lease_until = models.DateTimeField('租约到期', null=True, blank=True)
+    attempts = models.PositiveSmallIntegerField('认领次数', default=0)
+    created_at = models.DateTimeField('创建时间', auto_now_add=True)
+    started_at = models.DateTimeField('开始时间', null=True, blank=True)
+    finished_at = models.DateTimeField('结束时间', null=True, blank=True)
+
+    class Meta:
+        verbose_name = 'AI 后台任务'
+        verbose_name_plural = 'AI 后台任务'
+        ordering = ['id']
+        # 认领按 (status, id) 取最早的 pending；清理按 created_at 删旧行
+        indexes = [
+            models.Index(fields=['status', 'id'], name='aijob_status_idx'),
+            models.Index(fields=['created_at'], name='aijob_created_idx'),
+        ]
+
+    def __str__(self):
+        return f"{self.kind} {self.job_id} ({self.status})"
 
 
 class StockGroup(models.Model):
@@ -272,7 +343,7 @@ class DailyQuote(models.Model):
     change_diff = models.DecimalField('涨跌额', max_digits=10, decimal_places=3, null=True, blank=True)
     change_pct = models.DecimalField('涨跌幅', max_digits=8, decimal_places=4, null=True, blank=True)
 
-    # 单位约定：成交量「股」、成交额「元」（各数据源在适配层换算，见 services.py）
+    # 单位约定：成交量「股」、成交额「元」（各数据源在适配层换算，见 datasources/）
     volume = models.BigIntegerField('成交量(股)', null=True, blank=True)
     turnover = models.DecimalField(
         '成交额(元)', max_digits=15, decimal_places=2, null=True, blank=True
@@ -443,6 +514,45 @@ class DetectorSignal(models.Model):
         constraints = [
             models.UniqueConstraint(
                 fields=['target_kind', 'target_code', 'trade_date'], name='uniq_signal_target_day',
+            ),
+            # 库级约束（PERF-10）：写入路径只有 detector.signals.upsert_signal 和
+            # review 推进状态，取值都来自上面的 CHOICES；score 是 [-100, 100] 分值
+            # 的绝对值加权平均，落在 [0, 100]；周期从 1 起算。Meta 里拿不到外层类
+            # 属性，取值只能写字面量，改 CHOICES 时要同步改这里并加迁移。
+            models.CheckConstraint(
+                condition=models.Q(target_kind__in=['index', 'stock', 'industry', 'concept']),
+                name='detsig_target_kind_valid',
+            ),
+            models.CheckConstraint(
+                condition=models.Q(direction__in=['up', 'down']), name='detsig_direction_valid',
+            ),
+            models.CheckConstraint(
+                condition=models.Q(severity__in=['high', 'medium', 'low']), name='detsig_severity_valid',
+            ),
+            models.CheckConstraint(
+                condition=models.Q(status__in=['watching', 'active', 'confirmed', 'missed']),
+                name='detsig_status_valid',
+            ),
+            models.CheckConstraint(
+                condition=models.Q(score__gte=0, score__lte=100), name='detsig_score_range',
+            ),
+            models.CheckConstraint(condition=models.Q(cycles__gte=1), name='detsig_cycles_positive'),
+            # target_code 是多态弱引用，按类型约束格式：指数 sh/sz/bj + 6 位（共 8 位），
+            # 自选股 6 位（数字由 Stock 序列化器校验，这里不用 REGEXP：SQLite 的
+            # REGEXP 是 Django 注入的函数，命令行 sqlite3 回灌 .dump 时会报错），
+            # 板块为名称，只要求非空
+            models.CheckConstraint(
+                condition=(
+                    models.Q(target_kind='index')
+                    & (models.Q(target_code__startswith='sh') | models.Q(target_code__startswith='sz')
+                       | models.Q(target_code__startswith='bj'))
+                    & Exact(Length('target_code'), 8)
+                ) | (
+                    models.Q(target_kind='stock') & Exact(Length('target_code'), 6)
+                ) | (
+                    models.Q(target_kind__in=['industry', 'concept']) & ~models.Q(target_code='')
+                ),
+                name='detsig_target_code_format',
             ),
         ]
         indexes = [

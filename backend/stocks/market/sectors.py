@@ -9,14 +9,14 @@ import time
 from io import StringIO
 from pathlib import Path
 
-import akshare as ak
 import pandas as pd
 import requests
 
 from ..common.envelope import envelope
 from ..errors import BadRequest
-from ._cache import _cache_get, _cache_meta, _cache_set, _now_str, _to_float
-from ._query import _paginate, _sort_items
+from ._cache import cache_get, _cache_meta, cache_set, _now_str, _to_float
+from ..common.pagination import paginate
+from ._query import _sort_items
 from ._sources import _safe_df_call
 
 logger = logging.getLogger(__name__)
@@ -32,8 +32,7 @@ _SECTOR_SORT_FIELDS = {
 # 多日（5d/10d/20d）轮动口径固定为「本站日度快照（同花顺当日净额）累加」，窗口
 # 不齐就如实不可用（DAT-15）：不再退回东财原生 5日/10日排行——那是另一套主力
 # 口径和行业名单，随快照积累程度来回切换会让同一页面前后不可比。
-# 下面的东财排行指标只保留给 fetch_*_fund_flow(period=...) 的直接调用方。
-_SECTOR_RANK_INDICATORS = {'5d': '5日', '10d': '10日'}
+# 东财 5日/10日排行抓取已无调用方，P3 删除；fetch_*_fund_flow 只抓当日。
 _SECTOR_PERIODS = ('day', '5d', '10d', '20d')
 _SNAPSHOT_PERIOD_DAYS = {'5d': 5, '10d': 10, '20d': 20}
 # 当日横截面实际来源：自抓同花顺资金流页面（非 akshare 封装）
@@ -43,44 +42,7 @@ _THS_DAY_SOURCE = {
 }
 
 
-def _parse_sector_rank_table(df):
-    """解析 stock_sector_fund_flow_rank 的 clist 形状（列带指标前缀，单位为元）。"""
-    if df is None or df.empty:
-        return []
-    name_col = next((c for c in ('行业', '板块名', '名称') if c in df.columns), None)
-    net_col = next((c for c in df.columns if str(c).endswith('主力净流入-净额')), None)
-    if name_col is None or net_col is None:
-        return []
-    pct_col = next((c for c in df.columns if str(c).endswith('涨跌幅')), None)
-
-    items = []
-    for _, row in df.iterrows():
-        net = _to_float(row.get(net_col))
-        if net is None:
-            continue
-        items.append({
-            'name': str(row.get(name_col, '')).strip(),
-            'net': net,
-            'inflow': None,
-            'outflow': None,
-            'change_pct': _to_float(row.get(pct_col)) if pct_col else None,
-            'index_value': None,
-            'company_count': None,
-            'leader': None,
-            'leader_pct': None,
-        })
-
-    by_name = {}
-    for item in items:
-        if not item['name']:
-            continue
-        previous = by_name.get(item['name'])
-        if previous is None or abs(item['net']) > abs(previous['net']):
-            by_name[item['name']] = item
-    return list(by_name.values())
-
-
-def _parse_fund_flow_table(df, name_col_candidates):
+def parse_fund_flow_table(df, name_col_candidates):
     if df is None or df.empty:
         return []
 
@@ -129,7 +91,7 @@ def _parse_fund_flow_table(df, name_col_candidates):
         if previous is None or abs(item['net']) > abs(previous['net']):
             by_name[item['name']] = item
     if len(by_name) != len(items):
-        logger.warning(f"板块资金上游存在 {len(items) - len(by_name)} 条同名/空名记录，已规范化去重")
+        logger.warning("板块资金上游存在 %s 条同名/空名记录，已规范化去重", len(items) - len(by_name))
     return list(by_name.values())
 
 
@@ -158,6 +120,13 @@ _ths_token = {'v': None, 'at': 0.0}
 _ths_token_lock = threading.Lock()
 # 分页请求间隔（秒）：连续翻 50 页容易触发同花顺反爬封禁
 _THS_PAGE_INTERVAL = 0.5
+# 翻页排序键（DAT-17）：原先按涨跌幅（tradezdf）排序，盘中每翻一页排名都在变，
+# 收盘后涨跌幅相同的板块之间顺序也不固定，会出现跨页重复一行、同时漏掉一行。
+# 改按板块名（tradename，页面表头自带的排序字段）升序：名称当日不变且唯一，
+# 翻页结果稳定。2026-10-11 实测概念板块 386 行：按涨跌幅翻页只有 385 个不同
+# 板块，按名称翻页 386 个全齐。下游展示按 sort 参数重新排序，不依赖这里的顺序。
+_THS_SORT_FIELD = 'tradename'
+_THS_SORT_ORDER = 'asc'
 
 
 def _ths_hexin_v():
@@ -200,7 +169,7 @@ def _ths_fund_flow(board):
     headers = _ths_token_headers(base)
 
     def _page_html(page):
-        url = f'{base}field/tradezdf/order/desc/page/{page}/ajax/1/free/1/'
+        url = f'{base}field/{_THS_SORT_FIELD}/order/{_THS_SORT_ORDER}/page/{page}/ajax/1/free/1/'
         r = requests.get(url, headers=headers, timeout=10)
         r.raise_for_status()
         return r.text
@@ -224,7 +193,17 @@ def _ths_fund_flow(board):
     for page in range(2, page_num + 1):
         time.sleep(_THS_PAGE_INTERVAL)
         frames.append(_parse(_page_html(page), page))
+    _check_ths_pages(frames, board)
     df = pd.concat(frames, ignore_index=True)
+    # 翻页重叠兜底（DAT-17）：同名行只保留第一次出现的；出现重叠说明翻页期间
+    # 排序变了，通常还伴随等量漏行，记 warning 便于发现
+    name_col = names[1]
+    dup = df.duplicated(subset=[name_col], keep='first')
+    if dup.any():
+        logger.warning(
+            "同花顺%s资金流翻页出现 %s 行重复（已去重），可能有等量漏行", board, int(dup.sum())
+        )
+        df = df.loc[~dup].reset_index(drop=True)
     if '序号' in df.columns:
         df = df.drop(columns=['序号'])
     # 页面涨跌幅带 % 号（akshare 原封装同样先 strip 再返回）
@@ -234,46 +213,50 @@ def _ths_fund_flow(board):
     return df
 
 
+def _check_ths_pages(frames, board):
+    """非末页行数少于首页时记 warning：页面每页固定条数，中间页变短说明有行没取到。"""
+    if len(frames) < 2:
+        return
+    per_page = len(frames[0])
+    short = [i + 1 for i, f in enumerate(frames[:-1]) if len(f) < per_page]
+    if short:
+        logger.warning("同花顺%s资金流第 %s 页行数少于首页 %s 行，疑似漏行", board, short, per_page)
+
+
 def _ths_fund_flow_df(board, source_name):
     """带源冷却的同花顺板块资金流抓取；失败计入冷却，避免高频重试（走统一 failover，ARC-03）。"""
     return _safe_df_call(_ths_fund_flow, board, source_name=source_name)
 
 
+def _require_day(period):
+    """板块资金抓取只剩当日口径；传多日 period 直接报错，避免静默返回当日数据。"""
+    if period != 'day':
+        raise ValueError(f'板块资金抓取只支持 period=day，多日口径请用日度快照（收到 {period!r}）')
+
+
 def fetch_concept_fund_flow(period='day', ttl=180):
+    """同花顺概念板块当日资金流（元）；多日口径走日度快照，见 _snapshot_rotation。"""
+    _require_day(period)
     cache_key = f'concept_ff_{period}'
-    cached = _cache_get(cache_key, ttl)
+    cached = cache_get(cache_key, ttl)
     if cached is not None:
         return cached
-    if period == 'day':
-        df = _ths_fund_flow_df('concept', 'ths_fund_flow_concept')
-        data = _parse_fund_flow_table(df, ['概念', '行业'])
-    else:
-        indicator = _SECTOR_RANK_INDICATORS[period]
-        df = _safe_df_call(
-            ak.stock_sector_fund_flow_rank, indicator=indicator,
-            sector_type='概念资金流', source_name=f'em_sector_rank_concept_{period}',
-        )
-        data = _parse_sector_rank_table(df)
-    _cache_set(cache_key, data)
+    df = _ths_fund_flow_df('concept', 'ths_fund_flow_concept')
+    data = parse_fund_flow_table(df, ['概念', '行业'])
+    cache_set(cache_key, data)
     return data
 
 
 def fetch_industry_fund_flow(period='day', ttl=180):
+    """同花顺行业板块当日资金流（元）；多日口径走日度快照，见 _snapshot_rotation。"""
+    _require_day(period)
     cache_key = f'industry_ff_{period}'
-    cached = _cache_get(cache_key, ttl)
+    cached = cache_get(cache_key, ttl)
     if cached is not None:
         return cached
-    if period == 'day':
-        df = _ths_fund_flow_df('industry', 'ths_fund_flow_industry')
-        data = _parse_fund_flow_table(df, ['行业'])
-    else:
-        indicator = _SECTOR_RANK_INDICATORS[period]
-        df = _safe_df_call(
-            ak.stock_sector_fund_flow_rank, indicator=indicator,
-            sector_type='行业资金流', source_name=f'em_sector_rank_industry_{period}',
-        )
-        data = _parse_sector_rank_table(df)
-    _cache_set(cache_key, data)
+    df = _ths_fund_flow_df('industry', 'ths_fund_flow_industry')
+    data = parse_fund_flow_table(df, ['行业'])
+    cache_set(cache_key, data)
     return data
 
 
@@ -286,7 +269,7 @@ def _sector_payload(
         items = [item for item in items if needle in item['name'].lower() or needle in (item.get('leader') or '').lower()]
 
     sorted_items = _sort_items(items, _SECTOR_SORT_FIELDS[sort], order)
-    page_items, pagination = _paginate(sorted_items, page, page_size)
+    page_items, pagination = paginate(sorted_items, page, page_size)
     inflow = sorted((item for item in items if item['net'] > 0), key=lambda item: item['net'], reverse=True)
     outflow = sorted((item for item in items if item['net'] < 0), key=lambda item: item['net'])
     neutral = [item for item in items if item['net'] == 0]
@@ -392,6 +375,7 @@ def _snapshot_rotation(board, period, q='', order='desc', page=1, page_size=50):
     try:
         latest = snapshots._latest_snapshot(kind)
     except Exception:
+        logger.warning("读取 %s 最新快照失败", kind, exc_info=True)
         latest = None
 
     if nets is None:

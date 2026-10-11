@@ -144,19 +144,19 @@ class TradingTimeTests(SimpleTestCase):
 
 @patch('stocks.trading_calendar.is_trading_day', side_effect=_fake_is_trading_day)
 class LegacyWrapperTests(SimpleTestCase):
-    """旧位置的薄包装与新模块结果一致（合并期间其他方向仍可能调用旧名）。"""
+    """market 包内的日历薄包装与 trading_calendar 结果一致（services 外观已删除）。"""
 
     def test_wrappers_delegate(self, _m):
         import importlib
 
-        from stocks import services, trading_calendar as cal
+        from stocks import trading_calendar as cal
         from stocks.market import sentiment, snapshots
 
         # stocks.market 包把 _cache 字典再导出成同名属性，需按模块名取
         _cache = importlib.import_module('stocks.market._cache')
         d = date(2026, 10, 12)
-        self.assertTrue(services.is_trading_day(d))
-        self.assertFalse(services.is_trading_day(date(2026, 10, 1)))
+        self.assertTrue(cal.is_trading_day(d))
+        self.assertFalse(cal.is_trading_day(date(2026, 10, 1)))
         self.assertEqual(snapshots._recent_trading_days(2, end_date=d), cal.recent_trading_days(2, end_date=d))
         self.assertEqual(sentiment._prev_trading_day(d), date(2026, 10, 9))
         self.assertEqual(sentiment._recent_day_candidates(1, today=d), [d])
@@ -166,17 +166,11 @@ class LegacyWrapperTests(SimpleTestCase):
             self.assertEqual(snapshots._expected_latest_date(), date(2026, 10, 9))
             self.assertEqual(_cache._last_session_close().date(), date(2026, 10, 9))
 
-    def test_is_trading_time_wrapper(self, _m):
-        from stocks import services
-        tz = timezone.get_default_timezone()
-        self.assertTrue(services.is_trading_time(timezone.make_aware(datetime(2026, 10, 12, 9, 30), tz)))
-        self.assertFalse(services.is_trading_time(timezone.make_aware(datetime(2026, 10, 12, 12, 0), tz)))
-
-    def test_reset_wrapper_clears_calendar_state(self, _m):
-        from stocks import services, trading_calendar as cal
+    def test_reset_clears_calendar_state(self, _m):
+        from stocks import trading_calendar as cal
         cal._trade_day_cache[date(2027, 1, 4)] = (True, 9e18)
         cal._calendar_fail_until['sina'] = 9e18
-        services._reset_trade_calendar_cache()
+        cal.reset_cache()
         self.assertEqual(cal._trade_day_cache, {})
         self.assertEqual(cal._calendar_fail_until['sina'], 0)
 

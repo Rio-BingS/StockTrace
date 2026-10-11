@@ -146,7 +146,7 @@ class ThsVendoredTokenTests(SimpleTestCase):
         from .market import sectors
 
         def html(page_info):
-            cells = ['1', '半导体', '1000', '4.36%', '30', '14', '16.02', '50', '某股', '10.05%', '9.9']
+            cells = ['1', f'半导体{page_info}', '1000', '4.36%', '30', '14', '16.02', '50', '某股', '10.05%', '9.9']
             row = '<tr>' + ''.join(f'<td>{c}</td>' for c in cells) + '</tr>'
             return (f'<html><body><span class="page_info">{page_info}</span>'
                     f'<table>{row}</table></body></html>')
@@ -170,12 +170,12 @@ class LocalDateTests(SimpleTestCase):
         2026, 10, 11, 17, 30, tzinfo=__import__('datetime').timezone.utc)
 
     def test_daily_start_date_uses_local_date(self):
-        from . import services
+        from . import ingest
 
         with patch('django.utils.timezone.now', return_value=self._UTC_NIGHT), \
                 patch('stocks.ingest.DailyQuote.objects') as qs:
             qs.filter.return_value.order_by.return_value.values_list.return_value.first.return_value = None
-            start = services._daily_start_date(object(), bootstrap_days=1)
+            start = ingest._daily_start_date(object(), bootstrap_days=1)
         self.assertEqual(start, '20261011')  # 本地 10-12 往前 1 天；UTC 口径会是 10-10
 
     def test_now_str_and_fetched_at_are_local(self):
@@ -201,9 +201,9 @@ class MetaAccuracyTests(SimpleTestCase):
     """DAT-19：data_as_of 跟数据走；ETF 历史 items 与来源同一缓存值；份额曲线 meta 不再恒为 unavailable。"""
 
     def test_data_as_of_prefers_source_data_date(self):
-        from .market._cache import _cache_meta, _cache_set
+        from .market._cache import _cache_meta, cache_set
 
-        _cache_set('k_meta', [1])
+        cache_set('k_meta', [1])
         meta = _cache_meta('k_meta', 60, 'src', True, source_data_date='2026-09-04')
         self.assertEqual(meta['data_as_of'], '2026-09-04')
         meta = _cache_meta('k_meta', 60, 'src', True)
@@ -484,9 +484,9 @@ class SourceChainTests(SimpleTestCase):
         self.assertEqual(name, 'only')
 
     def test_stock_chain_cools_failing_source_and_keeps_order(self):
-        from . import services
+        from . import datasources
 
-        class Bad(services.DataSource):
+        class Bad(datasources.DataSource):
             name = 'bad'
             calls = 0
 
@@ -494,7 +494,7 @@ class SourceChainTests(SimpleTestCase):
                 Bad.calls += 1
                 raise RuntimeError('502')
 
-        class Good(services.DataSource):
+        class Good(datasources.DataSource):
             name = 'good'
 
             def fetch_daily(self, *a):
@@ -502,7 +502,7 @@ class SourceChainTests(SimpleTestCase):
 
         with patch('stocks.datasources.chain.time.sleep') as sleep:
             for _ in range(3):
-                source, df = services._try_sources(
+                source, df = datasources._try_sources(
                     'fetch_daily', '600000', '20260901', '20260901', sources=[Bad(), Good()])
                 self.assertEqual(source.name, 'good')
         # 连续失败 2 次后冷却，第三次直接跳过坏源、也不再等待

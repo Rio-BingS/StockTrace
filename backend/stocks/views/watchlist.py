@@ -9,6 +9,7 @@ from rest_framework import status, viewsets
 from rest_framework.decorators import action, api_view
 from rest_framework.response import Response
 
+from ..common.envelope import EnvelopePagination, list_response, wants_envelope
 from ..common.params import parse_bool, parse_date, positive_int
 from ..models import DailyQuote, MinuteBar, Stock
 from ..serializers import (
@@ -19,7 +20,7 @@ from ..serializers import (
     StockSerializer,
     normalize_stock_code,
 )
-from ..services import search_stocks
+from ..search import search_stocks
 from ..tasks import get_fetch_status, start_fetch_all, start_fetch_one
 
 
@@ -35,6 +36,21 @@ class StockViewSet(viewsets.ModelViewSet):
     """关注股票 CRUD"""
     queryset = Stock.objects.filter(is_active=True)
     serializer_class = StockSerializer
+
+    @property
+    def paginator(self):
+        """?envelope=1 时改用外壳分页（ARC-04 步骤 4d），否则沿用全局 PageNumberPagination。
+
+        旧输出 {count, next, previous, results} 在过渡期保持不变；外壳模式支持
+        ?page_size=N（上限 1000），前端 api 层据 total_pages 取齐全量自选。
+        """
+        if not hasattr(self, '_paginator'):
+            request = getattr(self, 'request', None)
+            if request is not None and wants_envelope(request):
+                self._paginator = EnvelopePagination()
+            else:
+                self._paginator = self.pagination_class() if self.pagination_class else None
+        return self._paginator
 
     def create(self, request, *args, **kwargs):
         """添加关注：如果股票已存在但被软删除，则恢复；创建/恢复后后台拉行情"""
@@ -109,7 +125,7 @@ class StockViewSet(viewsets.ModelViewSet):
         keyword = request.query_params.get('q', '')
         results = search_stocks(keyword)
         serializer = StockSearchSerializer(results, many=True)
-        return Response(serializer.data)
+        return list_response(request, serializer.data, meta={'q': keyword})
 
     @action(detail=False, methods=['post'], url_path='fetch-all')
     def fetch_all(self, request):
@@ -144,22 +160,27 @@ class StockViewSet(viewsets.ModelViewSet):
         # select_related：序列化器 source='stock.code' 否则每行懒加载一次（PERF-05）
         queryset = DailyQuote.objects.filter(stock=stock).select_related('stock')
 
+        # 外壳模式（?envelope=1）的 meta：实际生效的筛选条件（ARC-04）
+        meta = {'code': stock.code, 'date': None, 'days': None}
         # 按日期筛选
         if date_str := request.query_params.get('date'):
             # 非法日期抛 BadRequest，由全局 EXCEPTION_HANDLER 转 400（ARC-05）
             date_obj = parse_date(date_str, 'date', strict=True)
             queryset = queryset.filter(trade_date=date_obj)
+            meta['date'] = date_obj.isoformat()
         elif request.query_params.get('days'):
             days = positive_int(request.query_params, 'days', 365, maximum=3650, strict=True)
             start_date = timezone.localdate() - timedelta(days=days)
             queryset = queryset.filter(trade_date__gte=start_date)
+            meta['days'] = days
         else:
             # 无参数默认近 365 天，不再整表倒出（PERF-05）
             queryset = queryset.filter(trade_date__gte=timezone.localdate() - timedelta(days=365))
+            meta['days'] = 365
 
         queryset = queryset.order_by('-trade_date')
         serializer = DailyQuoteSerializer(queryset, many=True)
-        return Response(serializer.data)
+        return list_response(request, serializer.data, meta=meta)
 
     @action(detail=True, methods=['get'], url_path='daily/latest')
     def daily_latest(self, request, pk=None):
@@ -185,7 +206,7 @@ class StockViewSet(viewsets.ModelViewSet):
         else:
             latest = MinuteBar.objects.filter(stock=stock).order_by('-datetime').first()
             if latest is None:
-                return Response([])
+                return list_response(request, [], meta={'code': stock.code, 'date': None})
             date_obj = timezone.localtime(latest.datetime).date()
 
         start = timezone.make_aware(datetime.combine(date_obj, datetime.min.time()))
@@ -194,63 +215,8 @@ class StockViewSet(viewsets.ModelViewSet):
 
         queryset = queryset.order_by('datetime')
         serializer = MinuteBarSerializer(queryset, many=True)
-        return Response(serializer.data)
-
-
-def _quote_row(stock, quote):
-    """旧的 Dashboard 行字典（未经序列化的原始值）。
-
-    dashboard 已改用 serializers.QuoteRowSerializer（ARC-01）；此函数仅为旧导入
-    路径保留一版，下一版删除。
-    """
-    base = {
-        'id': stock.id,
-        'code': stock.code,
-        'name': stock.name,
-        'group_id': stock.group_id,
-        'group_name': stock.group.name if stock.group_id else None,
-        'cost_price': stock.cost_price,
-        'quantity': stock.quantity,
-    }
-    if quote is None:
-        base.update({
-            'trade_date': None,
-            'open_price': None,
-            'close_price': None,
-            'high_price': None,
-            'low_price': None,
-            'high_time': None,
-            'low_time': None,
-            'open_close_diff': None,
-            'open_close_pct': None,
-            'high_low_diff': None,
-            'high_low_pct': None,
-            'prev_close': None,
-            'change_diff': None,
-            'change_pct': None,
-            'volume': None,
-            'turnover': None,
-        })
-        return base
-    base.update({
-        'trade_date': quote.trade_date,
-        'open_price': quote.open_price,
-        'close_price': quote.close_price,
-        'high_price': quote.high_price,
-        'low_price': quote.low_price,
-        'high_time': quote.high_time,
-        'low_time': quote.low_time,
-        'open_close_diff': quote.open_close_diff,
-        'open_close_pct': quote.open_close_pct,
-        'high_low_diff': quote.high_low_diff,
-        'high_low_pct': quote.high_low_pct,
-        'prev_close': quote.prev_close,
-        'change_diff': quote.change_diff,
-        'change_pct': quote.change_pct,
-        'volume': quote.volume,
-        'turnover': quote.turnover,
-    })
-    return base
+        # meta.date：实际返回的交易日（缺省 date 时是最近一个有分钟数据的日子）
+        return list_response(request, serializer.data, meta={'code': stock.code, 'date': date_obj.isoformat()})
 
 
 @api_view(['GET'])
@@ -264,10 +230,10 @@ def dashboard(request):
         .annotate(latest_quote_id=Subquery(latest)).order_by('code')
     )
     if not stocks:
-        return Response([])
+        return list_response(request, [])
 
     quotes = DailyQuote.objects.in_bulk([s.latest_quote_id for s in stocks if s.latest_quote_id])
     for s in stocks:
         s.latest_quote = quotes.get(s.latest_quote_id)
 
-    return Response(QuoteRowSerializer(stocks, many=True).data)
+    return list_response(request, QuoteRowSerializer(stocks, many=True).data)

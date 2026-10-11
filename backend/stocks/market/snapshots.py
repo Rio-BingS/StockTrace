@@ -72,7 +72,7 @@ def fetch_market_ff_merged_rows():
         try:
             klines = fetch_flow_klines(secid)
         except Exception as e:  # noqa: BLE001  单边失败如实记录
-            logger.warning(f'大盘资金流 {secid} 抓取失败: {e}')
+            logger.warning("大盘资金流 %s 抓取失败: %s", secid, e)
             errors.append(f'{secid}: {e}')
             continue
         rows = {}
@@ -96,7 +96,7 @@ def _etf_spot_fresh_for(trade_date):
     """确保 ETF 现货缓存是 trade_date 收盘（15:00）后写入的新数据（DAT-09）。
 
     缓存过旧或不存在时 force 重拉；重拉失败时 _fetch_etf_spot_df 会退回旧缓存
-    （_stale_or），写入时间早于该交易日 15:00 就判为不新鲜，调用方不得落库。
+    （stale_or），写入时间早于该交易日 15:00 就判为不新鲜，调用方不得落库。
     """
     from . import etf
     from ._cache import _cache_written_at
@@ -121,7 +121,7 @@ def _etf_items_on(items, trade_date):
             continue
         kept.append(item)
     if dropped:
-        logger.warning(f'etf_share 快照剔除 {dropped} 行数据日期不是 {want} 的 ETF')
+        logger.warning("etf_share 快照剔除 %s 行数据日期不是 %s 的 ETF", dropped, want)
     return kept
 
 
@@ -140,20 +140,21 @@ def save_daily_snapshots(trade_date=None):
         from ..trading_calendar import is_trading_day
 
         if is_trading_day(trade_date) is False:
-            logger.info(f'{trade_date} 非交易日，跳过快照落库')
+            logger.info("%s 非交易日，跳过快照落库", trade_date)
             return {}
     except Exception:
-        pass
+        # 日历判定意外失败时不拦截（与「日历不可用不拦截」同口径），留痕
+        logger.warning("%s 交易日守卫判定失败，不拦截快照落库", trade_date, exc_info=True)
 
     # 15:30 守卫：交易日收盘前写「当日」快照，会把上一交易日的盘面数据标成
     # 今天（2026-09-07 凌晨手动触发踩坑），与 _expected_latest_date 的时效语义一致
     try:
         now = timezone.localtime()
         if trade_date == now.date() and now.time() < dt_time(15, 30):
-            logger.info(f'{trade_date} 未到 15:30 收盘，跳过当日快照落库')
+            logger.info("%s 未到 15:30 收盘，跳过当日快照落库", trade_date)
             return {}
     except Exception:
-        pass
+        logger.warning("15:30 守卫判定失败，不拦截快照落库", exc_info=True)
 
     saved = {}
 
@@ -171,9 +172,9 @@ def save_daily_snapshots(trade_date=None):
                 )
                 saved[kind] = len(payload)
             else:
-                logger.warning(f"{kind} 快照当日无数据，不写行（{trade_date}）")
-        except Exception as e:
-            logger.error(f"{kind} 快照落库失败: {e}")
+                logger.warning("%s 快照当日无数据，不写行（%s）", kind, trade_date)
+        except Exception as e:  # 边界：单个 kind 失败不影响其余快照
+            logger.exception("%s 快照落库失败: %s", kind, e)
 
     try:
         # 东财现货须为该交易日收盘后的新数据，否则旧数据会被标成当日（DAT-09）；
@@ -181,7 +182,7 @@ def save_daily_snapshots(trade_date=None):
         if _etf_spot_fresh_for(trade_date):
             em_items = _etf_items_on(etf._normalized_etf_items(), trade_date)
         else:
-            logger.warning(f'ETF 现货缓存早于 {trade_date} 15:00（重拉失败），东财份额不落库')
+            logger.warning("ETF 现货缓存早于 %s 15:00（重拉失败），东财份额不落库", trade_date)
             em_items = []
         rows = [
             {field: item.get(field) for field in _ETF_SNAPSHOT_FIELDS}
@@ -198,9 +199,9 @@ def save_daily_snapshots(trade_date=None):
             saved[MarketDailySnapshot.KIND_ETF_SHARE] = len(rows)
             _clear_etf_share_memo()
         else:
-            logger.warning(f"etf_share 快照当日无数据，不写行（{trade_date}）")
-    except Exception as e:
-        logger.error(f"etf_share 快照落库失败: {e}")
+            logger.warning("etf_share 快照当日无数据，不写行（%s）", trade_date)
+    except Exception as e:  # 边界：etf_share 失败不影响其余快照
+        logger.exception("etf_share 快照落库失败: %s", e)
 
     # 大盘主力资金流：自采（push2his 全史 / push2delay 当日一根），沪深两 secid
     # 同日口径合并；逐行 upsert——push2his 恢复时自动回补历史。单一市场缺失时
@@ -229,11 +230,11 @@ def save_daily_snapshots(trade_date=None):
         if written:
             saved[MarketDailySnapshot.KIND_MARKET_FF] = written
         elif merged_rows:
-            logger.debug(f"market_ff 快照 {len(merged_rows)} 天均无变化，不重写（{trade_date}）")
+            logger.debug("market_ff 快照 %s 天均无变化，不重写（%s）", len(merged_rows), trade_date)
         else:
-            logger.warning(f"market_ff 快照无沪深同日齐全的数据，不写行（{trade_date}）")
-    except Exception as e:
-        logger.error(f"market_ff 快照落库失败: {e}")
+            logger.warning("market_ff 快照无沪深同日齐全的数据，不写行（%s）", trade_date)
+    except Exception as e:  # 边界：market_ff 失败不影响已写入的其余快照
+        logger.exception("market_ff 快照落库失败: %s", e)
 
     return saved
 
@@ -257,8 +258,8 @@ def save_margin_snapshot():
 
     try:
         sh = _sh_margin_rows()
-    except Exception as e:
-        logger.warning(f'融资余额快照：沪市历史拉取失败: {e}')
+    except Exception as e:  # noqa: BLE001 上游边界：akshare 异常类型不固定，本轮不写
+        logger.warning("融资余额快照：沪市历史拉取失败: %s", e)
         return 0
     if not sh:
         return 0
@@ -296,7 +297,7 @@ def save_margin_snapshot():
         )
         written += 1
     if written:
-        logger.info(f'融资余额快照新增 {written} 行')
+        logger.info("融资余额快照新增 %s 行", written)
     return written
 
 
@@ -315,6 +316,7 @@ def verify_daily_snapshots(trade_date=None):
         if trade_date == timezone.localdate() and timezone.localtime().time() < dt_time(15, 30):
             return None
     except Exception:
+        logger.warning("快照自检的交易日判定失败，跳过自检", exc_info=True)
         return None
 
     min_rows = {
@@ -330,6 +332,7 @@ def verify_daily_snapshots(trade_date=None):
             if row is None or len(row.payload or []) < floor:
                 missing.append(kind)
     except Exception:
+        logger.warning("快照自检查库失败，跳过自检", exc_info=True)
         return None
     return missing
 
@@ -349,6 +352,7 @@ def market_ff_snapshot_rows(start_date=None, end_date=None):
                     rows.append(item)
         return rows
     except Exception:
+        logger.warning("读取大盘资金流快照失败，按无快照降级", exc_info=True)
         return []
 
 
@@ -468,6 +472,7 @@ def sector_multiday_nets(kind, n):
             covered = MarketDailySnapshot.objects.filter(kind=kind).count()
             return None, min(covered, n)
     except Exception:
+        logger.warning("读取 %s 快照窗口失败，按无快照降级", kind, exc_info=True)
         return None, 0
     totals = {}
     seen_days = {}
@@ -508,6 +513,7 @@ def _etf_share_memoized(name, compute):
     try:
         version = _etf_share_version()
     except Exception:
+        logger.warning("ETF 份额快照版本查询失败，直接计算", exc_info=True)
         return compute()
     with _etf_share_memo_lock:
         if _etf_share_memo['version'] != version:
@@ -545,6 +551,7 @@ def _share_change_map(n):
             kind=MarketDailySnapshot.KIND_ETF_SHARE,
         ).count()
     except Exception:
+        logger.warning("读取 ETF 份额快照窗口失败，按无快照降级", exc_info=True)
         return None, 0
     if payloads is None:
         return None, min(covered, n)
@@ -574,6 +581,7 @@ def _latest_pair_change():
     try:
         payloads, _latest, dates = _window_payloads(MarketDailySnapshot.KIND_ETF_SHARE, 2)
     except Exception:
+        logger.warning("读取最近两日 ETF 份额快照失败，按无快照降级", exc_info=True)
         return None, None
     if payloads is None or not dates:
         return None, None
@@ -606,8 +614,8 @@ def _prefer_sse_share_rows(rows, trade_date):
     """
     try:
         sse_rows = fetch_sse_share_rows(trade_date)
-    except Exception as e:
-        logger.warning(f'上交所份额合并失败，etf_share 快照沿用东财: {e}')
+    except Exception as e:  # noqa: BLE001 边界：官方文件解析异常类型不固定，沿用东财
+        logger.warning("上交所份额合并失败，etf_share 快照沿用东财: %s", e)
         return rows
     if not sse_rows:
         return rows
@@ -636,8 +644,8 @@ def fetch_sse_share_rows(date_obj):
         import akshare as ak
 
         df = ak.fund_etf_scale_sse(date=date_obj.strftime('%Y%m%d'))
-    except Exception as e:
-        logger.warning(f'上交所 ETF 份额拉取失败（{date_obj}）: {e}')
+    except Exception as e:  # noqa: BLE001 上游边界：akshare 异常类型不固定
+        logger.warning("上交所 ETF 份额拉取失败（%s）: %s", date_obj, e)
         return []
     if df is None or df.empty:
         return []
@@ -675,6 +683,7 @@ def share_history_series(code, start_date, end_date):
                     break
         return out
     except Exception:
+        logger.warning("读取 %s 份额历史失败", code, exc_info=True)
         return None
 
 

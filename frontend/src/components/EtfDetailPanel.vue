@@ -18,6 +18,7 @@ import { tooltip } from '../charts/theme.js'
 import MarketDataStatus from './MarketDataStatus.vue'
 import { errorMessage, isCanceled } from '../utils/errorMessage.js'
 import { createRequestGuard } from '../utils/requestGuard.js'
+import { adjustHint, adjustLabel, priceSeriesName } from '../utils/adjust.js'
 
 use([
   LineChart,
@@ -59,6 +60,12 @@ const quote = computed(() => data.value?.quote || {})
 const performance = computed(() => data.value?.price_performance || {})
 const history = computed(() => data.value?.history?.items || [])
 const stats = computed(() => data.value?.history?.stats || null)
+// 价格历史的复权口径（DAT-14：东财前复权 qfq、新浪备源不复权 none）：
+// 图例与区间行显示中文标签，区间统计与 5/20/60 日涨跌悬停提示口径说明
+const adjust = computed(() => data.value?.history?.adjust)
+const adjustText = computed(() => adjustLabel(adjust.value))
+const adjustTitle = computed(() => adjustHint(adjust.value))
+const priceName = computed(() => priceSeriesName(adjust.value))
 const shareHistory = computed(() => data.value?.share_history || null)
 const holders = computed(() => data.value?.holder_structure || null)
 const chartOption = computed(() => {
@@ -79,7 +86,7 @@ const chartOption = computed(() => {
   ]
   const series = [
     {
-      name: '收盘价',
+      name: priceName.value,
       type: 'line',
       showSymbol: false,
       smooth: true,
@@ -117,7 +124,7 @@ const chartOption = computed(() => {
     backgroundColor: 'transparent',
     tooltip: tooltip({ trigger: 'axis' }),
     legend: {
-      data: hasShare ? ['收盘价', '成交额', '份额'] : ['收盘价', '成交额'],
+      data: hasShare ? [priceName.value, '成交额', '份额'] : [priceName.value, '成交额'],
       textStyle: { color: '#8490a8' },
       top: 0,
     },
@@ -254,6 +261,10 @@ onUnmounted(() => guard.abort())
       <p v-if="history.length" class="history-range">
         数据区间 {{ data.history.start_date }} ~ {{ data.history.end_date }} ·
         {{ data.history.count }} 个交易日
+        <template v-if="adjustText">
+          · 价格口径
+          <span class="adjust-tag" :class="adjust" :title="adjustTitle">{{ adjustText }}</span>
+        </template>
       </p>
       <p v-if="shareHistory?.available" class="history-range">
         虚线为份额曲线（右轴 · 上交所历史/本站快照）
@@ -304,7 +315,7 @@ onUnmounted(() => guard.abort())
         </table>
         <p class="holders-note">{{ holders.meta?.disclaimer }}</p>
       </div>
-      <div v-if="stats" class="win-stats">
+      <div v-if="stats" class="win-stats" :title="adjustTitle || undefined">
         <div>
           <span>区间涨跌</span
           ><b :class="pctClass(stats.change_pct)">{{ formatPct(stats.change_pct) }}</b>
@@ -322,7 +333,7 @@ onUnmounted(() => guard.abort())
           <span>交易日</span><b>{{ stats.count }}</b>
         </div>
       </div>
-      <div class="returns">
+      <div class="returns" :title="adjustTitle || undefined">
         <div>
           <span>5日</span
           ><b :class="pctClass(performance.return_5d)">{{ formatPct(performance.return_5d) }}</b>
@@ -510,6 +521,18 @@ header span {
   color: #8691a4;
   font-size: 11px;
   text-align: center;
+}
+.adjust-tag {
+  padding: 0 5px;
+  border: 1px solid #3a5a86;
+  border-radius: 4px;
+  color: #9cc6ff;
+  cursor: help;
+}
+/* 不复权：除权日会跳空，用警示色提醒 */
+.adjust-tag.none {
+  border-color: #7a5a2a;
+  color: #f0bd71;
 }
 .history-empty {
   min-height: 170px;

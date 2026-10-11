@@ -14,7 +14,7 @@ from io import StringIO
 import pandas as pd
 import requests
 
-from ._cache import _cache_get, _cache_meta, _cache_set, _stale_or, _to_float
+from ._cache import cache_get, _cache_meta, cache_set, stale_or, _to_float
 
 logger = logging.getLogger(__name__)
 
@@ -32,7 +32,7 @@ def fetch_holder_structure(code, ttl=_HOLDER_TTL, force=False):
     code = code.zfill(6)
     key = f'fund_holder_{code}'
     if not force:
-        cached = _cache_get(key, ttl)
+        cached = cache_get(key, ttl)
         if cached is not None:
             return cached
 
@@ -45,20 +45,20 @@ def fetch_holder_structure(code, ttl=_HOLDER_TTL, force=False):
     try:
         r = requests.get(_URL.format(code=code), headers=_HEADERS, timeout=10)
         r.raise_for_status()
-    except Exception as e:
-        logger.warning(f'持有人结构拉取失败（{code}）: {e}')
-        return _stale_or(key, fail)
+    except requests.RequestException as e:
+        logger.warning("持有人结构拉取失败（%s）: %s", code, e)
+        return stale_or(key, fail)
 
     m = re.search(r'content:"(.*)"\};', r.text, re.S)
     if not m:
-        return _stale_or(key, fail)
+        return stale_or(key, fail)
     try:
         tables = pd.read_html(StringIO(m.group(1)))
-    except Exception as e:
-        logger.warning(f'持有人结构解析失败（{code}）: {e}')
-        return _stale_or(key, fail)
+    except Exception as e:  # noqa: BLE001 上游边界：read_html 解析异常类型不固定（ValueError/lxml 等）
+        logger.warning("持有人结构解析失败（%s）: %s", code, e)
+        return stale_or(key, fail)
     if not tables or tables[0].empty:
-        return _stale_or(key, fail)
+        return stale_or(key, fail)
 
     items = []
     for _, row in tables[0].iterrows():
@@ -74,7 +74,7 @@ def fetch_holder_structure(code, ttl=_HOLDER_TTL, force=False):
         })
     items = [i for i in items if i['announce_date'] and i['announce_date'] != 'nan']
     if not items:
-        return _stale_or(key, fail)
+        return stale_or(key, fail)
 
     data = {
         'available': True,
@@ -88,5 +88,5 @@ def fetch_holder_structure(code, ttl=_HOLDER_TTL, force=False):
                        '全部机构，仅作长线配置盘的间接观察，非汇金单独口径。',
         ),
     }
-    _cache_set(key, data)
+    cache_set(key, data)
     return data

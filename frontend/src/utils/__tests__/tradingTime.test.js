@@ -1,6 +1,6 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { beijingClock, isTradingTime, pollDelay } from '../tradingTime.js'
+import { beijingClock, beijingToday, isTradingTime, pollDelay } from '../tradingTime.js'
 
 // 用带 +08:00 的 ISO 字符串构造，保证与运行环境时区无关
 const bj = (s) => new Date(`${s}+08:00`)
@@ -37,4 +37,10 @@ test('pollDelay：交易时段用原间隔，非交易时段降到 10 分钟', (
   assert.equal(pollDelay(bj('2026-10-12T20:00:00'), { interval: 60000, tradingOnly: false }), 60000)
   // 间隔本身比空闲间隔还长时不缩短
   assert.equal(pollDelay(bj('2026-10-12T20:00:00'), { interval: 900000 }), 900000)
+})
+
+test('beijingToday：按北京时间取日期，跨 UTC 零点不出错', () => {
+  assert.equal(beijingToday(bj('2026-10-12T07:30:00')), '2026-10-12')
+  assert.equal(beijingToday(bj('2026-10-11T23:59:00')), '2026-10-11')
+  assert.equal(beijingToday(bj('2026-10-12T00:00:00')), '2026-10-12')
 })

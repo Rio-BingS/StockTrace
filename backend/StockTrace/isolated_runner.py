@@ -5,9 +5,10 @@
 - 项目代码普遍 ``except Exception`` 吞掉上游异常，单靠抛错用例未必会红，
   因此用 result mixin 在 stopTest 时把发生过网络尝试的用例判失败；
   用例之外（setUpClass、模块导入等）的尝试在结尾列出，并使整次运行失败。
-- 每个用例开始前清空 market/_sources/services 等模块级缓存，避免用例间串扰。
+- 每个用例开始前清空 market/_sources/search 等模块级缓存，避免用例间串扰。
 - STOCKTRACE_TEST_ALLOW_NETWORK=1 关闭断网闸（仅本地临时排查用）。
-- 测试期间 STOCKTRACE_MARKET_CALENDAR_ENABLED=False：市场缓存不查交易日历（ARC-02）。
+- 测试期间 STOCKTRACE_MARKET_CALENDAR_ENABLED=False：市场缓存不查交易日历（ARC-02）；
+  STOCKTRACE_FLOAT_SHARES_ENABLED=False：探测器不拉流通股本（ALG-13）。
 
 注意：本模块名不能以 test 开头，否则会被测试发现当成测试模块导入。
 """
@@ -187,6 +188,8 @@ _CACHE_RESETS = [
     ('stocks.ai.valuation', '_last_fail_at', ('set', 0.0)),
     ('stocks.market.sectors', '_ths_token', {'v': None, 'at': 0.0}),
     ('stocks.market.snapshots', '_etf_share_memo', {'version': None, 'values': {}}),
+    ('stocks.datasources.float_shares', '_cache', None),
+    ('stocks.datasources.float_shares', '_fail_state', {'count': 0, 'until': 0.0}),
 ]
 
 
@@ -252,7 +255,10 @@ class IsolatedTestRunner(DiscoverRunner):
     def setup_test_environment(self, **kwargs):
         super().setup_test_environment(**kwargs)
         # 市场缓存新鲜度不查交易日历（避免触网、保持确定性）；需要的用例自行 patch
-        self._calendar_override = override_settings(STOCKTRACE_MARKET_CALENDAR_ENABLED=False)
+        # 探测器流通股本同理（ALG-13）：默认不取，需要的用例自行打开并 mock
+        self._calendar_override = override_settings(
+            STOCKTRACE_MARKET_CALENDAR_ENABLED=False, STOCKTRACE_FLOAT_SHARES_ENABLED=False,
+        )
         self._calendar_override.enable()
         if self.network_guard_enabled:
             _guard.outside_hits = []

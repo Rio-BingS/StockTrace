@@ -6,6 +6,7 @@
 import json
 
 import pandas as pd
+import requests
 from datetime import date, datetime, time as dt_time, timedelta
 from decimal import Decimal
 from unittest.mock import Mock, patch
@@ -23,7 +24,7 @@ from .models import (
     PriceAlert,
     Stock,
 )
-from .views import _quote_row
+from .serializers import QuoteRowSerializer
 
 _BASE = date(2026, 9, 4)
 
@@ -541,15 +542,16 @@ class DashboardCostTests(TestCase):
         stock = Stock.objects.create(
             code='600000', name='浦发银行', cost_price=Decimal('10.000'), quantity=1000,
         )
-        quote = _make_quote(stock, Decimal('11.0'), 10.0)
-        row = _quote_row(stock, quote)
-        self.assertEqual(row['cost_price'], Decimal('10.000'))
+        stock.latest_quote = _make_quote(stock, Decimal('11.0'), 10.0)
+        row = QuoteRowSerializer(stock).data
+        self.assertEqual(row['cost_price'], '10.000')
         self.assertEqual(row['quantity'], 1000)
         # 盈亏由前端按 (close - cost) * quantity 计算，后端不重复出口径
 
     def test_quote_row_without_cost_is_null(self):
         stock = Stock.objects.create(code='600000', name='浦发银行')
-        row = _quote_row(stock, None)
+        stock.latest_quote = None
+        row = QuoteRowSerializer(stock).data
         self.assertIsNone(row['cost_price'])
         self.assertIsNone(row['quantity'])
 
@@ -1285,7 +1287,7 @@ class ThsFundFlowTests(SimpleTestCase):
         trs = ''
         for i in range(rows):
             cells = [
-                str(i + 1), '养殖业', '3043.89', '4.36%', '54.33亿', '38.31亿',
+                str(i + 1), f'养殖业{page_info}-{i}', '3043.89', '4.36%', '54.33亿', '38.31亿',
                 '16.02亿', '36', '罗牛山', '10.05%', '10.88',
             ]
             trs += '<tr>' + ''.join(f'<td>{c}</td>' for c in cells) + '</tr>'
@@ -1296,7 +1298,7 @@ class ThsFundFlowTests(SimpleTestCase):
 
     def test_pagination_parse_and_pct_strip(self):
         html = self._html(10)
-        seq = [html, self._html(10, page_info='1/2')]
+        seq = [html, self._html(10, page_info='2/2')]
 
         def fake_get(url, **kwargs):
             self.assertIn('data.10jqka.com.cn', url)
@@ -1539,7 +1541,8 @@ class HolderStructureTests(SimpleTestCase):
         self.assertIn('间接观察', d['meta']['disclaimer'])
 
     def test_upstream_fail_degrades(self):
-        with patch('stocks.market.holders.requests.get', side_effect=RuntimeError('boom')):
+        # requests 只抛 RequestException 家族（5d 收窄后 RuntimeError 不再被当作上游失败）
+        with patch('stocks.market.holders.requests.get', side_effect=requests.ConnectionError('boom')):
             d = market.holders.fetch_holder_structure('510300', force=True)
         self.assertFalse(d['available'])
         self.assertTrue(d['message'])

@@ -218,44 +218,26 @@ def _execute_llm(purpose, invoke, prepared, stock=None):
 
 @api_view(['POST'])
 def stock_ai_analysis(request, pk):
-    """个股 AI 分析：手动按需触发，同步返回"""
+    """个股 AI 分析：手动按需触发；默认同步返回，?async=1 时进后台任务队列"""
     stock = Stock.objects.filter(pk=pk, is_active=True).first()
     if stock is None:
         return Response({'detail': '股票不存在'}, status=status.HTTP_404_NOT_FOUND)
 
     messages = build_analysis_messages(stock)
 
-    def invoke(client):
-        return client.chat(messages, max_tokens=1500)
-
     if _wants_async(request):
-        # 异步：同步完成校验与额度预占（429/400 立即返回），LLM 调用进后台队列
-        prepared, failed = _prepare_llm(AiCallLog.PURPOSE_ANALYSIS, stock=stock)
-        if failed:
-            return failed
+        # 异步：同步完成校验与额度预占（429/400 立即返回），LLM 调用进后台任务
+        return _submit_job(AiCallLog.PURPOSE_ANALYSIS, JOB_ANALYSIS,
+                           {'messages': messages, 'stock_id': stock.id}, stock=stock)
 
-        def work():
-            try:
-                with hold_ai_slot(_job_slot_wait()):
-                    text, failed = _execute_llm(AiCallLog.PURPOSE_ANALYSIS, invoke, prepared, stock=stock)
-            except LlmError as exc:
-                # 排队等名额超时：没有调用上游，撤销占位
-                failed = _llm_failed(exc, AiCallLog.PURPOSE_ANALYSIS, prepared[1], stock=stock)
-            if failed:
-                return failed.status_code, failed.data
-            return 200, {'analysis': text, 'disclaimer': DISCLAIMER}
-
-        job_id = ai_jobs.submit('analysis', work, meta={'stock_id': stock.id})
-        return Response(
-            {'job_id': job_id, 'status': ai_jobs.STATUS_QUEUED,
-             'poll_url': f'/api/ai/jobs/{job_id}/'},
-            status=status.HTTP_202_ACCEPTED,
-        )
-
-    text, failed = _run_llm(AiCallLog.PURPOSE_ANALYSIS, invoke, stock=stock)
+    text, failed = _run_llm(AiCallLog.PURPOSE_ANALYSIS, _analysis_invoke(messages), stock=stock)
     if failed:
         return failed
     return Response({'analysis': text, 'disclaimer': DISCLAIMER})
+
+
+def _analysis_invoke(messages):
+    return lambda client: client.chat(messages, max_tokens=1500)
 
 
 def _wants_async(request):
@@ -269,6 +251,93 @@ def _wants_async(request):
 def _job_slot_wait():
     # 后台任务排队等 AI 并发名额的上限：与单次调用总时长同量级，等不到就失败、不无限挂着
     return float(getattr(settings, 'STOCKTRACE_LLM_TOTAL_TIMEOUT', 90))
+
+
+# ---- AI 后台任务（AIX-08 收尾：任务落库，见 ai/jobs.py）----
+# 任务类型（AiJob.kind，也是轮询 JSON 的 kind 字段）
+JOB_ANALYSIS = 'analysis'
+JOB_SCREENER_AI = 'screener_ai'
+JOB_SCREENER_COMMENT = 'screener_comment'
+
+
+def _submit_job(purpose, kind, params, stock=None):
+    """预占额度后写入后台任务，返回 202 + job_id；服务商/额度问题直接返回 400/429。
+
+    params 只放可 JSON 序列化的值（提示词消息、股票 id）；任务可能由别的 worker 执行。
+    """
+    prepared, failed = _prepare_llm(purpose, stock=stock)
+    if failed:
+        return failed
+    call_log = prepared[1]
+    try:
+        job_id = ai_jobs.submit(kind, {**params, 'call_log_id': call_log.id})
+    except Exception:
+        # 任务没写进去：撤销占位，避免流水一直停在"进行中"
+        cancel_call(call_log)
+        raise
+    return Response(
+        {'job_id': job_id, 'status': ai_jobs.STATUS_QUEUED,
+         'poll_url': f'/api/ai/jobs/{job_id}/'},
+        status=status.HTTP_202_ACCEPTED,
+    )
+
+
+_JOB_INTERNAL_ERROR = (500, {'detail': 'AI 任务执行失败，请稍后重试', 'error': 'internal'})
+
+
+def _job_llm(purpose, params, invoke, stock=None):
+    """后台任务里调用服务商：取回占位流水、按当前配置重建客户端，排队等并发名额后按顺序调用。
+
+    返回 (结果, None) 或 (None, (http_status, body))。
+    """
+    call_log = AiCallLog.objects.filter(pk=params.get('call_log_id')).first()
+    if call_log is None:
+        logger.warning('AI 后台任务的占位流水 %s 不存在', params.get('call_log_id'))
+        return None, _JOB_INTERNAL_ERROR
+    clients, err = _active_clients()
+    if err:
+        # 排队期间服务商被删除/停用：没有调用上游，撤销占位
+        cancel_call(call_log)
+        return None, (status.HTTP_400_BAD_REQUEST, {'detail': err})
+    try:
+        with hold_ai_slot(_job_slot_wait()):
+            result, failed = _execute_llm(purpose, invoke, (clients, call_log), stock=stock)
+    except LlmError as exc:
+        # 排队等名额超时：没有调用上游，撤销占位
+        failed = _llm_failed(exc, purpose, call_log, stock=stock)
+    if failed:
+        return None, (failed.status_code, failed.data)
+    return result, None
+
+
+@ai_jobs.register(JOB_ANALYSIS)
+def _analysis_job(params):
+    stock = Stock.objects.filter(pk=params.get('stock_id')).first()
+    text, failed = _job_llm(AiCallLog.PURPOSE_ANALYSIS, params,
+                            _analysis_invoke(params['messages']), stock=stock)
+    if failed:
+        return failed
+    return 200, {'analysis': text, 'disclaimer': DISCLAIMER}
+
+
+@ai_jobs.register(JOB_SCREENER_AI)
+def _screener_ai_job(params):
+    messages = params['messages']
+    spec, failed = _job_llm(AiCallLog.PURPOSE_SCREENER_TRANSLATE, params,
+                            lambda c: c.chat_json(messages))
+    if failed:
+        return failed
+    resp = _screener_ai_result(spec)
+    return resp.status_code, resp.data
+
+
+@ai_jobs.register(JOB_SCREENER_COMMENT)
+def _screener_comment_job(params):
+    text, failed = _job_llm(AiCallLog.PURPOSE_SCREENER_COMMENT, params,
+                            _comment_invoke(params['messages']))
+    if failed:
+        return failed
+    return 200, {'comment': text, 'disclaimer': DISCLAIMER}
 
 
 @api_view(['GET'])
@@ -300,17 +369,24 @@ def screener(request):
 
 @api_view(['POST'])
 def screener_ai(request):
-    """自然语言 → LLM 翻译成结构化条件 → 复用引擎执行"""
+    """自然语言 → LLM 翻译成结构化条件 → 复用引擎执行；?async=1 时进后台任务队列"""
     ser = ScreenerAiInputSerializer(data=request.data)
     if not ser.is_valid():
         return _invalid_input(ser.errors)
     query = ser.validated_data['query']
 
     messages = build_translate_messages(query)
+    if _wants_async(request):
+        return _submit_job(AiCallLog.PURPOSE_SCREENER_TRANSLATE, JOB_SCREENER_AI,
+                           {'messages': messages})
     spec, failed = _run_llm(AiCallLog.PURPOSE_SCREENER_TRANSLATE, lambda c: c.chat_json(messages))
     if failed:
         return failed
+    return _screener_ai_result(spec)
 
+
+def _screener_ai_result(spec):
+    """用 LLM 翻译出的条件执行选股，同步接口与后台任务共用。"""
     try:
         rows, meta = run_screener_with_meta(spec)
     except ConditionError as exc:
@@ -352,7 +428,10 @@ def _comment_rows(codes):
 
 @api_view(['POST'])
 def screener_ai_comment(request):
-    """对筛选结果做 AI 点评。入参：query（原始需求）+ results（screener 返回的 results）"""
+    """对筛选结果做 AI 点评。入参：query（原始需求）+ results（screener 返回的 results）。
+
+    ?async=1 时进后台任务队列。
+    """
     ser = ScreenerCommentInputSerializer(data=request.data)
     if not ser.is_valid():
         return _invalid_input(ser.errors)
@@ -363,8 +442,14 @@ def screener_ai_comment(request):
                         status=status.HTTP_400_BAD_REQUEST)
 
     messages = build_comment_messages(rows, query)
-    text, failed = _run_llm(
-        AiCallLog.PURPOSE_SCREENER_COMMENT, lambda c: c.chat(messages, max_tokens=800))
+    if _wants_async(request):
+        return _submit_job(AiCallLog.PURPOSE_SCREENER_COMMENT, JOB_SCREENER_COMMENT,
+                           {'messages': messages})
+    text, failed = _run_llm(AiCallLog.PURPOSE_SCREENER_COMMENT, _comment_invoke(messages))
     if failed:
         return failed
     return Response({'comment': text, 'disclaimer': DISCLAIMER})
+
+
+def _comment_invoke(messages):
+    return lambda client: client.chat(messages, max_tokens=800)

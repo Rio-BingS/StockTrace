@@ -9,7 +9,7 @@ from django.utils import timezone
 
 from . import market
 from . import tasks
-from .market._cache import _cache_get, _cache_set
+from .market._cache import cache_get, cache_set, is_fresh
 
 
 def _no_holders(code, **kwargs):
@@ -22,13 +22,13 @@ class MarketParsingTests(SimpleTestCase):
         market._cache.clear()
 
     def test_etf_normalization_and_scope(self):
-        equity = market._etf_row_to_item(pd.Series({
+        equity = market.etf_row_to_item(pd.Series({
             '代码': '510300', '名称': '沪深300ETF', '最新价': 4.2,
             '最新份额': 100000000, '成交额': 200000000,
             '总市值': 420000000, '主力净流入-净额': 1200000,
             'IOPV实时估值': 4.19, '昨收': 4.1,
         }))
-        bond = market._etf_row_to_item(pd.Series({'代码': '511010', '名称': '国债ETF'}))
+        bond = market.etf_row_to_item(pd.Series({'代码': '511010', '名称': '国债ETF'}))
 
         self.assertTrue(equity['scope_match'])
         self.assertEqual(equity['exchange'], 'SH')
@@ -40,7 +40,7 @@ class MarketParsingTests(SimpleTestCase):
             '行业': '科技', '净额': 12.5, '流入资金': 20, '流出资金': 7.5,
             '行业-涨跌幅': 2.1, '领涨股': '示例', '领涨股-涨跌幅': 8.2,
         }])
-        item = market._parse_fund_flow_table(frame, ['行业'])[0]
+        item = market.parse_fund_flow_table(frame, ['行业'])[0]
         self.assertEqual(item['net'], 1_250_000_000)
         self.assertEqual(item['inflow'], 2_000_000_000)
         self.assertEqual(item['outflow'], 750_000_000)
@@ -51,7 +51,7 @@ class MarketParsingTests(SimpleTestCase):
             {'行业': 'AI', '净额': -15, '流入资金': 5, '流出资金': 20},
             {'行业': '算力', '净额': 8, '流入资金': 10, '流出资金': 2},
         ])
-        items = market._parse_fund_flow_table(frame, ['行业'])
+        items = market.parse_fund_flow_table(frame, ['行业'])
 
         self.assertEqual(len(items), 2)
         self.assertEqual(next(item for item in items if item['name'] == 'AI')['net'], -1_500_000_000)
@@ -104,19 +104,6 @@ class MarketParsingTests(SimpleTestCase):
         self.assertEqual(data['period'], 'day')
         self.assertEqual(data['unavailable_periods'], ['1m', '3m', '6m', '1y'])
         self.assertEqual([item['name'] for item in data['divergences']], ['C', 'B'])
-
-    def test_sector_rank_table_uses_upstream_yuan_values(self):
-        # 东财 clist 排行榜形状：列带指标前缀，净额单位已是元
-        frame = pd.DataFrame([
-            {'序号': 1, '行业': '半导体', '5日涨跌幅': 2.5, '5日主力净流入-净额': 1_500_000_000.0},
-            {'序号': 2, '行业': '软件', '5日涨跌幅': -1.2, '5日主力净流入-净额': -800_000_000.0},
-        ])
-        items = market._parse_sector_rank_table(frame)
-
-        self.assertEqual(len(items), 2)
-        self.assertEqual(items[0]['net'], 1_500_000_000.0)
-        self.assertEqual(items[1]['change_pct'], -1.2)
-        self.assertIsNone(items[0]['inflow'])
 
     @patch('stocks.market.sectors.fetch_industry_fund_flow')
     def test_sector_rotation_multi_day_periods_use_snapshots_only(self, fetch_flow):
@@ -217,14 +204,14 @@ class MarketCacheFreshnessTests(SimpleTestCase):
         with patch('stocks.market._cache._calendar_enabled', return_value=True), \
              patch('stocks.market._cache._data_changing_now', return_value=False), \
              patch('stocks.market._cache._last_session_close', return_value=close):
-            self.assertTrue(market._is_fresh(close.timestamp() + 60, ttl=60))
-            self.assertFalse(market._is_fresh(close.timestamp() - 60, ttl=60))
+            self.assertTrue(is_fresh(close.timestamp() + 60, ttl=60))
+            self.assertFalse(is_fresh(close.timestamp() - 60, ttl=60))
 
     def test_ttl_applies_while_data_changing(self):
         with patch('stocks.market._cache._calendar_enabled', return_value=True), \
              patch('stocks.market._cache._data_changing_now', return_value=True):
-            self.assertFalse(market._is_fresh(time() - 600, ttl=60))
-            self.assertTrue(market._is_fresh(time() - 10, ttl=60))
+            self.assertFalse(is_fresh(time() - 600, ttl=60))
+            self.assertTrue(is_fresh(time() - 10, ttl=60))
 
 
 class NationalEtfFlowTests(SimpleTestCase):
@@ -237,7 +224,7 @@ class NationalEtfFlowTests(SimpleTestCase):
         # 东财 ETF 资金流行：日期,主力,小单,中单,大单,超大单,各占比,收盘,涨跌幅
         row = ('2026-08-28,244913792.0,-66497392.0,-178416395.0,-124100400.0,'
                '369014192.0,8.64,-2.35,-6.29,-4.38,13.02,4.679,-0.26,0.00,0.00')
-        parsed = market.etf_flow._parse_kline(row)
+        parsed = market.etf_flow.parse_flow_kline(row)
 
         self.assertEqual(parsed['date'], '2026-08-28')
         self.assertEqual(parsed['main_net'], 244913792.0)
@@ -247,7 +234,7 @@ class NationalEtfFlowTests(SimpleTestCase):
         self.assertEqual(parsed['change_pct'], -0.26)
 
     def test_short_kline_row_is_skipped(self):
-        self.assertIsNone(market.etf_flow._parse_kline('2026-08-28,1.0,2.0'))
+        self.assertIsNone(market.etf_flow.parse_flow_kline('2026-08-28,1.0,2.0'))
 
     @patch('stocks.market.etf_flow._FLOW_FETCH_INTERVAL', 0)
     @patch('stocks.market.etf_flow.flow_history')
@@ -582,19 +569,19 @@ class MarketCacheLruTests(SimpleTestCase):
 
     def test_cache_evicts_oldest_beyond_limit(self):
         for i in range(257):
-            _cache_set(f'k{i}', {'i': i})
+            cache_set(f'k{i}', {'i': i})
         self.assertNotIn('k0', market._cache)
         self.assertIn('k256', market._cache)
         self.assertLessEqual(len(market._cache), 256)
 
     def test_rewritten_entry_survives_eviction(self):
-        _cache_set('old', 1)
+        cache_set('old', 1)
         for i in range(255):
-            _cache_set(f'k{i}', i)
-        _cache_set('old', 2)  # 重写视为最近使用
-        _cache_set('k255', 3)  # 超限淘汰最旧的 k0 而非 old
+            cache_set(f'k{i}', i)
+        cache_set('old', 2)  # 重写视为最近使用
+        cache_set('k255', 3)  # 超限淘汰最旧的 k0 而非 old
         self.assertNotIn('k0', market._cache)
-        self.assertEqual(_cache_get('old', ttl=60), 2)
+        self.assertEqual(cache_get('old', ttl=60), 2)
 
 
 class InstitutionCodeValidationTests(SimpleTestCase):
@@ -618,6 +605,16 @@ class TrendPeriodEndpointTests(SimpleTestCase):
     def test_trend_ytd_period_no_longer_502(self, _trend_mock):
         response = self.client.get('/api/market/trend/?period=ytd')
         self.assertEqual(response.status_code, 200)
+
+    @patch('django.utils.timezone.localdate', return_value=date(2026, 9, 4))
+    @patch('stocks.views.market.get_market_trend', return_value={'series': []})
+    def test_trend_custom_end_after_today_returns_400(self, trend_mock, _today):
+        response = self.client.get('/api/market/trend/?start=2026-08-01&end=2026-09-05')
+        self.assertEqual(response.status_code, 400)
+        self.assertEqual(response.json()['detail'], 'end 不能晚于今天')
+        trend_mock.assert_not_called()
+        ok = self.client.get('/api/market/trend/?start=2026-08-01&end=2026-09-04')
+        self.assertEqual(ok.status_code, 200)
 
 
 class StockEndpointDbTests(TestCase):

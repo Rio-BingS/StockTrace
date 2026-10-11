@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 from datetime import datetime, timedelta
 
 import akshare as ak
@@ -9,11 +10,14 @@ from django.utils import timezone
 
 from ..common.envelope import envelope
 from ..errors import BadRequest
-from ._cache import _cache_get, _cache_meta, _cache_set, _now_str, _stale_or, _to_float
+from ._cache import cache_get, _cache_meta, cache_set, _now_str, stale_or, _to_float
 from .holders import fetch_holder_structure
-from ._query import _paginate, _sort_items
+from ..common.pagination import paginate
+from ._query import _sort_items
 from ._sources import _first_ok, _safe_df_call
 from . import snapshots
+
+logger = logging.getLogger(__name__)
 
 # 国家队 / 汇金 常相关的宽基与政策向 ETF（6 位代码）
 NATIONAL_TEAM_ETFS = [
@@ -68,15 +72,15 @@ _ETF_SCOPE_RULE_VERSION = 'equity-broad-v2'
 def _fetch_etf_spot_df(ttl=180, force=False):
     """全市场 ETF 现货（较重，单独缓存）。"""
     if not force:
-        cached = _cache_get('etf_spot_df', ttl)
+        cached = cache_get('etf_spot_df', ttl)
         if cached is not None:
             return cached
 
     df = _safe_df_call(ak.fund_etf_spot_em, source_name='em_etf_spot')
     if df is None or df.empty:
-        return _stale_or('etf_spot_df', None)
+        return stale_or('etf_spot_df', None)
 
-    _cache_set('etf_spot_df', df)
+    cache_set('etf_spot_df', df)
     return df
 
 
@@ -95,7 +99,7 @@ def _etf_scope(item):
     return False, '无法判定:未命中ETF名称规则'
 
 
-def _etf_row_to_item(row):
+def etf_row_to_item(row):
     code = str(row.get('代码', '')).zfill(6)
     item = {
         'code': code,
@@ -140,7 +144,7 @@ def _normalized_etf_items(ttl=180):
     items = []
     seen = set()
     for _, row in df.iterrows():
-        item = _etf_row_to_item(row)
+        item = etf_row_to_item(row)
         if not item['code'] or item['code'] in seen:
             continue
         seen.add(item['code'])
@@ -175,7 +179,7 @@ def get_etf_share_radar(
     sort_field = sort or default_sort
     sort_order = order or default_order
     sorted_items = _sort_items(scoped_items, _ETF_SORT_FIELDS[sort_field], sort_order)
-    page_items, pagination = _paginate(sorted_items, page, page_size)
+    page_items, pagination = paginate(sorted_items, page, page_size)
 
     # 份额 n 日变化：由日度快照计算，窗口不齐的档位如实为 null
     share_chg_maps = {n: snapshots.share_change_map(n)[0] for n in (1, 5, 20)}
@@ -280,7 +284,7 @@ def _history_cache_key(code, range_name, start_date=None, end_date=None):
 def _etf_history(code, range_name='3m', start_date=None, end_date=None, ttl=1200):
     """range_name 为固定档位；start_date 给定时按自定义起止日期取数（end_date 缺省今天）。"""
     cache_key = _history_cache_key(code, range_name, start_date, end_date)
-    cached = _cache_get(cache_key, ttl)
+    cached = cache_get(cache_key, ttl)
     if cached is not None:
         return cached['items']
 
@@ -302,7 +306,7 @@ def _etf_history(code, range_name='3m', start_date=None, end_date=None, ttl=1200
         (lambda: ak.fund_etf_hist_sina(symbol=_etf_sina_symbol(code)), 'sina_etf_hist'),
     ])
     if df is None or df.empty:
-        return (_stale_or(cache_key, None) or {}).get('items', [])
+        return (stale_or(cache_key, None) or {}).get('items', [])
 
     if source == 'em_etf_hist':
         items = []
@@ -326,13 +330,13 @@ def _etf_history(code, range_name='3m', start_date=None, end_date=None, ttl=1200
         items = [item for item in items if start_s <= item['date'] <= end_s]
 
     # items 与来源存同一个缓存值（DAT-19）：分两个 key 会被 LRU 分别淘汰，meta 来源误标
-    _cache_set(cache_key, {'available': bool(items), 'items': items, 'source': source})
+    cache_set(cache_key, {'available': bool(items), 'items': items, 'source': source})
     return items
 
 
 def _history_source(cache_key):
     """缓存里该段历史的实际来源；无缓存时按主源东财。"""
-    return (_stale_or(cache_key, None) or {}).get('source') or 'em_etf_hist'
+    return (stale_or(cache_key, None) or {}).get('source') or 'em_etf_hist'
 
 
 def _period_return(history, bars):
@@ -496,6 +500,7 @@ def _share_change_signals():
         from . import snapshots
         changes, meta = snapshots.latest_pair_change()
     except Exception:
+        logger.warning("读取份额快照对比失败，份额异动信号按不可用处理", exc_info=True)
         changes, meta = None, None
     if changes is None:
         return {
@@ -565,7 +570,7 @@ def get_national_team_etfs(ttl=180, force=False):
     cache_key = 'national_etf'
     if force:
         _fetch_etf_spot_df(ttl=ttl, force=True)
-    elif (cached := _cache_get(cache_key, ttl)) is not None:
+    elif (cached := cache_get(cache_key, ttl)) is not None:
         return cached
 
     by_code = {item['code']: item for item in _normalized_etf_items(ttl=ttl)}
@@ -618,5 +623,5 @@ def get_national_team_etfs(ttl=180, force=False):
         'signals': _share_change_signals(),
         'message': '' if listed else 'ETF 行情暂不可用',
     }
-    _cache_set(cache_key, data)
+    cache_set(cache_key, data)
     return data

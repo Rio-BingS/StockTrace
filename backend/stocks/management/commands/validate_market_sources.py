@@ -43,7 +43,7 @@ class Command(BaseCommand):
         self._section('ETF 全市场快照')
         try:
             frame = ak.fund_etf_spot_em()
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001 校验命令边界：报告任何上游失败后继续其余校验
             self._report_frame_error('ETF 全表', exc)
             return None, []
 
@@ -105,7 +105,7 @@ class Command(BaseCommand):
             try:
                 frame = loader()
                 parsed = parse_fund_flow_table(frame, candidates)
-            except Exception as exc:
+            except Exception as exc:  # noqa: BLE001 校验命令边界：同上
                 self._report_frame_error(f'{label}资金', exc)
                 continue
 
@@ -139,7 +139,7 @@ class Command(BaseCommand):
                     end_date='20991231',
                     adjust='',
                 )
-            except Exception as exc:
+            except Exception as exc:  # noqa: BLE001 校验命令边界：同上
                 self._report_frame_error(f'{category} ETF {code} 日线', exc)
                 continue
 
@@ -161,7 +161,7 @@ class Command(BaseCommand):
         self._section('大盘主力资金流（口径/单位）')
         try:
             frame = ak.stock_market_fund_flow()
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001 校验命令边界：同上
             self._report_frame_error('东财 stock_market_fund_flow', exc)
             return
         self.stdout.write(f'字段：{list(frame.columns)}')
@@ -175,7 +175,7 @@ class Command(BaseCommand):
             self.stdout.write(f'{key}: 非空 {non_null}/{len(items)}')
         try:
             merged, errors = fetch_market_ff_merged_rows()
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001 校验命令边界：同上
             self._report_frame_error('自采沪深 fflow', exc)
             return
         if errors:
