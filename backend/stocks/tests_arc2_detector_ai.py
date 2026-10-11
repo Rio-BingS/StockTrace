@@ -1,6 +1,9 @@
 """ARC 第二轮 detector-ai 方向：阈值集中（ARC-06）的回归测试。"""
 
-from django.test import SimpleTestCase
+from datetime import date
+from decimal import Decimal
+
+from django.test import SimpleTestCase, TestCase
 
 from .detector import calm, constants, dimensions, registry, review, signals
 
@@ -70,3 +73,47 @@ class AiSerializersMoveTests(SimpleTestCase):
         self.assertIs(old, new)
         self.assertIs(old.AiProviderSerializer, new.AiProviderSerializer)
         self.assertIs(old.first_error_text, new.first_error_text)
+
+
+class AiQuotesFinalOnlyTests(TestCase):
+    """AI 取行情只用已收盘日线：盘中未定稿（is_final=False）的当日行不能当收盘数据喂给 LLM。
+
+    DAT-13 的读取侧已在 3d3c120 修过个股分析；这里把分析消息与选股点评两条
+    取数路径一起锁住，防止回归。
+    """
+
+    def setUp(self) -> None:
+        from .models import DailyQuote, Stock
+
+        self.stock = Stock.objects.create(code='600000', name='回归')
+        common = {
+            'open_close_diff': Decimal('0.5'), 'open_close_pct': Decimal('5'),
+            'high_low_diff': Decimal('0.9'), 'high_low_pct': Decimal('9'),
+            'volume': 1, 'turnover': Decimal('1'),
+        }
+        DailyQuote.objects.create(
+            stock=self.stock, trade_date=date(2026, 9, 4), is_final=True,
+            open_price=Decimal('10'), close_price=Decimal('10.5'),
+            high_price=Decimal('10.8'), low_price=Decimal('9.9'), change_pct=Decimal('5'), **common,
+        )
+        DailyQuote.objects.create(
+            stock=self.stock, trade_date=date(2026, 9, 7), is_final=False,
+            open_price=Decimal('10.5'), close_price=Decimal('12.34'),
+            high_price=Decimal('12.5'), low_price=Decimal('10.4'), change_pct=Decimal('9.9'), **common,
+        )
+
+    def test_analysis_messages_skip_intraday_row(self) -> None:
+        from .ai.prompts import build_analysis_messages
+
+        user = build_analysis_messages(self.stock)[-1]['content']
+        self.assertIn('最新交易日：2026-09-04', user)
+        self.assertNotIn('2026-09-07', user)
+        self.assertNotIn('12.34', user)
+
+    def test_comment_rows_use_final_quote(self) -> None:
+        from .ai.views import _comment_rows
+
+        rows = _comment_rows([self.stock.code])
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]['trade_date'], date(2026, 9, 4))
+        self.assertEqual(rows[0]['close_price'], Decimal('10.500'))
