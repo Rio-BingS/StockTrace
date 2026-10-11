@@ -165,13 +165,6 @@ function fmtCell(row, col) {
   return formatNum(v)
 }
 
-function errText(e) {
-  const data = e.response?.data
-  if (typeof data === 'string') return data
-  if (data?.detail) return data.detail
-  return e.message || '请求失败'
-}
-
 function addCondition() {
   conditions.value.push({ field: 'change_pct', op: 'gt', value: '' })
 }
