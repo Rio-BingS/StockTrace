@@ -1,11 +1,17 @@
 """P2 数据方向修复回归测试（DAT-14~20、PERF-07、PERF-10、ARC-03、AIX-08）"""
 
+from datetime import date
 from unittest.mock import patch
 
 import pandas as pd
-from django.test import SimpleTestCase
+from django.test import SimpleTestCase, TestCase
 
 from . import market
+from .models import MarketDailySnapshot
+
+# 两个相邻交易日（周四、周五），远离任何「今天」守卫
+_D1 = date(2026, 9, 3)
+_D2 = date(2026, 9, 4)
 
 
 def _no_holders(code, **kwargs):
@@ -308,3 +314,75 @@ class ValuationEntryTtlTests(SimpleTestCase):
         self.assertEqual(calls, [['600000'], ['000001'], ['600000']])
         self.assertEqual(result['600000']['pe_ttm'], 3.0)
         self.assertEqual(result['000001']['pe_ttm'], 2.0)
+
+
+class EtfShareMemoTests(TestCase):
+    """PERF-07：份额变化按快照版本缓存；快照变化（含同日覆盖）后自动重算。"""
+
+    def _calendar(self):
+        from contextlib import ExitStack
+
+        stack = ExitStack()
+        stack.enter_context(patch('stocks.services.is_trading_day', lambda d: d.weekday() < 5))
+        stack.enter_context(patch('stocks.market.snapshots._expected_latest_date', return_value=_D2))
+        return stack
+
+    def _snap(self, day, share):
+        MarketDailySnapshot.objects.update_or_create(
+            kind=MarketDailySnapshot.KIND_ETF_SHARE, trade_date=day,
+            defaults={'payload': [{'code': '510300', 'name': 'x', 'share': share}]},
+        )
+
+    def test_memo_hit_and_invalidated_on_overwrite(self):
+        from .market import snapshots
+
+        self._snap(_D1, 100.0)
+        self._snap(_D2, 110.0)
+        with self._calendar():
+            first, _ = snapshots.share_change_map(1)
+            with patch('stocks.market.snapshots._share_change_map') as compute:
+                again, _ = snapshots.share_change_map(1)
+            compute.assert_not_called()
+            self.assertEqual(first, {'510300': 10.0})
+            self.assertIs(again, first)
+            self._snap(_D2, 120.0)  # 同日覆盖：updated_at 变化
+            third, _ = snapshots.share_change_map(1)
+        self.assertEqual(third, {'510300': 20.0})
+
+    def test_latest_snapshot_defers_payload(self):
+        from .market import snapshots
+
+        self._snap(_D2, 110.0)
+        latest = snapshots._latest_snapshot(MarketDailySnapshot.KIND_ETF_SHARE)
+        self.assertIn('payload', latest.get_deferred_fields())
+        self.assertEqual(latest.trade_date, _D2)
+
+
+class MarketFfUpsertTests(TestCase):
+    """PERF-07：market_ff 只写缺失或数值变化的日期。"""
+
+    def test_only_changed_dates_written(self):
+        from .market import snapshots
+
+        row = {'main_net': 1.0, 'small_net': None, 'mid_net': None, 'large_net': None,
+               'super_net': None, 'src': 'em_fflow', 'unit': '元', 'scope': 'sh+sz'}
+        merged = {
+            _D1.isoformat(): {'date': _D1.isoformat(), **row},
+            _D2.isoformat(): {'date': _D2.isoformat(), **row},
+        }
+        MarketDailySnapshot.objects.create(
+            kind=MarketDailySnapshot.KIND_MARKET_FF, trade_date=_D1, payload=[merged[_D1.isoformat()]],
+        )
+        with patch('stocks.services.is_trading_day', return_value=True), \
+                patch('stocks.market.snapshots.fetch_market_ff_merged_rows', return_value=(merged, [])), \
+                patch('stocks.market.snapshots._etf_spot_fresh_for', return_value=False), \
+                patch('stocks.market.snapshots._prefer_sse_share_rows', return_value=[]), \
+                patch('stocks.market.sectors.fetch_industry_fund_flow', return_value=[]), \
+                patch('stocks.market.sectors.fetch_concept_fund_flow', return_value=[]), \
+                patch('stocks.market.snapshots.MarketDailySnapshot.objects.update_or_create',
+                      wraps=MarketDailySnapshot.objects.update_or_create) as upsert:
+            saved = snapshots.save_daily_snapshots(trade_date=_D2)
+        dates = [str(c.kwargs['trade_date']) for c in upsert.call_args_list
+                 if c.kwargs.get('kind') == MarketDailySnapshot.KIND_MARKET_FF]
+        self.assertEqual(dates, [_D2.isoformat()])
+        self.assertEqual(saved[MarketDailySnapshot.KIND_MARKET_FF], 1)

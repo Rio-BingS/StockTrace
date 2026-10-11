@@ -117,6 +117,8 @@ class MarketDailySnapshot(models.Model):
     trade_date = models.DateField('交易日期')
     payload = models.JSONField('快照数据')
     created_at = models.DateTimeField('创建时间', auto_now_add=True)
+    # 同日重跑 update_or_create 会覆盖 payload：读方据此判断快照是否变化（PERF-07）
+    updated_at = models.DateTimeField('更新时间', auto_now=True)
 
     class Meta:
         verbose_name = '市场日度快照'

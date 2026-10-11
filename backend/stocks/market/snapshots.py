@@ -9,9 +9,11 @@
 from __future__ import annotations
 
 import logging
+import threading
 import time
 from datetime import datetime, time as dt_time, timedelta
 
+from django.db.models import Count, Max
 from django.utils import timezone
 
 from ..models import MarketDailySnapshot
@@ -195,6 +197,7 @@ def save_daily_snapshots(trade_date=None):
                 defaults={'payload': rows},
             )
             saved[MarketDailySnapshot.KIND_ETF_SHARE] = len(rows)
+            _clear_etf_share_memo()
         else:
             logger.warning(f"etf_share 快照当日无数据，不写行（{trade_date}）")
     except Exception as e:
@@ -203,11 +206,21 @@ def save_daily_snapshots(trade_date=None):
     # 大盘主力资金流：自采（push2his 全史 / push2delay 当日一根），沪深两 secid
     # 同日口径合并；逐行 upsert——push2his 恢复时自动回补历史。单一市场缺失时
     # 该日不写（不把单市场合计冒充两市）。
+    # 只 upsert 库里缺失或数值有变化的日期（PERF-07）：push2his 可用时返回全史，
+    # 每 30 分钟对全史逐行 upsert 是纯写放大
     try:
         merged_rows, _errors = fetch_market_ff_merged_rows()
+        existing = {
+            row.trade_date.isoformat(): row.payload
+            for row in MarketDailySnapshot.objects.filter(
+                kind=MarketDailySnapshot.KIND_MARKET_FF, trade_date__in=list(merged_rows),
+            )
+        }
         written = 0
         for date_str in sorted(merged_rows):
             merged = merged_rows[date_str]
+            if existing.get(date_str) == [merged]:
+                continue
             MarketDailySnapshot.objects.update_or_create(
                 kind=MarketDailySnapshot.KIND_MARKET_FF,
                 trade_date=date_str,
@@ -216,6 +229,8 @@ def save_daily_snapshots(trade_date=None):
             written += 1
         if written:
             saved[MarketDailySnapshot.KIND_MARKET_FF] = written
+        elif merged_rows:
+            logger.debug(f"market_ff 快照 {len(merged_rows)} 天均无变化，不重写（{trade_date}）")
         else:
             logger.warning(f"market_ff 快照无沪深同日齐全的数据，不写行（{trade_date}）")
     except Exception as e:
@@ -413,7 +428,12 @@ def _recent_trading_days(n, end_date=None):
 
 
 def _latest_snapshot(kind):
-    return MarketDailySnapshot.objects.filter(kind=kind).order_by('-trade_date').first()
+    """最新一行快照（只取标量列，不反序列化整市场 payload，PERF-07）"""
+    return (
+        MarketDailySnapshot.objects.filter(kind=kind)
+        .only('id', 'kind', 'trade_date', 'created_at', 'updated_at')
+        .order_by('-trade_date').first()
+    )
 
 
 def _expected_latest_date():
@@ -494,7 +514,52 @@ def sector_multiday_nets(kind, n):
     return complete, n
 
 
+# ETF 份额派生结果的进程内缓存（PERF-07）：etf_share 快照是整市场一行 JSON，
+# share_change_map(1/5/20) 每次请求要反序列化约 30 个大 payload。结果按「快照版本」
+# 缓存——版本由行数、最近更新时间、最新交易日与预期最新交易日组成，任一进程写入
+# 快照（含同日覆盖）都会改变版本，其他进程下次读取时自动重算；只保留当前版本。
+_etf_share_memo = {'version': None, 'values': {}}
+_etf_share_memo_lock = threading.Lock()
+
+
+def _etf_share_version():
+    agg = MarketDailySnapshot.objects.filter(
+        kind=MarketDailySnapshot.KIND_ETF_SHARE,
+    ).aggregate(n=Count('id'), updated=Max('updated_at'), latest=Max('trade_date'))
+    return (agg['n'], agg['updated'], agg['latest'], _expected_latest_date())
+
+
+def _etf_share_memoized(name, compute):
+    """按快照版本缓存 compute() 的结果；版本查询失败时直接计算（与原降级口径一致）"""
+    try:
+        version = _etf_share_version()
+    except Exception:
+        return compute()
+    with _etf_share_memo_lock:
+        if _etf_share_memo['version'] != version:
+            _etf_share_memo['version'] = version
+            _etf_share_memo['values'] = {}
+        if name in _etf_share_memo['values']:
+            return _etf_share_memo['values'][name]
+    result = compute()
+    with _etf_share_memo_lock:
+        if _etf_share_memo['version'] == version:
+            _etf_share_memo['values'][name] = result
+    return result
+
+
+def _clear_etf_share_memo():
+    with _etf_share_memo_lock:
+        _etf_share_memo['version'] = None
+        _etf_share_memo['values'] = {}
+
+
 def share_change_map(n):
+    """ETF 份额 n 日变化（按快照版本缓存，结果只读，PERF-07）。"""
+    return _etf_share_memoized(('share_change', n), lambda: _share_change_map(n))
+
+
+def _share_change_map(n):
     """ETF 份额 n 日变化：{code: latest_share - n个交易日前_share}；窗口不齐返回 (None, covered)。
 
     「对比 n 个交易日前」需要 n+1 个快照点（首尾各一）；按代码级别要求首点有值。
@@ -520,6 +585,11 @@ def share_change_map(n):
 
 
 def latest_pair_change():
+    """最近两个快照日的逐 ETF 份额对比（按快照版本缓存，结果只读，PERF-07）。"""
+    return _etf_share_memoized('latest_pair', _latest_pair_change)
+
+
+def _latest_pair_change():
     """最近两个快照日的逐 ETF 份额对比（份额异动信号检测用）。
 
     返回 (changes, meta)：changes 为 {code: {name, share, chg, chg_pct, market_cap, turnover}}，
