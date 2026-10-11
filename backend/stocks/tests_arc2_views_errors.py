@@ -213,3 +213,67 @@ class BadRequestMappingTests(SimpleTestCase):
         self.assertEqual((r.status_code, r.json()), (400, {'detail': 'min_turnover 不能小于 0'}))
         r = self.client.get('/api/market/national-etf/flow/?period=bad')
         self.assertEqual(r.json(), {'detail': 'period 必须是 1d、3d、5d、1w、1m、3m、6m 或 ytd'})
+
+
+class ExceptionHandlerTests(SimpleTestCase):
+    """步骤 5c：全局 EXCEPTION_HANDLER 的映射与“不回显原文”。"""
+
+    SECRET = 'http://10.0.0.8:9000/internal?key=sk-123 /srv/app/x.py'
+
+    def _call(self, exc):
+        from rest_framework.decorators import api_view
+        from rest_framework.test import APIRequestFactory
+
+        @api_view(['GET'])
+        def boom(request):
+            raise exc
+
+        return boom(APIRequestFactory().get('/api/x/'))
+
+    def test_bad_request_keeps_business_text(self):
+        from .errors import BadRequest
+
+        r = self._call(BadRequest('start 不能晚于 end'))
+        self.assertEqual((r.status_code, r.data), (400, {'detail': 'start 不能晚于 end'}))
+
+    def test_upstream_family_maps_status_without_echo(self):
+        from .errors import UpstreamCircuitOpen, UpstreamError, UpstreamTimeout
+
+        for exc, code, level in (
+            (UpstreamError(self.SECRET), 502, 'ERROR'),
+            (UpstreamTimeout(self.SECRET), 504, 'WARNING'),
+            (UpstreamCircuitOpen(self.SECRET), 503, 'WARNING'),
+        ):
+            with self.subTest(exc=type(exc).__name__), \
+                    self.assertLogs('stocks.common.exception_handler', level=level):
+                r = self._call(exc)
+                self.assertEqual(r.status_code, code)
+                self.assertNotIn('10.0.0.8', str(r.data))
+                self.assertIn(r.data['error_id'], r.data['detail'])
+
+    def test_unhandled_exception_is_generic_500_and_logged(self):
+        with self.assertLogs('stocks.common.exception_handler', level='ERROR') as cm:
+            r = self._call(RuntimeError(self.SECRET))
+        self.assertEqual(r.status_code, 500)
+        self.assertNotIn('sk-123', str(r.data))
+        self.assertTrue(r.data['detail'].startswith('服务器内部错误'))
+        self.assertTrue(any('Traceback' in line and r.data['error_id'] in line for line in cm.output))
+
+    def test_plain_value_error_is_not_400(self):
+        with self.assertLogs('stocks.common.exception_handler', level='ERROR'):
+            r = self._call(ValueError('could not convert string to float: ' + self.SECRET))
+        self.assertEqual(r.status_code, 500)
+        self.assertNotIn('10.0.0.8', str(r.data))
+
+    def test_drf_exceptions_unchanged(self):
+        from rest_framework.exceptions import NotFound, ValidationError
+
+        self.assertEqual(self._call(NotFound('暂无')).data, {'detail': '暂无'})
+        r = self._call(ValidationError({'code': ['股票代码须为 6 位数字']}))
+        self.assertEqual((r.status_code, r.data), (400, {'code': ['股票代码须为 6 位数字']}))
+
+    def test_market_param_error_flows_through_handler(self):
+        r = self.client.get('/api/market/trend/?start=2026/08/01')
+        self.assertEqual(r.content.decode(), '{"detail":"start/end 必须是 YYYY-MM-DD"}')
+        r = self.client.get('/api/market/institutions/?quarter=2026Q9')
+        self.assertEqual((r.status_code, r.json()['detail']), (400, 'quarter 格式应为 YYYYQn（如 2026Q1）'))

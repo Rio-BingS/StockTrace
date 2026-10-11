@@ -10,7 +10,6 @@ from rest_framework.decorators import action, api_view
 from rest_framework.response import Response
 
 from ..common.params import parse_bool, parse_date, positive_int
-from ..errors import BadRequest
 from ..models import DailyQuote, MinuteBar, Stock
 from ..serializers import (
     DailyQuoteSerializer,
@@ -147,16 +146,11 @@ class StockViewSet(viewsets.ModelViewSet):
 
         # 按日期筛选
         if date_str := request.query_params.get('date'):
-            try:
-                date_obj = parse_date(date_str, 'date', strict=True)
-            except BadRequest as e:
-                return Response({'detail': str(e)}, status=status.HTTP_400_BAD_REQUEST)
+            # 非法日期抛 BadRequest，由全局 EXCEPTION_HANDLER 转 400（ARC-05）
+            date_obj = parse_date(date_str, 'date', strict=True)
             queryset = queryset.filter(trade_date=date_obj)
         elif request.query_params.get('days'):
-            try:
-                days = positive_int(request.query_params, 'days', 365, maximum=3650, strict=True)
-            except BadRequest as e:
-                return Response({'detail': str(e)}, status=status.HTTP_400_BAD_REQUEST)
+            days = positive_int(request.query_params, 'days', 365, maximum=3650, strict=True)
             start_date = timezone.localdate() - timedelta(days=days)
             queryset = queryset.filter(trade_date__gte=start_date)
         else:
@@ -186,10 +180,8 @@ class StockViewSet(viewsets.ModelViewSet):
         """获取分钟K线数据，支持 ?date=YYYY-MM-DD；缺省返回最近一个交易日（防整表倒出）"""
         stock = self.get_object()
         if date_str := request.query_params.get('date'):
-            try:
-                date_obj = parse_date(date_str, 'date', strict=True)
-            except BadRequest as e:
-                return Response({'detail': str(e)}, status=status.HTTP_400_BAD_REQUEST)
+            # 非法日期抛 BadRequest，由全局 EXCEPTION_HANDLER 转 400（ARC-05）
+            date_obj = parse_date(date_str, 'date', strict=True)
         else:
             latest = MinuteBar.objects.filter(stock=stock).order_by('-datetime').first()
             if latest is None:

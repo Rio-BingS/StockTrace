@@ -306,3 +306,19 @@ class QuoteRowEquivalenceTests(TestCase):
                     json.dumps(QuoteRowSerializer(stock).data),
                     json.dumps(DashboardStockSerializer(_quote_row(stock, q)).data),
                 )
+
+
+class StockEndpointErrorTextTests(TestCase):
+    """日线/分钟接口的 400 文案经全局异常处理后保持不变。"""
+
+    def test_daily_and_minutes_400_text(self):
+        stock = Stock.objects.create(code='600000', name='x')
+        for url, body in (
+            (f'/api/stocks/{stock.id}/daily/?date=2026/01/01', '{"detail":"date 格式应为 YYYY-MM-DD"}'),
+            (f'/api/stocks/{stock.id}/daily/?days=abc', '{"detail":"days 必须是正整数"}'),
+            (f'/api/stocks/{stock.id}/daily/?days=0', '{"detail":"days 必须是正整数"}'),
+            (f'/api/stocks/{stock.id}/minutes/?date=bad', '{"detail":"date 格式应为 YYYY-MM-DD"}'),
+        ):
+            with self.subTest(url=url):
+                r = self.client.get(url)
+                self.assertEqual((r.status_code, r.content.decode()), (400, body))

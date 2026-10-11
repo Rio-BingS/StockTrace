@@ -135,14 +135,15 @@ def _optional_float(request, key):
 
 
 def _market_bad_request(loader, label='市场数据'):
-    """只有 BadRequest（参数/业务校验）映射为 400 并回显其文案；其余异常——包括上游
-    数据解析抛出的普通 ValueError——都按上游失败走 502，不回显原文（ARC-05）。"""
+    """只有 BadRequest（参数/业务校验）是 400：原样抛给全局 EXCEPTION_HANDLER，由它回显
+    校验文案；其余异常——包括上游数据解析抛出的普通 ValueError——都按上游失败走 502，
+    不回显原文（ARC-05）。"""
     try:
         return Response(_call_with_deadline(loader, label))
     except (UpstreamTimeout, UpstreamCircuitOpen) as e:
         return _deadline_error_response(e, label)
-    except BadRequest as e:
-        return Response({'detail': str(e)}, status=status.HTTP_400_BAD_REQUEST)
+    except BadRequest:
+        raise
     except Exception:
         return _upstream_failed(label)
 
@@ -251,7 +252,7 @@ def market_institutions(request):
             lambda: get_institution_holdings(stock_code=code, quarter=quarter), '机构持仓'))
     except (UpstreamTimeout, UpstreamCircuitOpen) as e:
         return _deadline_error_response(e, '机构持仓')
-    except BadRequest as e:
-        return Response({'detail': str(e)}, status=status.HTTP_400_BAD_REQUEST)
+    except BadRequest:
+        raise  # 全局 EXCEPTION_HANDLER 转 400
     except Exception:
         return _upstream_failed('机构持仓')
