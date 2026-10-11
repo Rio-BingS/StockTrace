@@ -1,5 +1,5 @@
 <script setup>
-import { ref, computed, onMounted } from 'vue'
+import { ref, computed, onMounted, onUnmounted } from 'vue'
 import VChart from 'vue-echarts'
 import { use } from 'echarts/core'
 import { BarChart, LineChart } from 'echarts/charts'
@@ -14,7 +14,8 @@ import PeriodPicker from '../components/PeriodPicker.vue'
 import { marketApi } from '../api/stocks.js'
 import { formatPct, pctClass } from '../utils/format.js'
 import { formatAmount } from '../utils/marketFormat.js'
-import { errorMessage } from '../utils/errorMessage.js'
+import { errorMessage, isCanceled } from '../utils/errorMessage.js'
+import { createRequestGuard } from '../utils/requestGuard.js'
 
 use([BarChart, LineChart, TooltipComponent, GridComponent, LegendComponent, CanvasRenderer])
 
@@ -45,16 +46,23 @@ const northData = ref(null)
 const north = computed(() => northData.value || data.value?.northbound || {})
 const northSummary = computed(() => northData.value?.summary || {})
 
+// 切换区间/查询代码时取消旧请求、丢弃晚到的旧响应（FEF-06）
+const northGuard = createRequestGuard()
+const detailGuard = createRequestGuard()
+
 async function loadNorth() {
+  const req = northGuard.next()
   northLoading.value = true
   northError.value = ''
   try {
-    northData.value = (await marketApi.getNorthbound({ period: northPeriod.value })).data
+    const res = await marketApi.getNorthbound({ period: northPeriod.value }, { signal: req.signal })
+    if (req.isLatest()) northData.value = res.data
   } catch (e) {
+    if (!req.isLatest() || isCanceled(e)) return
     console.error(e)
     northError.value = errorMessage(e, '加载北向区间数据失败')
   } finally {
-    northLoading.value = false
+    if (req.isLatest()) northLoading.value = false
   }
 }
 function setNorthPeriod(p) {
@@ -131,24 +139,28 @@ async function loadDetail() {
     detailError.value = '请输入 6 位股票代码'
     return
   }
+  const req = detailGuard.next()
   detailLoading.value = true
   detailError.value = ''
   try {
-    const res = await marketApi.getInstitutions(code)
+    const res = await marketApi.getInstitutions(code, { signal: req.signal })
+    if (!req.isLatest()) return
     stockDetail.value = res.data?.stock_detail || null
     if (!stockDetail.value?.available) {
       detailError.value = stockDetail.value?.message || '未查到该股机构数据'
     }
   } catch (e) {
+    if (!req.isLatest() || isCanceled(e)) return
     console.error(e)
     detailError.value = errorMessage(e, '查询失败')
     stockDetail.value = null
   } finally {
-    detailLoading.value = false
+    if (req.isLatest()) detailLoading.value = false
   }
 }
 
 onMounted(() => { load(); loadNorth() })
+onUnmounted(() => { northGuard.abort(); detailGuard.abort() })
 </script>
 
 <template>

@@ -1,5 +1,5 @@
 <script setup>
-import { computed, onMounted, ref } from 'vue'
+import { computed, onMounted, onUnmounted, ref } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import MarketSubNav from '../components/MarketSubNav.vue'
 import MarketDataStatus from '../components/MarketDataStatus.vue'
@@ -10,7 +10,8 @@ import { marketApi } from '../api/stocks.js'
 import { formatDateTime, formatPct, pctClass } from '../utils/format.js'
 import { formatAmount } from '../utils/marketFormat.js'
 import { signedAmount } from '../utils/sectorFlow.js'
-import { errorMessage } from '../utils/errorMessage.js'
+import { errorMessage, isCanceled } from '../utils/errorMessage.js'
+import { createRequestGuard } from '../utils/requestGuard.js'
 
 const route = useRoute()
 const router = useRouter()
@@ -32,13 +33,19 @@ const pagination = computed(() => data.value?.pagination || {
   total: 0,
 })
 
-async function load(reset = false) {
+// 竞态守卫：切换筛选时取消上一次请求并丢弃晚到的旧响应（FEF-06）
+const guard = createRequestGuard()
+
+// fromUser：仅用户操作时把筛选同步到 URL；请求回调里不再改 URL，
+// 否则切到别的页面后晚到的响应会改写那个页面的地址（FEF-06）
+async function load(reset = false, { fromUser = false } = {}) {
   if (reset) page.value = 1
+  if (fromUser) syncUrl()
+  const req = guard.next()
   loading.value = true
   error.value = ''
-  syncUrl()
   try {
-    data.value = (await marketApi.getSectors({
+    const res = (await marketApi.getSectors({
       board: board.value,
       period: period.value,
       q: q.value || undefined,
@@ -46,17 +53,20 @@ async function load(reset = false) {
       order: order.value,
       page: page.value,
       page_size: 50,
-    })).data
-    page.value = data.value.pagination?.page || 1
-    syncUrl()
+    }, { signal: req.signal })).data
+    if (!req.isLatest()) return
+    data.value = res
+    page.value = res.pagination?.page || 1
   } catch (e) {
+    if (!req.isLatest() || isCanceled(e)) return
     error.value = errorMessage(e, '加载板块资金失败')
   } finally {
-    loading.value = false
+    if (req.isLatest()) loading.value = false
   }
 }
 
 function syncUrl() {
+  if (route.name !== 'MarketSectors') return
   router.replace({
     query: {
       ...(board.value === 'concept' ? { board: 'concept' } : {}),
@@ -71,18 +81,18 @@ function syncUrl() {
 
 function switchBoard(value) {
   board.value = value
-  load(true)
+  load(true, { fromUser: true })
 }
 
 function switchPeriod(value) {
   if (period.value === value) return
   period.value = value
-  load(true)
+  load(true, { fromUser: true })
 }
 
 function changePage(delta) {
   page.value += delta
-  load()
+  load(false, { fromUser: true })
 }
 
 function sortBy(field) {
@@ -92,7 +102,7 @@ function sortBy(field) {
     sort.value = field
     order.value = 'desc'
   }
-  load(true)
+  load(true, { fromUser: true })
 }
 
 function sortMark(field) {
@@ -100,7 +110,8 @@ function sortMark(field) {
   return order.value === 'desc' ? '↓' : '↑'
 }
 
-onMounted(load)
+onMounted(() => load())
+onUnmounted(() => guard.abort())
 </script>
 
 <template>
@@ -142,7 +153,7 @@ onMounted(load)
           · 1月/3月/1年待日度快照积累后开放
         </small>
       </div>
-      <form class='search-form' @submit.prevent='load(true)'>
+      <form class='search-form' @submit.prevent='load(true, { fromUser: true })'>
         <input v-model.trim='q' aria-label='搜索板块或领涨股' placeholder='搜索板块或领涨股' />
         <button type='submit'>查询</button>
       </form>

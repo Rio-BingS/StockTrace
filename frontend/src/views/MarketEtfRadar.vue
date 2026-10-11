@@ -1,5 +1,5 @@
 <script setup>
-import { ref, computed, onMounted } from 'vue'
+import { ref, computed, onMounted, onUnmounted } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import MarketSubNav from '../components/MarketSubNav.vue'
 import MarketDataStatus from '../components/MarketDataStatus.vue'
@@ -7,7 +7,8 @@ import EtfDetailPanel from '../components/EtfDetailPanel.vue'
 import { marketApi } from '../api/stocks.js'
 import { formatNum, formatPct, pctClass } from '../utils/format.js'
 import { formatAmount, formatShare } from '../utils/marketFormat.js'
-import { errorMessage } from '../utils/errorMessage.js'
+import { errorMessage, isCanceled } from '../utils/errorMessage.js'
+import { createRequestGuard } from '../utils/requestGuard.js'
 
 const route = useRoute()
 const router = useRouter()
@@ -44,8 +45,12 @@ function syncUrl() {
   } })
 }
 
+// 切换榜单/排序/翻页时取消旧请求、丢弃晚到的旧响应（FEF-06）
+const guard = createRequestGuard()
+
 async function load(resetPage = false) {
   if (resetPage) page.value = 1
+  const req = guard.next()
   loading.value = true
   error.value = ''
   syncUrl()
@@ -57,11 +62,14 @@ async function load(resetPage = false) {
       q: q.value || undefined,
       min_turnover: minTurnoverYi.value && Number.isFinite(min) ? min * 1e8 : undefined,
       page: page.value, page_size: 50,
-    })
+    }, { signal: req.signal })
+    if (!req.isLatest()) return
     data.value = res.data
     page.value = res.data?.pagination?.page || 1
-  } catch (e) { error.value = errorMessage(e, '加载 ETF 雷达失败') }
-  finally { loading.value = false }
+  } catch (e) {
+    if (!req.isLatest() || isCanceled(e)) return
+    error.value = errorMessage(e, '加载 ETF 雷达失败')
+  } finally { if (req.isLatest()) loading.value = false }
 }
 
 function select(row) { selectedCode.value = row.code; syncUrl() }
@@ -79,6 +87,7 @@ function sortMark(field) {
 }
 
 onMounted(() => load())
+onUnmounted(() => guard.abort())
 </script>
 
 <template>

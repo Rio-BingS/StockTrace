@@ -1,5 +1,5 @@
 <script setup>
-import { ref, computed, onMounted } from 'vue'
+import { ref, computed, onMounted, onUnmounted } from 'vue'
 import { RouterLink } from 'vue-router'
 import VChart from 'vue-echarts'
 import { use } from 'echarts/core'
@@ -14,7 +14,8 @@ import { marketApi } from '../api/stocks.js'
 import PeriodPicker from '../components/PeriodPicker.vue'
 import { formatPct, formatNum, pctClass } from '../utils/format.js'
 import { formatYi, formatYiAxis, formatTurnover, formatAmount } from '../utils/marketFormat.js'
-import { errorMessage } from '../utils/errorMessage.js'
+import { errorMessage, isCanceled } from '../utils/errorMessage.js'
+import { createRequestGuard } from '../utils/requestGuard.js'
 import { usePolling } from '../composables/usePolling.js'
 
 use([
@@ -59,16 +60,22 @@ const flowData = ref(null)
 const flowSummary = computed(() => flowData.value?.summary || {})
 const flowNote = computed(() => flowData.value?.note || '')
 
+// 快速切换区间时取消旧请求、丢弃晚到的旧响应（FEF-06）
+const flowGuard = createRequestGuard()
+
 async function loadFlow() {
+  const req = flowGuard.next()
   flowLoading.value = true
   flowError.value = ''
   try {
-    flowData.value = (await marketApi.getMarketFlow({ period: flowPeriod.value })).data
+    const res = await marketApi.getMarketFlow({ period: flowPeriod.value }, { signal: req.signal })
+    if (req.isLatest()) flowData.value = res.data
   } catch (e) {
+    if (!req.isLatest() || isCanceled(e)) return
     console.error(e)
     flowError.value = errorMessage(e, '加载大盘资金流区间失败')
   } finally {
-    flowLoading.value = false
+    if (req.isLatest()) flowLoading.value = false
   }
 }
 function setFlowPeriod(p) {
@@ -162,6 +169,8 @@ const { refresh: refreshMarket } = usePolling(loadMarket, { interval: 90000 })
 onMounted(() => {
   loadFlow()
 })
+
+onUnmounted(() => flowGuard.abort())
 </script>
 
 <template>

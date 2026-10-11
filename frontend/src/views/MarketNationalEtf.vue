@@ -1,5 +1,5 @@
 <script setup>
-import { ref, computed, onMounted } from 'vue'
+import { ref, computed, onMounted, onUnmounted } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import VChart from 'vue-echarts'
 import { use } from 'echarts/core'
@@ -13,7 +13,8 @@ import PeriodPicker from '../components/PeriodPicker.vue'
 import { marketApi } from '../api/stocks.js'
 import { formatPct, formatNum, pctClass } from '../utils/format.js'
 import { formatAmount, formatShare } from '../utils/marketFormat.js'
-import { errorMessage } from '../utils/errorMessage.js'
+import { errorMessage, isCanceled } from '../utils/errorMessage.js'
+import { createRequestGuard } from '../utils/requestGuard.js'
 
 use([BarChart, GridComponent, TooltipComponent, CanvasRenderer])
 
@@ -64,15 +65,21 @@ const flowLoading = ref(false), flowError = ref(''), flowData = ref(null)
 const flowItems = computed(() => flowData.value?.items || [])
 const flowSummary = computed(() => flowData.value?.summary || {})
 
+// 区间请求较慢（冷启动可达数十秒），切换区间时取消旧请求、丢弃旧响应（FEF-06）
+const flowGuard = createRequestGuard()
+
 async function loadFlow() {
+  const req = flowGuard.next()
   flowLoading.value = true; flowError.value = ''
   try {
     const params = flowPeriod.value === 'custom'
       ? { start: flowCustomStart.value, end: flowCustomEnd.value }
       : { period: flowPeriod.value }
-    flowData.value = (await marketApi.getNationalEtfFlow(params)).data
-  } catch (e) { flowError.value = errorMessage(e, '加载区间资金流向失败') }
-  finally { flowLoading.value = false }
+    const res = await marketApi.getNationalEtfFlow(params, { signal: req.signal })
+    if (req.isLatest()) flowData.value = res.data
+  } catch (e) {
+    if (req.isLatest() && !isCanceled(e)) flowError.value = errorMessage(e, '加载区间资金流向失败')
+  } finally { if (req.isLatest()) flowLoading.value = false }
 }
 function setFlowPeriod(p) {
   if (flowPeriod.value === p) return
@@ -124,6 +131,7 @@ const flowBarOption = computed(() => {
 })
 
 onMounted(() => { load(); loadFlow() })
+onUnmounted(() => flowGuard.abort())
 </script>
 
 <template>

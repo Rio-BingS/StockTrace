@@ -1,5 +1,5 @@
 <script setup>
-import { computed, ref, watch } from 'vue'
+import { computed, onUnmounted, ref, watch } from 'vue'
 import VChart from 'vue-echarts'
 import { use } from 'echarts/core'
 import { LineChart, BarChart } from 'echarts/charts'
@@ -9,7 +9,8 @@ import { marketApi } from '../api/stocks.js'
 import { formatNum, formatPct, pctClass } from '../utils/format.js'
 import { formatAmount, formatShare } from '../utils/marketFormat.js'
 import MarketDataStatus from './MarketDataStatus.vue'
-import { errorMessage } from '../utils/errorMessage.js'
+import { errorMessage, isCanceled } from '../utils/errorMessage.js'
+import { createRequestGuard } from '../utils/requestGuard.js'
 
 use([LineChart, BarChart, GridComponent, TooltipComponent, LegendComponent, DataZoomComponent, CanvasRenderer])
 
@@ -71,27 +72,34 @@ const chartOption = computed(() => {
   }
 })
 
+// 快速切换 ETF/区间时取消旧请求，避免旧 ETF 的详情覆盖新选中的（FEF-06）
+const guard = createRequestGuard()
+
 async function load() {
-  if (!props.code) { data.value = null; return }
+  if (!props.code) { guard.abort(); data.value = null; loading.value = false; return }
+  const params = { range: range.value }
+  if (range.value === 'custom') {
+    if (!customStart.value || !customEnd.value) { guard.abort(); loading.value = false; return }
+    params.start_date = customStart.value
+    params.end_date = customEnd.value
+  }
+  const req = guard.next()
   loading.value = true
   error.value = ''
   try {
-    const params = { range: range.value }
-    if (range.value === 'custom') {
-      if (!customStart.value || !customEnd.value) { loading.value = false; return }
-      params.start_date = customStart.value
-      params.end_date = customEnd.value
-    }
-    const res = await marketApi.getEtfDetail(props.code, params)
+    const res = await marketApi.getEtfDetail(props.code, params, { signal: req.signal })
+    if (!req.isLatest()) return
     data.value = res.data
   } catch (e) {
+    if (!req.isLatest() || isCanceled(e)) return
     error.value = errorMessage(e, 'ETF 详情加载失败')
     data.value = null
-  } finally { loading.value = false }
+  } finally { if (req.isLatest()) loading.value = false }
 }
 
 watch(() => props.code, load, { immediate: true })
 watch(range, load)
+onUnmounted(() => guard.abort())
 </script>
 
 <template>

@@ -1,12 +1,13 @@
 <script setup>
 // 探测器一级页面：信号列表（可按严重程度筛选）+ 信号详情（维度曲线）+ 板块微变热力图。
 // 数据来自本站日度扫描（每交易日 17:15 自动执行），页面只读，不触发扫描。
-import { reactive, ref, onMounted } from 'vue'
+import { reactive, ref, onMounted, onUnmounted } from 'vue'
 import MarketDataStatus from '../components/MarketDataStatus.vue'
 import DetectorSignalDetail from '../components/DetectorSignalDetail.vue'
 import DetectorHeatmap from '../components/DetectorHeatmap.vue'
 import { detectorApi } from '../api/stocks.js'
-import { errorMessage } from '../utils/errorMessage.js'
+import { errorMessage, isCanceled } from '../utils/errorMessage.js'
+import { createRequestGuard } from '../utils/requestGuard.js'
 
 const loading = ref(false), error = ref('')
 const data = ref(null)
@@ -51,7 +52,12 @@ async function load() {
   }
 }
 
+// 连续切换筛选/翻页/板块时取消旧请求、丢弃晚到的旧响应（FEF-06）
+const signalsGuard = createRequestGuard()
+const heatmapGuard = createRequestGuard()
+
 async function loadSignals() {
+  const req = signalsGuard.next()
   loadingSignals.value = true
   signalsError.value = ''
   try {
@@ -59,11 +65,12 @@ async function loadSignals() {
     for (const key of Object.keys(filters)) {
       if (filters[key]) params[key] = filters[key]
     }
-    data.value = (await detectorApi.getSignals(params)).data
+    const res = await detectorApi.getSignals(params, { signal: req.signal })
+    if (req.isLatest()) data.value = res.data
   } catch (e) {
-    signalsError.value = errorMessage(e, '加载信号列表失败')
+    if (req.isLatest() && !isCanceled(e)) signalsError.value = errorMessage(e, '加载信号列表失败')
   } finally {
-    loadingSignals.value = false
+    if (req.isLatest()) loadingSignals.value = false
   }
 }
 
@@ -83,14 +90,16 @@ function setPage(delta) {
 }
 
 async function loadHeatmap() {
+  const req = heatmapGuard.next()
   heatmapLoading.value = true
   heatmapError.value = ''
   try {
-    heatmap.value = (await detectorApi.getHeatmap({ board: board.value })).data
+    const res = await detectorApi.getHeatmap({ board: board.value }, { signal: req.signal })
+    if (req.isLatest()) heatmap.value = res.data
   } catch (e) {
-    heatmapError.value = errorMessage(e, '加载热力图失败')
+    if (req.isLatest() && !isCanceled(e)) heatmapError.value = errorMessage(e, '加载热力图失败')
   } finally {
-    heatmapLoading.value = false
+    if (req.isLatest()) heatmapLoading.value = false
   }
 }
 
@@ -129,6 +138,7 @@ function dirText(direction) {
 }
 
 onMounted(load)
+onUnmounted(() => { signalsGuard.abort(); heatmapGuard.abort() })
 </script>
 
 <template>

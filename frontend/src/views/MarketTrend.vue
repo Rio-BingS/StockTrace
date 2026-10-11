@@ -1,5 +1,5 @@
 <script setup>
-import { ref, computed, onMounted } from 'vue'
+import { ref, computed, onMounted, onUnmounted } from 'vue'
 import VChart from 'vue-echarts'
 import { use } from 'echarts/core'
 import { LineChart } from 'echarts/charts'
@@ -14,7 +14,8 @@ import MarketSubNav from '../components/MarketSubNav.vue'
 import PeriodPicker from '../components/PeriodPicker.vue'
 import { marketApi } from '../api/stocks.js'
 import { formatPct, pctClass } from '../utils/format.js'
-import { errorMessage } from '../utils/errorMessage.js'
+import { errorMessage, isCanceled } from '../utils/errorMessage.js'
+import { createRequestGuard } from '../utils/requestGuard.js'
 
 use([
   LineChart,
@@ -110,20 +111,26 @@ const chartOption = computed(() => {
   }
 })
 
+// 快速切换区间时取消旧请求、丢弃晚到的旧响应（FEF-06）
+const guard = createRequestGuard()
+
 async function load() {
+  const req = guard.next()
   loading.value = true
   error.value = ''
   try {
     const params = period.value === 'custom'
       ? { start: customStart.value, end: customEnd.value }
       : { period: period.value }
-    const res = await marketApi.getTrend(params)
+    const res = await marketApi.getTrend(params, { signal: req.signal })
+    if (!req.isLatest()) return
     data.value = res.data
   } catch (e) {
+    if (!req.isLatest() || isCanceled(e)) return
     console.error(e)
     error.value = errorMessage(e, '加载走势失败')
   } finally {
-    loading.value = false
+    if (req.isLatest()) loading.value = false
   }
 }
 
@@ -139,6 +146,7 @@ function applyCustom() {
 }
 
 onMounted(load)
+onUnmounted(() => guard.abort())
 </script>
 
 <template>
