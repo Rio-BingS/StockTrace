@@ -19,6 +19,10 @@ def _weekday(day=None):
     return day.weekday() < 5
 
 
+def _always(day=None):
+    return True
+
+
 class MarginSnapshotRowTests(TestCase):
     """#9：两融快照行的融资余额要两市齐全才合计。"""
 
@@ -99,3 +103,28 @@ class DetectorSchedulerDependencyTests(TestCase):
     def test_waits_for_concept_ff(self):
         with self.assertLogs('stocks.scheduler', level='WARNING'):
             self.assertEqual(self._ready(('industry_ff', 'market_ff')), (False, 'waiting'))
+
+
+class SectorSnapshotPayloadTests(TestCase):
+    """#6：板块快照一并落库流入/流出资金，为「净额/成交额」口径积累历史。"""
+
+    def test_inflow_outflow_saved(self):
+        from unittest.mock import Mock
+
+        import pandas as pd
+
+        from .market import snapshots
+
+        day = date(2026, 9, 7)
+        item = {'name': '半导体', 'net': 1e8, 'change_pct': 1.5, 'inflow': 5e8, 'outflow': 4e8}
+        with patch('stocks.trading_calendar.is_trading_day', _always), \
+                patch('stocks.market.etf_flow.fetch_flow_klines', new=Mock(side_effect=RuntimeError('offline'))), \
+                patch('stocks.market.sectors.fetch_industry_fund_flow', return_value=[item]), \
+                patch('stocks.market.sectors.fetch_concept_fund_flow', return_value=[]), \
+                patch('stocks.market.etf._normalized_etf_items', return_value=[]), \
+                patch('stocks.market.snapshots._etf_spot_fresh_for', return_value=True), \
+                patch('akshare.fund_etf_scale_sse', return_value=pd.DataFrame()):
+            snapshots.save_daily_snapshots(trade_date=day)
+        row = MarketDailySnapshot.objects.get(kind=MarketDailySnapshot.KIND_INDUSTRY_FF, trade_date=day)
+        self.assertEqual(row.payload[0]['inflow'], 5e8)
+        self.assertEqual(row.payload[0]['outflow'], 4e8)

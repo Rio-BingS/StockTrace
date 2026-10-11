@@ -163,7 +163,12 @@ def save_daily_snapshots(trade_date=None):
             from . import sectors
             items = getattr(sectors, func_name)(period='day')
             payload = [
-                {'name': item['name'], 'net': item['net'], 'change_pct': item.get('change_pct')}
+                {
+                    'name': item['name'], 'net': item['net'], 'change_pct': item.get('change_pct'),
+                    # 流入/流出资金（元）自 #6 起一并落库：二者之和≈板块成交额，为将来
+                    # 「净额/成交额」口径积累历史；旧快照缺键，读取方按 None 处理
+                    'inflow': item.get('inflow'), 'outflow': item.get('outflow'),
+                }
                 for item in items if item.get('name')
             ]
             if payload:
