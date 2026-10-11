@@ -1,5 +1,6 @@
 <script setup>
 import { ref, onMounted } from 'vue'
+import { useDialog } from '../composables/useDialog.js'
 import { aiApi } from '../api/stocks.js'
 import { aiErrorText, fieldErrorText } from '../utils/aiRequest.js'
 
@@ -13,6 +14,9 @@ const form = ref({ id: null, name: '', base_url: '', model: '', api_key: '', is_
 const showForm = ref(false)
 const saving = ref(false)
 const testingId = ref(null)
+
+// 编辑弹窗焦点管理：打开聚焦首个输入框、背景 inert、Esc 取消、关闭后焦点回到触发按钮（FEX-04）
+const { dialogRef, initialFocusRef } = useDialog(showForm, { onEscape: () => { showForm.value = false } })
 
 async function load() {
   loading.value = true
@@ -151,25 +155,30 @@ onMounted(load)
     </table>
     <div v-else class="hint">还没有配置，点击「新增服务商」添加。</div>
 
+    <!-- Teleport 到 body，背景 #app 才能整体设为 inert（FEX-04） -->
+    <Teleport to="body">
     <div v-if="showForm" class="modal-mask" @click.self="showForm = false">
-      <div class="modal">
-        <h2>{{ form.id ? '编辑服务商' : '新增服务商' }}</h2>
+      <div
+        ref="dialogRef" class="modal" role="dialog" aria-modal="true"
+        aria-labelledby="provider-form-title" tabindex="-1"
+      >
+        <h2 id="provider-form-title">{{ form.id ? '编辑服务商' : '新增服务商' }}</h2>
         <div class="field">
-          <label>名称</label>
-          <input v-model="form.name" placeholder="如 DeepSeek" />
+          <label for="provider-name">名称</label>
+          <input id="provider-name" ref="initialFocusRef" v-model="form.name" placeholder="如 DeepSeek" />
         </div>
         <div class="field">
-          <label>接口地址（base_url）</label>
-          <input v-model="form.base_url" placeholder="如 https://api.deepseek.com" />
+          <label for="provider-base-url">接口地址（base_url）</label>
+          <input id="provider-base-url" v-model="form.base_url" placeholder="如 https://api.deepseek.com" />
         </div>
         <div class="field">
-          <label>模型名</label>
-          <input v-model="form.model" placeholder="如 deepseek-chat" />
+          <label for="provider-model">模型名</label>
+          <input id="provider-model" v-model="form.model" placeholder="如 deepseek-chat" />
         </div>
         <div class="field">
-          <label>API Key {{ form.id ? '（留空则不修改）' : '' }}</label>
+          <label for="provider-api-key">API Key {{ form.id ? '（留空则不修改）' : '' }}</label>
           <!-- new-password：防止浏览器把站点登录密码自动填进来一并提交（FEF-17） -->
-          <input v-model="form.api_key" type="password" autocomplete="new-password" placeholder="sk-..." />
+          <input id="provider-api-key" v-model="form.api_key" type="password" autocomplete="new-password" placeholder="sk-..." />
         </div>
         <div class="field row">
           <label class="checkbox">
@@ -184,6 +193,7 @@ onMounted(load)
         </div>
       </div>
     </div>
+    </Teleport>
   </div>
 </template>
 

@@ -1,9 +1,14 @@
 <script setup>
 import { onMounted, ref } from 'vue'
+import { useDialog } from '../composables/useDialog.js'
 
 const STORAGE_KEY = 'stocktrace:disclaimer-ack-v1'
 
 const show = ref(false)
+
+// 焦点管理：打开时聚焦确认按钮、背景 inert、Esc 关闭、关闭后焦点回到触发元素（FEX-04）。
+// Esc 只是暂时关闭，不记为已确认，下次访问仍会提示
+const { dialogRef, initialFocusRef } = useDialog(show, { onEscape: () => { show.value = false } })
 
 function dismiss() {
   try {
@@ -29,9 +34,12 @@ defineExpose({ open: () => { show.value = true } })
 
 <template>
   <Teleport to="body">
-    <div v-if="show" class="overlay" role="dialog" aria-modal="true" aria-label="免责声明">
-      <div class="dialog">
-        <h2>免责声明与使用须知</h2>
+    <div v-if="show" class="overlay">
+      <div
+        ref="dialogRef" class="dialog" role="dialog" aria-modal="true"
+        aria-labelledby="disclaimer-title" tabindex="-1"
+      >
+        <h2 id="disclaimer-title">免责声明与使用须知</h2>
         <div class="body">
           <p><b>本站为个人自用的 A 股数据监控面板</b>，不面向公众提供证券投资咨询服务；运营者非持牌机构，站内一切内容均不构成投资建议、荐股或收益承诺。</p>
           <p><b>数据来源与准确性：</b>行情与市场数据来自公开第三方接口（东方财富、新浪、腾讯、同花顺、乐咕乐股等），可能存在延迟、缺漏或错误，仅作个人参考，不保证其准确性、完整性与实时性；部分数据（如北向资金）因上游披露调整可能缺失，页面会如实标注「暂不可用」而非估算补齐。</p>
@@ -39,7 +47,7 @@ defineExpose({ open: () => { show.value = true } })
           <p class="risk">股市有风险，投资需谨慎。任何依据本站信息进行的投资操作，风险与后果由操作者自行承担。</p>
         </div>
         <div class="actions">
-          <button class="agree" type="button" @click="dismiss">我已阅读并理解</button>
+          <button ref="initialFocusRef" class="agree" type="button" @click="dismiss">我已阅读并理解</button>
         </div>
       </div>
     </div>
