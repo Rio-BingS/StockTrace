@@ -65,6 +65,8 @@ AI_CALL_LOG_RETENTION_DAYS = int(os.environ.get('AI_CALL_LOG_RETENTION_DAYS', '9
 # 探测器保留策略：信号行小（600 天对齐市场快照）；run 含热力图矩阵较大，保留更短
 DETECTOR_SIGNAL_RETENTION_DAYS = int(os.environ.get('DETECTOR_SIGNAL_RETENTION_DAYS', '600'))
 DETECTOR_RUN_RETENTION_DAYS = int(os.environ.get('DETECTOR_RUN_RETENTION_DAYS', '120'))
+# 分钟 K 线保留天数（PERF-02）：每日 02:30 分批清理更早的 MinuteBar
+MINUTE_BAR_RETENTION_DAYS = int(os.environ.get('MINUTE_BAR_RETENTION_DAYS', '120'))
 
 
 # Application definition

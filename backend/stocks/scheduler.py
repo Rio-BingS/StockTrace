@@ -7,6 +7,7 @@ APScheduler 集成到 Django
 3. 收盘后 15:10 汇总当日日线+分钟（自选库最后一次自动写入；随后评估价格提醒、清理 AI 调用记录）
 4. 收盘后 15:30–21:00 每30分钟预热晚到行情缓存并落日度快照（交易日）
 5. 每交易日 17:15 探测器扫描（板块/大盘快照已在前两轮预热落库后）
+6. 每日 02:30 清理超出保留期的分钟 K 线
 
 运行方式（REL-01）：
 - 生产：独立进程 `python manage.py run_scheduler`（systemd 单元 stocktrace-scheduler），
@@ -206,6 +207,36 @@ def _cleanup_market_snapshots():
         logger.error(f"市场日度快照清理失败: {e}")
 
 
+MINUTE_BAR_DELETE_BATCH = 5000
+
+
+def _minute_bar_cleanup_job():
+    """分钟 K 线保留 N 天（默认 120，MINUTE_BAR_RETENTION_DAYS），分批删除（PERF-02）。
+
+    每批 5000 行一个短事务：SQLite 单写锁，一次性删几十万行会长时间挡住盘中写入。
+    按主键取批（旧数据主键小，扫描很快结束），不按默认的 datetime 排序整表。
+    """
+    from datetime import timedelta
+
+    from .models import MinuteBar
+
+    days = int(getattr(settings, 'MINUTE_BAR_RETENTION_DAYS', 120))
+    cutoff = timezone.now() - timedelta(days=days)
+    total = 0
+    while True:
+        batch = (
+            MinuteBar.objects.filter(datetime__lt=cutoff)
+            .order_by('pk').values_list('pk', flat=True)[:MINUTE_BAR_DELETE_BATCH]
+        )
+        deleted, _ = MinuteBar.objects.filter(pk__in=list(batch)).delete()
+        total += deleted
+        if deleted < MINUTE_BAR_DELETE_BATCH:
+            break
+    if total:
+        logger.info(f"清理 {days} 天前的分钟K线 {total} 行")
+    return total
+
+
 def _preopen_incremental_job():
     """开盘前只补日线缺口，压力小。"""
     from .services import fetch_incremental_daily_all, is_trading_day
@@ -330,6 +361,11 @@ def register_jobs(sched):
     add(_guarded(_detector_scan_job, 'detector_scan', _DAILY_WAIT_SECONDS),
         CronTrigger(day_of_week='mon-fri', hour=17, minute=15, timezone=SCHEDULER_TZ),
         'detector_scan', 3600)
+
+    # 分钟 K 线保留期清理：每日 02:30 低峰执行（PERF-02）
+    add(_guarded(_minute_bar_cleanup_job, 'minute_bar_cleanup', _DAILY_WAIT_SECONDS),
+        CronTrigger(hour=2, minute=30, timezone=SCHEDULER_TZ),
+        'minute_bar_cleanup', 3600)
     return sched
 
 
@@ -450,7 +486,7 @@ def build_scheduler(scheduler_cls=BackgroundScheduler):
 _STARTED_MSG = (
     "APScheduler 已启动 "
     "(08:50 增量日线 / 09-14 */5 分钟 / 15:10 收盘汇总 / "
-    "15:30-21:00 */30 晚到行情预热 / 17:15 探测器扫描)"
+    "15:30-21:00 */30 晚到行情预热 / 17:15 探测器扫描 / 02:30 分钟线清理)"
 )
 
 

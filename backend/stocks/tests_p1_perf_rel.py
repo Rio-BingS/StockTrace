@@ -327,3 +327,52 @@ class SchedulerStartWhitelistTests(_TmpRunDirMixin, SimpleTestCase):
             finally:
                 sch.stop()
         self.assertIsNone(sch.scheduler)
+
+
+class MinuteBarCleanupTests(TestCase):
+    """PERF-02：分钟 K 线按保留天数分批清理，并注册为每日 02:30 定时任务。"""
+
+    def _bars(self, stock, start, n):
+        from datetime import timedelta
+
+        from .models import MinuteBar
+
+        MinuteBar.objects.bulk_create([
+            MinuteBar(stock=stock, datetime=start + timedelta(minutes=i),
+                      open=1, close=1, high=1, low=1, volume=1)
+            for i in range(n)
+        ])
+
+    def test_deletes_only_expired_in_batches(self):
+        from datetime import timedelta
+
+        from django.utils import timezone
+
+        from stocks import scheduler as sch
+
+        from .models import MinuteBar, Stock
+
+        stock = Stock.objects.create(code='600000', name='x')
+        now = timezone.now()
+        self._bars(stock, now - timedelta(days=200), sch.MINUTE_BAR_DELETE_BATCH + 7)  # 跨两批
+        self._bars(stock, now - timedelta(days=10), 5)
+        with override_settings(MINUTE_BAR_RETENTION_DAYS=120):
+            deleted = sch._minute_bar_cleanup_job()
+        self.assertEqual(deleted, sch.MINUTE_BAR_DELETE_BATCH + 7)
+        self.assertEqual(MinuteBar.objects.count(), 5)
+        with override_settings(MINUTE_BAR_RETENTION_DAYS=5):
+            self.assertEqual(sch._minute_bar_cleanup_job(), 5)
+
+    def test_job_registered(self):
+        from zoneinfo import ZoneInfo
+
+        from stocks import scheduler as sch
+
+        job = {j.id: j for j in sch.build_scheduler().get_jobs()}['minute_bar_cleanup']
+        self.assertTrue(job.coalesce)
+        self.assertGreaterEqual(job.misfire_grace_time, 600)
+        self.assertEqual(job.trigger.timezone, ZoneInfo('Asia/Shanghai'))
+        fields = {f.name: str(f) for f in job.trigger.fields}
+        self.assertEqual(fields['hour'], '2')
+        self.assertEqual(fields['minute'], '30')
+        self.assertEqual(job.func.lock_name, 'minute_bar_cleanup')

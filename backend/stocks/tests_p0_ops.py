@@ -120,7 +120,8 @@ class SchedulerConfigTests(SimpleTestCase):
         jobs = {j.id: j for j in s.get_jobs()}
         self.assertEqual(
             set(jobs),
-            {'preopen_incremental', 'intraday_fetch', 'daily_summary', 'post_close_lagging', 'detector_scan'},
+            {'preopen_incremental', 'intraday_fetch', 'daily_summary', 'post_close_lagging', 'detector_scan',
+             'minute_bar_cleanup'},
         )
         for job in jobs.values():
             self.assertTrue(job.coalesce, job.id)
