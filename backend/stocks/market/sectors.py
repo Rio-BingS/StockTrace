@@ -9,7 +9,6 @@ import time
 from io import StringIO
 from pathlib import Path
 
-import akshare as ak
 import pandas as pd
 import requests
 
@@ -32,8 +31,7 @@ _SECTOR_SORT_FIELDS = {
 # 多日（5d/10d/20d）轮动口径固定为「本站日度快照（同花顺当日净额）累加」，窗口
 # 不齐就如实不可用（DAT-15）：不再退回东财原生 5日/10日排行——那是另一套主力
 # 口径和行业名单，随快照积累程度来回切换会让同一页面前后不可比。
-# 下面的东财排行指标只保留给 fetch_*_fund_flow(period=...) 的直接调用方。
-_SECTOR_RANK_INDICATORS = {'5d': '5日', '10d': '10日'}
+# 东财 5日/10日排行抓取已无调用方，P3 删除；fetch_*_fund_flow 只抓当日。
 _SECTOR_PERIODS = ('day', '5d', '10d', '20d')
 _SNAPSHOT_PERIOD_DAYS = {'5d': 5, '10d': 10, '20d': 20}
 # 当日横截面实际来源：自抓同花顺资金流页面（非 akshare 封装）
@@ -41,43 +39,6 @@ _THS_DAY_SOURCE = {
     'industry': '同花顺 data.10jqka.com.cn/funds/hyzjl（自抓）',
     'concept': '同花顺 data.10jqka.com.cn/funds/gnzjl（自抓）',
 }
-
-
-def _parse_sector_rank_table(df):
-    """解析 stock_sector_fund_flow_rank 的 clist 形状（列带指标前缀，单位为元）。"""
-    if df is None or df.empty:
-        return []
-    name_col = next((c for c in ('行业', '板块名', '名称') if c in df.columns), None)
-    net_col = next((c for c in df.columns if str(c).endswith('主力净流入-净额')), None)
-    if name_col is None or net_col is None:
-        return []
-    pct_col = next((c for c in df.columns if str(c).endswith('涨跌幅')), None)
-
-    items = []
-    for _, row in df.iterrows():
-        net = _to_float(row.get(net_col))
-        if net is None:
-            continue
-        items.append({
-            'name': str(row.get(name_col, '')).strip(),
-            'net': net,
-            'inflow': None,
-            'outflow': None,
-            'change_pct': _to_float(row.get(pct_col)) if pct_col else None,
-            'index_value': None,
-            'company_count': None,
-            'leader': None,
-            'leader_pct': None,
-        })
-
-    by_name = {}
-    for item in items:
-        if not item['name']:
-            continue
-        previous = by_name.get(item['name'])
-        if previous is None or abs(item['net']) > abs(previous['net']):
-            by_name[item['name']] = item
-    return list(by_name.values())
 
 
 def _parse_fund_flow_table(df, name_col_candidates):
@@ -266,40 +227,34 @@ def _ths_fund_flow_df(board, source_name):
     return _safe_df_call(_ths_fund_flow, board, source_name=source_name)
 
 
+def _require_day(period):
+    """板块资金抓取只剩当日口径；传多日 period 直接报错，避免静默返回当日数据。"""
+    if period != 'day':
+        raise ValueError(f'板块资金抓取只支持 period=day，多日口径请用日度快照（收到 {period!r}）')
+
+
 def fetch_concept_fund_flow(period='day', ttl=180):
+    """同花顺概念板块当日资金流（元）；多日口径走日度快照，见 _snapshot_rotation。"""
+    _require_day(period)
     cache_key = f'concept_ff_{period}'
     cached = _cache_get(cache_key, ttl)
     if cached is not None:
         return cached
-    if period == 'day':
-        df = _ths_fund_flow_df('concept', 'ths_fund_flow_concept')
-        data = _parse_fund_flow_table(df, ['概念', '行业'])
-    else:
-        indicator = _SECTOR_RANK_INDICATORS[period]
-        df = _safe_df_call(
-            ak.stock_sector_fund_flow_rank, indicator=indicator,
-            sector_type='概念资金流', source_name=f'em_sector_rank_concept_{period}',
-        )
-        data = _parse_sector_rank_table(df)
+    df = _ths_fund_flow_df('concept', 'ths_fund_flow_concept')
+    data = _parse_fund_flow_table(df, ['概念', '行业'])
     _cache_set(cache_key, data)
     return data
 
 
 def fetch_industry_fund_flow(period='day', ttl=180):
+    """同花顺行业板块当日资金流（元）；多日口径走日度快照，见 _snapshot_rotation。"""
+    _require_day(period)
     cache_key = f'industry_ff_{period}'
     cached = _cache_get(cache_key, ttl)
     if cached is not None:
         return cached
-    if period == 'day':
-        df = _ths_fund_flow_df('industry', 'ths_fund_flow_industry')
-        data = _parse_fund_flow_table(df, ['行业'])
-    else:
-        indicator = _SECTOR_RANK_INDICATORS[period]
-        df = _safe_df_call(
-            ak.stock_sector_fund_flow_rank, indicator=indicator,
-            sector_type='行业资金流', source_name=f'em_sector_rank_industry_{period}',
-        )
-        data = _parse_sector_rank_table(df)
+    df = _ths_fund_flow_df('industry', 'ths_fund_flow_industry')
+    data = _parse_fund_flow_table(df, ['行业'])
     _cache_set(cache_key, data)
     return data
 

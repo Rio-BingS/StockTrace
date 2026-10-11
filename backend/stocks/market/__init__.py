@@ -53,7 +53,6 @@ from .institutions import (
 from .overview import get_market_overview, get_market_trend, warm_post_close_lagging
 from .sectors import (
     _parse_fund_flow_table,  # noqa: F401  旧名保留一版，tests 使用
-    _parse_sector_rank_table,  # noqa: F401  tests 使用
     _sector_payload,  # noqa: F401  tests 使用
     fetch_concept_fund_flow,
     fetch_industry_fund_flow,

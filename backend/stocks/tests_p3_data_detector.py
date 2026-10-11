@@ -69,3 +69,36 @@ class ThsStableSortTests(SimpleTestCase):
             df, _urls = self._run(pages)
         self.assertEqual(len(df), 3)
         warn.assert_not_called()
+
+
+class EmSectorRankRemovedTests(SimpleTestCase):
+    """东财板块 5日/10日排行抓取已删除：多日口径只走日度快照（DAT-15 收尾）。"""
+
+    def test_rank_helpers_gone(self):
+        import inspect
+
+        from . import market
+        from .market import sectors
+
+        self.assertFalse(hasattr(sectors, '_parse_sector_rank_table'))
+        self.assertFalse(hasattr(sectors, '_SECTOR_RANK_INDICATORS'))
+        self.assertFalse(hasattr(market, '_parse_sector_rank_table'))
+        self.assertNotIn('stock_sector_fund_flow_rank', inspect.getsource(sectors))
+
+    def test_multi_day_period_rejected_without_upstream_call(self):
+        from .market import sectors
+
+        for func in (sectors.fetch_industry_fund_flow, sectors.fetch_concept_fund_flow):
+            for period in ('5d', '10d'):
+                with self.subTest(func=func.__name__, period=period), \
+                        patch('stocks.market.sectors._ths_fund_flow_df') as ths:
+                    with self.assertRaises(ValueError):
+                        func(period=period)
+                    ths.assert_not_called()
+
+    def test_day_period_still_uses_ths(self):
+        from .market import sectors
+
+        with patch('stocks.market.sectors._ths_fund_flow_df', return_value=None) as ths:
+            self.assertEqual(sectors.fetch_industry_fund_flow(), [])
+        ths.assert_called_once_with('industry', 'ths_fund_flow_industry')

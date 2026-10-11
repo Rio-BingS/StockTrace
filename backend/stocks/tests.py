@@ -105,19 +105,6 @@ class MarketParsingTests(SimpleTestCase):
         self.assertEqual(data['unavailable_periods'], ['1m', '3m', '6m', '1y'])
         self.assertEqual([item['name'] for item in data['divergences']], ['C', 'B'])
 
-    def test_sector_rank_table_uses_upstream_yuan_values(self):
-        # 东财 clist 排行榜形状：列带指标前缀，净额单位已是元
-        frame = pd.DataFrame([
-            {'序号': 1, '行业': '半导体', '5日涨跌幅': 2.5, '5日主力净流入-净额': 1_500_000_000.0},
-            {'序号': 2, '行业': '软件', '5日涨跌幅': -1.2, '5日主力净流入-净额': -800_000_000.0},
-        ])
-        items = market._parse_sector_rank_table(frame)
-
-        self.assertEqual(len(items), 2)
-        self.assertEqual(items[0]['net'], 1_500_000_000.0)
-        self.assertEqual(items[1]['change_pct'], -1.2)
-        self.assertIsNone(items[0]['inflow'])
-
     @patch('stocks.market.sectors.fetch_industry_fund_flow')
     def test_sector_rotation_multi_day_periods_use_snapshots_only(self, fetch_flow):
         # 多日口径固定为日度快照（DAT-15），不再调用东财原生 5日排行
