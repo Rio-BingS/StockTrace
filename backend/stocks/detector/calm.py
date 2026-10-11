@@ -32,10 +32,17 @@ SECTOR_CALM_PARAMS = {
 
 
 def _rvol(volumes, i, window=10):
-    """第 i 日的量比：当日量 / 前 window 日均量；数据不齐返回 None。"""
+    """第 i 日的量比：当日量 / 前 window 日均量；数据不齐返回 None。
+
+    基期窗口要求齐全（ALG-10）：旧实现用跳过 None 的 _mean，缺几天也照算，
+    与下面「量能 CV / 振幅」都要求窗口齐全的口径不一致。
+    """
     if i < window or volumes[i] is None:
         return None
-    base = _mean(volumes[i - window:i])
+    win = volumes[i - window:i]
+    if any(v is None for v in win):
+        return None
+    base = _mean(win)
     if not base:
         return None
     return volumes[i] / base
@@ -62,8 +69,11 @@ def is_calm_price(ctx, params=None):
     n = len(volumes)
     lookback = params['lookback']
     cvs = []
+    # 基线只取「当前窗口之前」的滚动窗口（ALG-10）：range 到 n（不含）——
+    # 下标 i 的窗口是 volumes[i-k:i]，i=n 就是当前窗口，旧实现把当前值算进了
+    # 自己的分位基线，让「≤40 分位」判定偏宽
     start = max(k, n - lookback)
-    for i in range(start, n + 1):
+    for i in range(start, n):
         win = volumes[max(0, i - k):i]
         m = _mean(win)
         if m and all(v is not None for v in win):
@@ -79,17 +89,21 @@ def is_calm_price(ctx, params=None):
         reasons.append('量能波动未收窄')
 
     # 振幅低位：(high-low)/prev_close 与自身历史比
+    # 当前值与基线同口径（ALG-10）：逐日振幅缺失处保留 None，当日振幅必须是
+    # 「最后一根」本身（旧实现先丢掉 None 再取 amps[-1]，当日缺数据时会拿前一天
+    # 冒充当日）；基线取当日之前的 lookback 根，不含当日
     highs, lows, closes = ctx.get('high'), ctx.get('low'), ctx.get('close')
     amps = []
     if highs and lows and closes:
         for i in range(1, len(closes)):
             h, low, pc = highs[i], lows[i], closes[i - 1]
-            if None not in (h, low, pc) and pc:
-                amps.append((h - low) / pc * 100)
-    if len(amps) < 10:
-        return False, {'reason': '振幅样本不足'}
+            amps.append((h - low) / pc * 100 if None not in (h, low, pc) and pc else None)
+    if not amps or amps[-1] is None:
+        return False, {'reason': '当日振幅缺失，无法判定振幅低位'}
     amp_now = amps[-1]
-    amp_base = amps[max(0, len(amps) - lookback):]
+    amp_base = [a for a in amps[:-1][-lookback:] if a is not None]
+    if len(amp_base) < 10:
+        return False, {'reason': '振幅样本不足'}
     if amp_now > _percentile(amp_base, params['amp_pct']):
         reasons.append(f'振幅 {amp_now:.2f}% 非低位')
 
@@ -111,9 +125,9 @@ def is_calm_sector(ctx, params=None):
     if len(nets) < window + 3:
         return False, {'reason': '净额快照窗口不足'}
 
-    # 近 3 日平均|净额| 对比自身滚动 3 日均值的历史分位
+    # 近 3 日平均|净额| 对比自身滚动 3 日均值的历史分位；基线不含当前 3 日窗口（ALG-10）
     roll = []
-    for i in range(len(nets) - 2):
+    for i in range(len(nets) - 3):
         win = nets[i:i + 3]
         if all(v is not None for v in win):
             roll.append(_mean([abs(v) for v in win]))
@@ -124,14 +138,18 @@ def is_calm_sector(ctx, params=None):
     if flow_now > _percentile(roll, params['flow_pct']):
         return False, {'reason': '资金净额波动未收窄'}
 
-    chg_std = _std(pcts[-window:]) if len(pcts) >= window else None
-    if chg_std is None:
+    if len(pcts) < window:
         return False, {'reason': '涨跌幅窗口不足'}
     if any(v is None for v in pcts[-window:]):
         return False, {'reason': '涨跌幅窗口存在缺失快照'}
+    chg_std = _std(pcts[-window:])
+    if chg_std is None:
+        return False, {'reason': '涨跌幅窗口不足'}
+    # 基线是当前窗口之前的滚动窗口（ALG-10）：range 到 len(pcts)（不含），
+    # 与量能 CV 一样不把当前值算进自己的分位
     roll_std = [
         _std(pcts[i - window:i])
-        for i in range(window, len(pcts) + 1)
+        for i in range(window, len(pcts))
         if all(v is not None for v in pcts[i - window:i])
     ]
     # 回填后头几天每个滚动窗口都含 None → roll_std 为空、分位为 None，float > None 会 TypeError（P0 ALG-01）
