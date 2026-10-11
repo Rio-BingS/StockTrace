@@ -212,7 +212,8 @@ def screener_ai(request):
             {'detail': f'AI 生成的条件无法执行：{exc}', 'conditions': spec},
             status=status.HTTP_400_BAD_REQUEST,
         )
-    return Response({'conditions': spec, 'count': len(rows), 'results': rows})
+    return Response({'conditions': spec, 'count': len(rows), 'results': rows,
+                     'disclaimer': DISCLAIMER})
 
 
 def _invalid_input(errors):

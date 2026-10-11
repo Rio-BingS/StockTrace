@@ -1,13 +1,20 @@
 """自选股 AI 分析：汇总本地真实落库数据组装 prompt，交给 LLM 解读。
 
 数据诚信红线：缺失的数据一律写"无数据"，绝不合成数值；
-LLM 输出前端展示时必须带"AI 生成，非投资建议"标注。
+LLM 输出前端展示时必须带后端返回的免责声明 DISCLAIMER。
 """
 import re
 
 from ..models import DailyQuote
 
-DISCLAIMER = 'AI 生成，非投资建议'
+# 免责声明由后端统一返回，前端只渲染这里的文本（AIX-04）
+DISCLAIMER = 'AI 生成内容，仅供参考，不构成任何投资建议；据此操作，风险自负'
+
+# 投资建议合规（AIX-04）：所有输出解读文字的提示词都带上这条
+COMPLIANCE_RULE = (
+    '严禁给出买入、卖出、持有、加仓、减仓等操作建议，严禁给出目标价、'
+    '止盈止损价位或仓位比例；只描述数据反映的客观特征与风险。'
+)
 
 # 最多喂给 LLM 的日线根数
 RECENT_DAYS = 20
@@ -62,6 +69,7 @@ def build_analysis_messages(stock):
         '数据里没有的维度（如估值、基本面、消息面）要明确说"无相关数据"，'
         '绝不虚构。分析务客观，指出数据反映的走势特征、量价关系与主要风险，'
         '使用简体中文，控制在 500 字以内。'
+        + COMPLIANCE_RULE
     )
     user = f'以下是该股票的落库行情数据：\n\n{context}\n\n请基于以上数据进行分析。'
     return [
@@ -125,7 +133,7 @@ def build_comment_messages(rows, user_query):
     system = (
         '你是 A 股选股结果点评助手。只依据给定的筛选条件和结果数据做点评，'
         '绝不编造数据之外的信息。简体中文，300 字以内。'
-        + _USER_QUERY_RULE
+        + COMPLIANCE_RULE + _USER_QUERY_RULE
     )
     user = (
         f'用户的选股需求：\n{wrap_user_query(user_query)}\n\n'

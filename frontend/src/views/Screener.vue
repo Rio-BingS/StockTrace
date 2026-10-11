@@ -2,6 +2,7 @@
 import { computed, onMounted, ref } from 'vue'
 import { useRouter } from 'vue-router'
 import { aiApi, presetApi, stockApi } from '../api/stocks.js'
+import { aiDisclaimer } from '../utils/aiRequest.js'
 import { formatPct, formatNum, pctClass } from '../utils/format.js'
 
 const router = useRouter()
@@ -84,6 +85,8 @@ const ORDER_OPTIONS = [
 // 自然语言选股
 const query = ref('')
 const aiLoading = ref(false)
+// 当前结果由 AI 翻译条件得到时，结果表上方展示后端返回的免责声明（AIX-04）
+const resultDisclaimer = ref('')
 
 // 手动条件
 const logic = ref('all')
@@ -99,6 +102,7 @@ const notice = ref('')
 
 // AI 点评
 const comment = ref('')
+const commentDisclaimer = ref('')
 const commentLoading = ref(false)
 
 // 结果表动态附加列：条件与排序里用到、且固定列没展示的指标
@@ -257,6 +261,7 @@ async function runManual() {
     results.value = res.data.results
     resultCount.value = res.data.count
     appliedConditions.value = spec
+    resultDisclaimer.value = ''
   } catch (e) {
     errorMsg.value = errText(e)
   } finally {
@@ -275,6 +280,7 @@ async function runAi() {
     results.value = res.data.results
     resultCount.value = res.data.count
     appliedConditions.value = res.data.conditions
+    resultDisclaimer.value = aiDisclaimer(res.data)
     notice.value = 'AI 已把需求翻译为可复现的结构化条件并执行'
   } catch (e) {
     errorMsg.value = errText(e)
@@ -290,6 +296,7 @@ async function runComment() {
   try {
     const res = await aiApi.screenerComment(query.value || '自定义条件', results.value)
     comment.value = res.data.comment
+    commentDisclaimer.value = aiDisclaimer(res.data)
   } catch (e) {
     errorMsg.value = errText(e)
   } finally {
@@ -335,6 +342,7 @@ function fmtTurnover(v) {
         <input
           v-model="query"
           class="ai-input"
+          maxlength="200"
           placeholder="用自然语言描述选股条件，如：今日涨幅大于3%且成交额5亿以上，按涨幅从高到低"
           @keyup.enter="runAi"
         />
@@ -410,6 +418,7 @@ function fmtTurnover(v) {
           {{ commentLoading ? 'AI 点评中…' : 'AI 点评' }}
         </button>
       </div>
+      <div v-if="resultDisclaimer" class="disclaimer">条件由 AI 翻译生成。{{ resultDisclaimer }}</div>
       <table class="result-table">
         <thead>
           <tr>
@@ -444,7 +453,7 @@ function fmtTurnover(v) {
       <div v-if="comment" class="comment">
         <h3>AI 点评</h3>
         <pre class="comment-text">{{ comment }}</pre>
-        <div class="disclaimer">AI 生成，非投资建议</div>
+        <div class="disclaimer">{{ commentDisclaimer }}</div>
       </div>
     </div>
     <div v-else-if="appliedConditions && !results.length" class="card hint">

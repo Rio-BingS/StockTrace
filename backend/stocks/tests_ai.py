@@ -13,6 +13,7 @@ from django.utils import timezone
 from .models import AiCallLog, AiProvider, DailyQuote, Stock
 from .ai.crypto import decrypt_api_key, encrypt_api_key, mask_api_key
 from .ai.llm import LlmClient, LlmError, validate_base_url
+from .ai.prompts import DISCLAIMER
 from .ai.screener import ConditionError, run_screener
 from .ai.throttle import DAILY_LIMIT, check_throttle, log_call
 
@@ -318,7 +319,7 @@ class AiEndpointTests(TestCase):
         response = self.client.post(f'/api/stocks/{self.stock.id}/ai-analysis/')
         self.assertEqual(response.status_code, 200)
         self.assertEqual(response.data['analysis'], '看起来不错')
-        self.assertEqual(response.data['disclaimer'], 'AI 生成，非投资建议')
+        self.assertEqual(response.data['disclaimer'], DISCLAIMER)
 
     @patch('stocks.ai.views.LlmClient')
     def test_analysis_upstream_error_is_honest(self, mock_client_cls):
@@ -385,7 +386,7 @@ class AiEndpointTests(TestCase):
         }, content_type='application/json')
         self.assertEqual(response.status_code, 200)
         self.assertEqual(response.data['comment'], '强势')
-        self.assertEqual(response.data['disclaimer'], 'AI 生成，非投资建议')
+        self.assertEqual(response.data['disclaimer'], DISCLAIMER)
 
     def test_comment_requires_results(self):
         response = self.client.post('/api/screener/ai/comment/', {

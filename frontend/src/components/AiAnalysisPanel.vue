@@ -1,12 +1,14 @@
 <script setup>
 import { ref } from 'vue'
 import { aiApi } from '../api/stocks.js'
+import { aiDisclaimer } from '../utils/aiRequest.js'
 
 const props = defineProps({
   stockId: { type: [Number, String], required: true },
 })
 
 const analysis = ref('')
+const disclaimer = ref('')
 const loading = ref(false)
 const errorMsg = ref('')
 
@@ -17,6 +19,7 @@ async function run() {
   try {
     const res = await aiApi.analyzeStock(props.stockId)
     analysis.value = res.data.analysis
+    disclaimer.value = aiDisclaimer(res.data)
   } catch (e) {
     const data = e.response?.data
     errorMsg.value = data?.detail || data || e.message || '请求失败'
@@ -36,7 +39,7 @@ async function run() {
     </div>
     <div v-if="errorMsg" class="error">{{ errorMsg }}</div>
     <pre v-if="analysis" class="analysis">{{ analysis }}</pre>
-    <div v-if="analysis" class="disclaimer">以上内容由 AI 生成，非投资建议</div>
+    <div v-if="analysis" class="disclaimer">{{ disclaimer }}</div>
     <div v-else-if="!loading && !errorMsg" class="hint">
       基于本地落库的行情数据由 AI 解读，需要先在设置页配置 AI 服务商。
     </div>
