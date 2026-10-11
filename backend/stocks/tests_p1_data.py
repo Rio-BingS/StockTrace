@@ -11,7 +11,7 @@ from django.test import SimpleTestCase, TestCase
 from django.utils import timezone
 
 from . import services
-from .models import AlertEvent, DailyQuote, MinuteBar, PriceAlert, Stock
+from .models import AlertEvent, DailyQuote, MinuteBar, PriceAlert, ScreenerPreset, Stock, StockGroup
 from .serializers import DailyQuoteSerializer, DashboardStockSerializer
 
 
@@ -210,7 +210,7 @@ class DailyIsFinalTests(_NoSleep, TestCase):
 
 
 class AlertEventUniqueTests(TestCase):
-    """PERF-06：(alert, trade_date) 唯一，评估写入幂等。"""
+    """PERF-06：(alert, trade_date) 唯一，评估写入幂等；并发建名返回 409。"""
 
     def setUp(self):
         self.stock = Stock.objects.create(code='600000', name='浦发银行')
@@ -239,3 +239,25 @@ class AlertEventUniqueTests(TestCase):
         with patch('stocks.alerts._current_price', return_value=(10.0, '现价')), \
                 patch.object(AlertEvent.objects, 'get_or_create', side_effect=IntegrityError):
             self.assertIsNone(alerts._evaluate_one(self.alert, date(2026, 9, 2)))
+
+    def test_create_race_returns_409(self):
+        spec = {'logic': 'all', 'conditions': [{'field': 'change_pct', 'op': 'gt', 'value': 3}]}
+        with patch.object(ScreenerPreset.objects, 'create', side_effect=IntegrityError):
+            r = self.client.post('/api/screener/presets/', {'name': 'p', 'spec': spec},
+                                 content_type='application/json')
+        self.assertEqual(r.status_code, 409)
+        with patch.object(StockGroup.objects, 'create', side_effect=IntegrityError):
+            r = self.client.post('/api/stock-groups/', {'name': 'g'},
+                                 content_type='application/json')
+        self.assertEqual(r.status_code, 409)
+        g = StockGroup.objects.create(name='g1')
+        with patch.object(StockGroup, 'save', side_effect=IntegrityError):
+            r = self.client.patch(f'/api/stock-groups/{g.id}/', {'name': 'g2'},
+                                  content_type='application/json')
+        self.assertEqual(r.status_code, 409)
+        with patch('stocks.serializers.StockSerializer.save', side_effect=IntegrityError), \
+                patch('stocks.views.start_fetch_one') as fetch:
+            r = self.client.post('/api/stocks/', {'code': '000001'},
+                                 content_type='application/json')
+        self.assertEqual(r.status_code, 409)
+        fetch.assert_not_called()

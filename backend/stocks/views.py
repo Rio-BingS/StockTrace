@@ -1,6 +1,7 @@
 from rest_framework import viewsets, status
 from rest_framework.decorators import action, api_view
 from rest_framework.response import Response
+from django.db import IntegrityError, transaction
 from django.utils import timezone
 from datetime import date, datetime, timedelta
 import logging
@@ -50,7 +51,12 @@ class StockViewSet(viewsets.ModelViewSet):
             serializer = self.get_serializer(existing)
             start_fetch_one(existing.id, light=True)
             return Response(serializer.data, status=status.HTTP_201_CREATED)
-        response = super().create(request, *args, **kwargs)
+        try:
+            with transaction.atomic():
+                response = super().create(request, *args, **kwargs)
+        except IntegrityError:
+            # 先查后建竞态：并发请求已建同代码股票（PERF-06）
+            return Response({'detail': f'股票「{code}」已存在'}, status=status.HTTP_409_CONFLICT)
         if response.status_code == status.HTTP_201_CREATED:
             stock_id = response.data.get('id')
             if stock_id:
@@ -644,7 +650,11 @@ def screener_preset_list(request):
         return Response({'detail': f'筛选条件不合法：{e}'}, status=status.HTTP_400_BAD_REQUEST)
     if ScreenerPreset.objects.filter(name=name).exists():
         return Response({'detail': f'预设「{name}」已存在'}, status=status.HTTP_409_CONFLICT)
-    preset = ScreenerPreset.objects.create(name=name, spec=spec)
+    try:
+        with transaction.atomic():
+            preset = ScreenerPreset.objects.create(name=name, spec=spec)
+    except IntegrityError:  # 并发同名创建（PERF-06）
+        return Response({'detail': f'预设「{name}」已存在'}, status=status.HTTP_409_CONFLICT)
     return Response({'id': preset.id, 'name': preset.name, 'spec': preset.spec},
                     status=status.HTTP_201_CREATED)
 
@@ -688,7 +698,11 @@ def stock_group_list(request):
         return Response({'detail': '分组名称必填且不超过 50 字'}, status=status.HTTP_400_BAD_REQUEST)
     if StockGroup.objects.filter(name=name).exists():
         return Response({'detail': f'分组「{name}」已存在'}, status=status.HTTP_409_CONFLICT)
-    group = StockGroup.objects.create(name=name)
+    try:
+        with transaction.atomic():
+            group = StockGroup.objects.create(name=name)
+    except IntegrityError:  # 并发同名创建（PERF-06）
+        return Response({'detail': f'分组「{name}」已存在'}, status=status.HTTP_409_CONFLICT)
     return Response(_group_row(group), status=status.HTTP_201_CREATED)
 
 
@@ -716,5 +730,9 @@ def stock_group_detail(request, pk):
             group.order = int(request.data['order'])
         except (TypeError, ValueError):
             return Response({'detail': 'order 必须是整数'}, status=status.HTTP_400_BAD_REQUEST)
-    group.save()
+    try:
+        with transaction.atomic():
+            group.save()
+    except IntegrityError:  # 并发重命名撞名（PERF-06）
+        return Response({'detail': f'分组「{name}」已存在'}, status=status.HTTP_409_CONFLICT)
     return Response(_group_row(group))
