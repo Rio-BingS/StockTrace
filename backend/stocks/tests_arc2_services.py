@@ -6,7 +6,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 import pandas as pd
-from django.test import SimpleTestCase
+from django.test import SimpleTestCase, TestCase
 
 STOCKS_DIR = Path(__file__).resolve().parent
 
@@ -184,3 +184,20 @@ class TrySourcesLoggingTests(SimpleTestCase):
             _try_sources('fetch_daily', '600000', '20260901', '20260901',
                          sources=[self._src('x1', 'raise'), self._src('x2', 'empty')])
         self.assertTrue(any('最后错误 [x1]: x1 boom' in m for m in cm.output))
+
+
+class FetchStockAllDataNameTests(TestCase):
+    def test_name_lookup_failure_logs_warning_and_continues(self):
+        from stocks import jobs
+        from stocks.models import Stock
+
+        stock = Stock.objects.create(code='600000', name='600000')
+        with patch('stocks.jobs.fetch_stock_info', side_effect=RuntimeError('name down')), \
+                patch('stocks.jobs.fetch_daily_data', return_value=3) as daily, \
+                patch('stocks.trading_calendar.is_trading_day', return_value=False), \
+                self.assertLogs('stocks.jobs', level='WARNING') as cm:
+            self.assertEqual(jobs.fetch_stock_all_data(stock), 3)
+        daily.assert_called_once()
+        self.assertTrue(any('600000' in m and 'name down' in m for m in cm.output))
+        stock.refresh_from_db()
+        self.assertEqual(stock.name, '600000')

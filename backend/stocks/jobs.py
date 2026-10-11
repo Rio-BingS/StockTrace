@@ -34,8 +34,9 @@ def fetch_stock_all_data(stock, days_back=5, light=False):
             if real_name and real_name != stock.code:
                 stock.name = real_name
                 stock.save(update_fields=['name'])
-        except Exception:
-            pass  # 名称补全失败不影响数据拉取
+        except Exception as e:
+            # 名称补全失败不影响数据拉取，但要留痕便于排查
+            logger.warning(f"补全 {stock.code} 名称失败（不影响行情拉取）: {e}")
 
     daily_count = fetch_daily_data(stock)
 
