@@ -11,6 +11,7 @@ from unittest.mock import patch
 
 import pandas as pd
 from django.core.management import call_command
+from django.core.management.base import CommandError
 from django.test import TestCase
 
 from .models import MarketDailySnapshot, Stock
@@ -144,30 +145,41 @@ class BackfillEtfShareSseTests(TestCase):
 
 
 class FetchStockDataCommandTests(TestCase):
+    """失败、参数错误与锁被占用均以 CommandError 非零退出，stdout 仍打印原文案（REL-09）。"""
+
     def setUp(self):
         self.stock = Stock.objects.create(code='600000', name='浦发银行')
 
+    def _run_fail(self, *args):
+        out = StringIO()
+        with self.assertRaises(CommandError):
+            call_command('fetch_stock_data', *args, stdout=out, stderr=StringIO())
+        return out.getvalue()
+
     def test_argument_validation(self):
-        out, _ = _run('fetch_stock_data')
-        self.assertIn('请指定股票代码或使用 --all', out)
-        out, _ = _run('fetch_stock_data', '600000', '--source', 'sina')
-        self.assertIn('--source 仅能与 --full-daily 一起使用', out)
-        out, _ = _run('fetch_stock_data', '--full-daily')
-        self.assertIn('请指定股票代码或使用 --all', out)
-        out, _ = _run('fetch_stock_data', '999999', '--full-daily')
-        self.assertIn('不在关注列表中', out)
-        out, _ = _run('fetch_stock_data', '999999')
-        self.assertIn('不在关注列表中', out)
+        self.assertIn('请指定股票代码或使用 --all', self._run_fail())
+        self.assertIn('--source 仅能与 --full-daily 一起使用',
+                      self._run_fail('600000', '--source', 'sina'))
+        self.assertIn('请指定股票代码或使用 --all', self._run_fail('--full-daily'))
+        self.assertIn('不在关注列表中', self._run_fail('999999', '--full-daily'))
+        self.assertIn('不在关注列表中', self._run_fail('999999'))
 
     def test_single_and_all(self):
         with patch('stocks.management.commands.fetch_stock_data.fetch_stock_all_data', return_value=9) as one:
             out, _ = _run('fetch_stock_data', '600000', '--days', '3')
         self.assertEqual(one.call_args.kwargs['days_back'], 3)
         self.assertIn('完成，9 条日K线数据', out)
-        results = [{'code': '600000', 'status': 'success', 'count': 2},
-                   {'code': '000001', 'status': 'error', 'message': 'boom'}]
-        with patch('stocks.management.commands.fetch_stock_data.fetch_all_active_stocks', return_value=results):
-            out, _ = _run('fetch_stock_data', '--all')
+
+        Stock.objects.create(code='000001', name='平安银行')
+
+        def fake(stock, **kwargs):
+            if stock.code == '000001':
+                raise RuntimeError('boom')
+            return 2
+
+        with patch('stocks.management.commands.fetch_stock_data.fetch_stock_all_data', side_effect=fake), \
+                patch('stocks.management.commands.fetch_stock_data.time.sleep'):
+            out = self._run_fail('--all')
         self.assertIn('600000: 成功，2 条日K线', out)
         self.assertIn('000001: 失败 - boom', out)
 
@@ -181,7 +193,7 @@ class FetchStockDataCommandTests(TestCase):
             return 0
 
         with patch('stocks.management.commands.fetch_stock_data.fetch_daily_data', side_effect=fake) as daily:
-            out, _ = _run('fetch_stock_data', '--all', '--full-daily')
+            out = self._run_fail('--all', '--full-daily')
         self.assertEqual(daily.call_count, 2)  # 只含 is_active
         self.assertIsNone(daily.call_args.kwargs['sources'])
         self.assertIn('000001: 失败 - boom', out)
@@ -191,7 +203,7 @@ class FetchStockDataCommandTests(TestCase):
         with patch('stocks.management.commands.fetch_stock_data.task_lock') as tl, \
                 patch('stocks.management.commands.fetch_stock_data.fetch_stock_all_data') as one:
             tl.return_value.__enter__.return_value = False
-            out, _ = _run('fetch_stock_data', '600000')
+            out = self._run_fail('600000')
         self.assertIn('任务锁被占用', out)
         one.assert_not_called()
 

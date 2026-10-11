@@ -70,6 +70,7 @@ class JobGuardTests(SimpleTestCase):
             scan.assert_not_called()
             with patch('stocks.trading_calendar.is_trading_day', return_value=True), \
                     patch('django.utils.timezone.localtime', return_value=_at(17, 15)), \
+                    patch.object(sch, '_detector_dependencies_ready', return_value=(True, 'ready')), \
                     patch('stocks.detector.scan.run_scan', side_effect=RuntimeError('x')) as scan, \
                     self.assertLogs('stocks.scheduler', level='ERROR'):
                 sch._detector_scan_job()  # 失败只记日志
