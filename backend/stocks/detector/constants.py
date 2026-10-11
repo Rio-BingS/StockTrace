@@ -104,6 +104,9 @@ SECTOR_LOOKBACK_DAYS = 45
 #   用多少（#10）；分位用 Harrell-Davis 估计，小样本下比线性插值稳；
 # - noise_hi 2.5：上限 = 2.5 × 自身噪声带，取代跨品种的绝对 max（#1）。
 NOISE_DEFAULTS = {'noise_pct': 0.8, 'noise_window': 120, 'noise_min': 15, 'noise_hi': 2.5}
+# 价格类维度（vol_compress / ma_relation）的噪声尺度由长窗口日收益 σ 解析推导
+# （#1/#3/#10）：取近 sigma_window 个日收益，至少 sigma_min 个才可用
+SIGMA_DEFAULTS = {'sigma_window': 60, 'sigma_min': 20}
 # 波动率压缩：当前宽度 ≤ 自身历史该分位才算压缩（registry 默认值与兜底共用）
 COMPRESS_PCT_DEFAULT = 0.25
 # 换手率分位：量价基准断层（送转/配股）的台阶比例（registry 默认值与兜底共用）

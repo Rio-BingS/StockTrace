@@ -231,7 +231,8 @@ class VolCompressTests(TestCase):
         from .detector.dimensions import eval_vol_compress
         from .detector.registry import DIMENSION_MAP
 
-        pcts = [0.8, -0.7, 0.9, -1.0, 0.6] * 8 + [0.3, 0.35, 0.32, 0.36, 0.34]
+        # 尾段压缩且漂移相对长窗口 σ 显著（z≈1.9，#3）
+        pcts = [0.8, -0.7, 0.9, -1.0, 0.6] * 8 + [0.7, 0.75, 0.72, 0.76, 0.74]
         ctx = self._ctx(pcts)
         params = dict(DIMENSION_MAP['vol_compress']['defaults'])
         first = eval_vol_compress(ctx, params)

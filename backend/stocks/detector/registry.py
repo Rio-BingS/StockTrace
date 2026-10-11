@@ -32,6 +32,7 @@ from . import dimensions as _dims
 from .constants import (
     COMPRESS_PCT_DEFAULT,
     NOISE_DEFAULTS as _NOISE,
+    SIGMA_DEFAULTS as _SIGMA,
     SPLIT_RATIO_DEFAULT,
 )
 
@@ -69,10 +70,10 @@ DIMENSIONS = [
         'enabled': True,
         'note': (
             '近5日涨跌幅标准差 ≤ 自身历史 25 分位才算压缩，方向取压缩期内价格漂移且须'
-            '相对窗口波动显著（t≥2.13）；未压缩不投票。'
+            '相对压缩前60日波动显著（z=Σr/(σ60·√5) 超过 1.645、不超过 3）；未压缩不投票。'
         ),
-        'defaults': {'window': 5, 'mild': 2.0, 'min': 0.2, 'max': 6.0,
-                     'compress_pct': COMPRESS_PCT_DEFAULT, 'drift_z': 2.13,
+        'defaults': {'window': 5, 'compress_pct': COMPRESS_PCT_DEFAULT,
+                     'z_lo': 1.645, 'z_hi': 3.0, 'z_mild': 2.0, **_SIGMA,
                      'noise_window': _NOISE['noise_window'], 'noise_min': _NOISE['noise_min']},
         'evaluate': _dims.eval_vol_compress,
     },

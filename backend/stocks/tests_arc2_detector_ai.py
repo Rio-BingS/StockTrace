@@ -40,6 +40,7 @@ class DetectorConstantsTests(SimpleTestCase):
         # #10/#1：噪声窗口取满 120（约 250 根上下文时），上限 noise_hi 倍自身噪声带
         self.assertEqual(constants.NOISE_DEFAULTS,
                          {'noise_pct': 0.8, 'noise_window': 120, 'noise_min': 15, 'noise_hi': 2.5})
+        self.assertEqual(constants.SIGMA_DEFAULTS, {'sigma_window': 60, 'sigma_min': 20})
         self.assertEqual((constants.COMPRESS_PCT_DEFAULT, constants.SPLIT_RATIO_DEFAULT), (0.25, 1.2))
 
     def test_old_module_names_point_to_constants(self) -> None:

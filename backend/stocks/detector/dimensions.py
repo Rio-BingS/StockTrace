@@ -35,6 +35,7 @@ from .constants import (
     NOISE_DEFAULTS,
     SECTOR_CONTEXT_DAYS,
     SECTOR_LOOKBACK_DAYS,  # noqa: F401  旧路径 dimensions.SECTOR_LOOKBACK_DAYS 保留
+    SIGMA_DEFAULTS,
     SPLIT_RATIO_DEFAULT,
 )
 
@@ -236,6 +237,41 @@ def _gated(raw, history, params):
         if gate:
             direction, note = None, gate
     return value, direction, note
+
+
+def _long_sigma(rets, window, need):
+    """长窗口日收益标准差（%）：末尾 window 个非空收益，样本不足 need 返回 None。
+
+    价格类维度的噪声尺度由它解析推导（#1/#3/#10）：日收益近似独立，
+    60 个收益估 σ 的相对误差约 9%，远比拿几十个高度重叠的 raw 估 80 分位稳。
+    """
+    sample = [r for r in rets if r is not None][-int(window):]
+    if len(sample) < int(need):
+        return None
+    sd = _std(sample)
+    return sd if sd else None
+
+
+def _zband(z, params):
+    """z 值投票区间（#1）：z_lo < |z| ≤ z_hi 才投票，value = z/z_mild × 50。
+
+    返回 (value, direction, note)。阈值都是「自身分布单位」：随机游走下
+    |z| 近似标准正态，单维度名义投票率 = 2·(Φ(−z_lo) − Φ(−z_hi))，与标的
+    波动率无关。参数非法（需 0 ≤ z_lo < z_hi、z_mild > 0）如实不投票。
+    """
+    try:
+        lo, hi, mild = float(params['z_lo']), float(params['z_hi']), float(params['z_mild'])
+        valid = 0 <= lo < hi and mild > 0
+    except (KeyError, TypeError, ValueError):
+        valid = False
+    if not valid:
+        return None, None, '维度参数非法（需 0 ≤ z_lo < z_hi 且 z_mild > 0），不投票'
+    value = _clamp(z / mild * 50, -100, 100)
+    if z == 0 or abs(z) <= lo:
+        return value, None, f'偏离未超出自身噪声尺度（|z|={abs(z):.2f} ≤ {lo:g}），不投票'
+    if abs(z) > hi:
+        return value, None, f'偏离达 {abs(z):.2f} 倍自身噪声尺度，疑似突变/趋势已展开，非早期迹象'
+    return value, ('up' if z > 0 else 'down'), ''
 
 
 def _ols_slope(ys):
@@ -856,13 +892,18 @@ def eval_vol_compress(ctx, params):
     「缩而价稳且缓慢抬升」是吸筹蓄势的典型形态，反之亦然。未压缩时
     如实显示「波动未压缩」且不投票。
 
-    口径（ALG-04/DET-18）：
-    - 旧实现只比较两个重叠 5 日窗口的单点（widths[-1] < widths[-4]），噪声下
-      近一半时间成立；现改为当前宽度 ≤ 自身历史宽度的 compress_pct 分位；
-    - 宽度统一用「逐日涨跌幅」的标准差（板块与指数/个股同口径），不再用振幅——
+    口径（ALG-04/DET-18/#3）：
+    - 当前宽度 ≤ 自身历史宽度的 compress_pct 分位才算压缩（不再比较两个
+      重叠窗口的单点）；
+    - 宽度统一用「逐日涨跌幅」的标准差（板块与指数/个股同口径），不用振幅——
       平静闸门已经要求振幅低位，两边都用振幅会让压缩条件与闸门高度相关；
-    - 漂移须相对窗口内自身波动显著：t = 均值 / (标准差/√k) 的绝对值 ≥ drift_z，
-      否则视为压缩期内的随机游走，不投票。
+    - 漂移显著性：z = Σr / (σ_long·√k)，σ_long 取压缩窗口之前 sigma_window
+      个日收益的标准差。旧实现用同窗口标准差做 t 的分母，而窗口正是按
+      「标准差小」筛出来的，|t| 被系统性放大：名义「t≥2.13≈双侧 10%」在
+      压缩条件下实际约 28% 假阳。改用窗口之外的长窗口 σ 后，正态独立收益
+      下 Σr 与窗口样本方差相互独立，筛选不再改变 z 的分布，假阳率回到名义值；
+    - 噪声闸门以解析形式接入：z_lo < |z| ≤ z_hi 才投票（自身波动单位），
+      取代跨品种的绝对 min/max（旧 max=6% 让 σ≥2.5% 的标的几乎投不了票，#1）。
     """
     k = params['window']
     rets = _return_series(ctx)
@@ -891,16 +932,17 @@ def eval_vol_compress(ctx, params):
     if widths[-1] > thr:
         return _result(0.0, None, '波动未压缩，不构成蓄势形态', series)
 
-    value, direction, note = _sign_value(drift, params)
-    if direction is not None:
-        mean_r = sum(cur) / k
-        w = widths[-1]
-        tstat = float('inf') if w == 0 else abs(mean_r) / (w / k ** 0.5)
-        if tstat < params.get('drift_z', 0.0):
-            direction, note = None, f'压缩期内漂移不显著（t={tstat:.2f}），不投票'
-    # 温和带：|漂移| 在 (min, max] 内才投票；压缩但漂移过小=完全静止
-    if direction is None and not note:
-        note = '压缩期内无有效漂移'
+    sigma = _long_sigma(
+        rets[:-k],
+        params.get('sigma_window', SIGMA_DEFAULTS['sigma_window']),
+        params.get('sigma_min', SIGMA_DEFAULTS['sigma_min']),
+    )
+    if sigma is None:
+        return _unavailable('长窗口波动样本不足，无法判断漂移显著性')
+    z = sum(cur) / (sigma * k ** 0.5)
+    value, direction, note = _zband(z, params)
+    if direction is None and note.startswith('偏离未超出'):
+        note = f'压缩期内漂移不显著（z={z:.2f}），不投票'
     return _result(value, direction, note, series)
 
 
