@@ -16,7 +16,7 @@ from django.core.management.base import BaseCommand, CommandError
 from django.utils import timezone
 
 from stocks.models import DailyQuote, MinuteBar, Stock
-from stocks.services import compute_high_low_times
+from stocks.ingest import compute_high_low_times
 
 
 class Command(BaseCommand):

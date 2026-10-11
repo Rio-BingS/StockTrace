@@ -198,7 +198,7 @@ class MinuteBulkUpsertTests(_NoSleep, TestCase):
             {'日期': '2026-09-02', '开盘': 9.9, '收盘': 10.0, '最高': 10.2, '最低': 9.8,
              '成交量': 200, '成交额': 2000},
         ])
-        with patch('stocks.services._try_sources', return_value=(services.SinaSource(), df)):
+        with patch('stocks.ingest._try_sources', return_value=(services.SinaSource(), df)):
             n = services.fetch_daily_data(self.stock, start_date='20260901', end_date='20260902')
         self.assertEqual(n, 2)
         q.refresh_from_db()
@@ -344,14 +344,14 @@ class AdjustBasisChangeTests(_NoSleep, TestCase):
 
     def test_unchanged_basis_stays_incremental(self):
         fake, calls = self._fake_try(1.0)
-        with patch('stocks.services._try_sources', side_effect=fake):
+        with patch('stocks.ingest._try_sources', side_effect=fake):
             services.fetch_daily_data(self.stock)
         self.assertEqual(len(calls), 1)
 
     def test_dividend_triggers_full_refetch_and_recomputes_prev_close(self):
         fake, calls = self._fake_try(0.97)  # 分红 3%：历史整体下调
-        with self.assertLogs('stocks.services', level='WARNING') as logs:
-            with patch('stocks.services._try_sources', side_effect=fake):
+        with self.assertLogs('stocks.ingest', level='WARNING') as logs:
+            with patch('stocks.ingest._try_sources', side_effect=fake):
                 services.fetch_daily_data(self.stock)
         self.assertEqual(len(calls), 2)
         self.assertLessEqual(datetime.strptime(calls[1], '%Y%m%d').date(), self.days[0])
@@ -379,7 +379,7 @@ class AdjustBasisChangeTests(_NoSleep, TestCase):
             if state['n'] == 1:
                 return services.SinaSource(), self._df(self.days[-3:] + [self.today], 0.9)
             return None, None
-        with patch('stocks.services._try_sources', side_effect=fake):
+        with patch('stocks.ingest._try_sources', side_effect=fake):
             self.assertEqual(services.fetch_daily_data(self.stock), 0)
         last = DailyQuote.objects.get(stock=self.stock, trade_date=self.days[-1])
         self.assertEqual(last.close_price, Decimal('10.90'))  # 旧值未被新基准覆盖
@@ -387,7 +387,7 @@ class AdjustBasisChangeTests(_NoSleep, TestCase):
 
     def test_command_full_daily_single_source(self):
         fake, calls = self._fake_try(1.0)
-        with patch('stocks.services._try_sources', side_effect=fake) as ts:
+        with patch('stocks.ingest._try_sources', side_effect=fake) as ts:
             call_command('fetch_stock_data', '000001', '--full-daily', '--source', 'sina',
                          stdout=StringIO())
         sources = ts.call_args.kwargs['sources']

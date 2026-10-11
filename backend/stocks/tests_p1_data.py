@@ -41,7 +41,7 @@ class PricePrecisionTests(_NoSleep, TestCase):
             {'日期': '2026-09-02', '开盘': 1.234, '收盘': 1.237, '最高': 1.238, '最低': 1.233,
              '成交量': 100, '成交额': 123.7},
         ])
-        with patch('stocks.services._try_sources', return_value=(services.EastMoneySource(), df)):
+        with patch('stocks.ingest._try_sources', return_value=(services.EastMoneySource(), df)):
             services.fetch_daily_data(self.stock, start_date='20260901', end_date='20260902')
         q = DailyQuote.objects.get(stock=self.stock, trade_date=date(2026, 9, 1))
         self.assertEqual(q.close_price, Decimal('1.234'))
@@ -182,7 +182,7 @@ class DailyIsFinalTests(_NoSleep, TestCase):
 
     def _fetch(self, now_str):
         now = _aware(now_str)
-        with patch('stocks.services._try_sources',
+        with patch('stocks.ingest._try_sources',
                    return_value=(services.SinaSource(), self.df)), \
                 patch('stocks.services.timezone.now', return_value=now), \
                 patch('stocks.services.timezone.localdate', return_value=now.date()):

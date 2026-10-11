@@ -173,7 +173,7 @@ class LocalDateTests(SimpleTestCase):
         from . import services
 
         with patch('django.utils.timezone.now', return_value=self._UTC_NIGHT), \
-                patch('stocks.services.DailyQuote.objects') as qs:
+                patch('stocks.ingest.DailyQuote.objects') as qs:
             qs.filter.return_value.order_by.return_value.values_list.return_value.first.return_value = None
             start = services._daily_start_date(object(), bootstrap_days=1)
         self.assertEqual(start, '20261011')  # 本地 10-12 往前 1 天；UTC 口径会是 10-10
