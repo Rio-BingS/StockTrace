@@ -15,6 +15,7 @@ import { formatPct, formatNum, pctClass } from '../utils/format.js'
 import { formatAmount, formatShare } from '../utils/marketFormat.js'
 import { errorMessage, isCanceled } from '../utils/errorMessage.js'
 import { createRequestGuard } from '../utils/requestGuard.js'
+import { escapeHtml } from '../utils/escapeHtml.js'
 
 use([BarChart, GridComponent, TooltipComponent, CanvasRenderer])
 
@@ -104,7 +105,8 @@ const flowBarOption = computed(() => {
       backgroundColor: '#101827', borderColor: '#33415f', textStyle: { color: '#ddd' },
       formatter: (p) => {
         const row = rows[p.dataIndex]
-        return `${row.name}（${row.code}）<br/>区间主力净流入 ${formatAmount(row.total_main_net)}` +
+        // ETF 名称来自第三方数据源，拼 HTML 前转义（SEC-09）
+        return `${escapeHtml(row.name)}（${escapeHtml(row.code)}）<br/>区间主力净流入 ${formatAmount(row.total_main_net)}` +
           `<br/>净流入 ${row.up_days} 天 / 净流出 ${row.down_days} 天` +
           `<br/>最新收盘 ${formatNum(row.last_close)}（区间 ${formatPct(row.window_change_pct)}）`
       },

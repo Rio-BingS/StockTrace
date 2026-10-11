@@ -13,6 +13,7 @@ import {
 } from 'echarts/components'
 import { CanvasRenderer } from 'echarts/renderers'
 import { formatPct, pctFrom } from '../utils/format.js'
+import { escapeHtml } from '../utils/escapeHtml.js'
 
 use([
   CandlestickChart,
@@ -81,15 +82,16 @@ const chartOption = computed(() => {
           const base = quote.prev_close ?? (idx > 0 ? sorted[idx - 1].close_price : null)
           chg = pctFrom(quote.close_price, base)
         }
+        // tooltip 返回 HTML，接口字段一律转义后再拼（SEC-09）
         return `
           <div style="font-size:13px">
-            <b>${quote.trade_date}</b><br/>
+            <b>${escapeHtml(quote.trade_date)}</b><br/>
             开盘: ${Number(quote.open_price).toFixed(2)}<br/>
             收盘: ${Number(quote.close_price).toFixed(2)}<br/>
             最高: ${Number(quote.high_price).toFixed(2)}
-              ${quote.high_time ? '@ ' + quote.high_time.slice(11, 16) : ''}<br/>
+              ${quote.high_time ? '@ ' + escapeHtml(quote.high_time.slice(11, 16)) : ''}<br/>
             最低: ${Number(quote.low_price).toFixed(2)}
-              ${quote.low_time ? '@ ' + quote.low_time.slice(11, 16) : ''}<br/>
+              ${quote.low_time ? '@ ' + escapeHtml(quote.low_time.slice(11, 16)) : ''}<br/>
             涨跌幅: ${formatPct(chg)}<br/>
             日内涨幅（较开盘）: ${formatPct(quote.open_close_pct)}<br/>
             振幅: ${Number(quote.high_low_pct).toFixed(2)}%

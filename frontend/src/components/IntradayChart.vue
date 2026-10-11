@@ -13,6 +13,7 @@ import {
 } from 'echarts/components'
 import { CanvasRenderer } from 'echarts/renderers'
 import { formatPct, formatNum, pctClass, pctFrom } from '../utils/format.js'
+import { escapeHtml } from '../utils/escapeHtml.js'
 
 use([
   LineChart,
@@ -254,9 +255,9 @@ const chartOption = computed(() => {
         if (!bar) return ''
         const pct = signedPctText(bar.close)
         return `<div style="font-size:12px">
-          <b>${p.axisValue}</b><br/>
+          <b>${escapeHtml(p.axisValue)}</b><br/>
           价格: ${Number(bar.close).toFixed(2)}${pct ? ` (${baseInfo.value.label} ${pct})` : ''}<br/>
-          成交量: ${bar.volume || '-'}
+          成交量: ${escapeHtml(bar.volume || '-')}
         </div>`
       },
     },

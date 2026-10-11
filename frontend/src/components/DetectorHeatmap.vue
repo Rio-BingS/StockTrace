@@ -8,6 +8,7 @@ import { use } from 'echarts/core'
 import { HeatmapChart } from 'echarts/charts'
 import { GridComponent, TooltipComponent, VisualMapComponent } from 'echarts/components'
 import { CanvasRenderer } from 'echarts/renderers'
+import { escapeHtml } from '../utils/escapeHtml.js'
 
 use([HeatmapChart, GridComponent, TooltipComponent, VisualMapComponent, CanvasRenderer])
 
@@ -42,7 +43,8 @@ const option = computed(() => {
         const row = props.rows[p.value[1]]
         const dim = props.dims[p.value[0]]
         const v = p.value[2]
-        return `${row?.name}<br/>${dim?.name}：<b style="color:${v >= 0 ? '#ff8796' : '#4cd68a'}">${v > 0 ? '+' : ''}${v.toFixed(1)}</b>`
+        // 板块名来自第三方数据源，拼 HTML 前转义（SEC-09）
+        return `${escapeHtml(row?.name)}<br/>${escapeHtml(dim?.name)}：<b style="color:${v >= 0 ? '#ff8796' : '#4cd68a'}">${v > 0 ? '+' : ''}${v.toFixed(1)}</b>`
       },
     },
     grid: { left: 8, right: 12, top: 6, bottom: 40, containLabel: true },
