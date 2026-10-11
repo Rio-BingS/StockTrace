@@ -858,7 +858,7 @@ class ScreenerCrossSectionTests(TestCase):
         self.b = Stock.objects.create(code='600002', name='乙')
 
     def test_stale_stock_is_excluded_and_reported(self):
-        from .ai.screener import run_screener_with_meta
+        from .screener.engine import run_screener_with_meta
 
         _screener_bars(self.a, [10.0] * 30, self.start)
         _screener_bars(self.b, [10.0] * 25, self.start)  # 停在 5 天前
@@ -882,7 +882,7 @@ class ScreenerCrossSectionTests(TestCase):
         self.assertEqual([e['code'] for e in data['excluded']], ['600002'])
 
     def test_queries_do_not_grow_with_stock_count(self):
-        from .ai.screener import _latest_contexts
+        from .screener.engine import _latest_contexts
         from .models import Stock
 
         _screener_bars(self.a, [10.0] * 30, self.start)
@@ -911,7 +911,7 @@ class ScreenerIndicatorConventionTests(TestCase):
         self.stock = Stock.objects.create(code='600010', name='指标')
 
     def _values(self):
-        from .ai.screener import FIELDS, _latest_contexts
+        from .screener.engine import FIELDS, _latest_contexts
 
         ctxs, _ = _latest_contexts()
         ctx = ctxs[0][1]
@@ -924,7 +924,7 @@ class ScreenerIndicatorConventionTests(TestCase):
         self.assertIsNotNone(self._values()['macd_dif'])
 
     def test_boll_uses_sample_std(self):
-        from .ai import screener
+        from .screener import engine as screener
 
         # 取 x 使两种口径结论不同：总体口径（÷N）上轨更低 → 触及；
         # 样本口径（÷N-1，通达信 STD）上轨更高 → 不触及
@@ -958,7 +958,7 @@ class ScreenerSortTests(TestCase):
     def test_none_sorted_last_both_directions(self):
         from datetime import date
 
-        from .ai.screener import run_screener
+        from .screener.engine import run_screener
         from .models import Stock
 
         start = date(2026, 1, 1)
@@ -977,12 +977,12 @@ class BuiltinStrategyConsistencyTests(TestCase):
     """ALG-16：内置模板条件与描述一致。"""
 
     def _spec(self, name):
-        from .ai.strategies import BUILTIN_STRATEGIES
+        from .screener.strategies import BUILTIN_STRATEGIES
 
         return next(s['spec'] for s in BUILTIN_STRATEGIES if s['name'] == name)
 
     def _match_all(self, spec, values):
-        from .ai.screener import _match
+        from .screener.engine import _match
 
         return all(_match(c['op'], c['value'], values[c['field']]) for c in spec['conditions'])
 

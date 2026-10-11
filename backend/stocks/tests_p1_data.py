@@ -573,7 +573,7 @@ class FinalBarReadersTests(TestCase):
 
     @patch('stocks.ai.valuation.fetch_valuation_map', new=lambda codes: {})
     def test_screener_uses_latest_final_bar(self):
-        from .ai.screener import run_screener
+        from .screener.engine import run_screener
         self._bar(date(2026, 9, 3), 10, change_pct=Decimal('1'))
         self._bar(date(2026, 9, 4), 11, change_pct=Decimal('9'), is_final=False)
         hit = run_screener({'logic': 'all', 'conditions': [

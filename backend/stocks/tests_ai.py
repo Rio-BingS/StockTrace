@@ -14,7 +14,7 @@ from .models import AiCallLog, AiProvider, DailyQuote, Stock
 from .ai.crypto import decrypt_api_key, encrypt_api_key, mask_api_key
 from .ai.llm import LlmClient, LlmError, validate_base_url
 from .ai.prompts import DISCLAIMER
-from .ai.screener import ConditionError, run_screener
+from .screener.engine import ConditionError, run_screener
 from .ai.throttle import check_throttle, daily_limit, log_call
 
 
@@ -686,8 +686,8 @@ class BuiltinStrategyTests(TestCase):
     """内置策略模板：全部 spec 必须可执行（与 run_screener 同一套校验）。"""
 
     def test_all_builtin_specs_are_valid(self):
-        from .ai.screener import _validate
-        from .ai.strategies import BUILTIN_STRATEGIES
+        from .screener.engine import _validate
+        from .screener.strategies import BUILTIN_STRATEGIES
 
         self.assertGreaterEqual(len(BUILTIN_STRATEGIES), 10)
         for s in BUILTIN_STRATEGIES:
