@@ -7,9 +7,10 @@ from pathlib import Path
 
 from cryptography.fernet import Fernet
 from django.conf import settings
+from django.contrib.auth import get_user_model
 from django.core.management import call_command
 from django.core.management.base import CommandError
-from django.test import TestCase, override_settings
+from django.test import Client, TestCase, override_settings
 
 from .ai import crypto
 from .models import AiProvider
@@ -27,6 +28,24 @@ def _load_settings(env_overrides):
         cwd=BACKEND_DIR, env=env, capture_output=True, text=True, timeout=60,
     )
     return proc.returncode, proc.stderr
+
+
+def _settings_values(env_overrides, *names):
+    """在子进程里导入 settings，返回指定变量的 repr 字典"""
+    env = {k: v for k, v in os.environ.items() if not k.startswith(('DJANGO_', 'STOCKTRACE_'))}
+    env.setdefault('DJANGO_SECRET_KEY', _GOOD_SECRET)
+    env.update(env_overrides)
+    code = 'import json, StockTrace.settings as s; print(json.dumps({n: getattr(s, n) for n in %r}))' % (
+        list(names),
+    )
+    proc = subprocess.run(
+        [sys.executable, '-c', code], cwd=BACKEND_DIR, env=env,
+        capture_output=True, text=True, timeout=60,
+    )
+    if proc.returncode != 0:
+        raise AssertionError(proc.stderr)
+    import json
+    return json.loads(proc.stdout.strip().splitlines()[-1])
 
 
 class SecretKeyGuardTests(TestCase):
@@ -136,3 +155,90 @@ class FernetKeyTests(TestCase):
                 call_command('rotate_api_keys', stdout=StringIO())
         good.refresh_from_db()
         self.assertEqual(good.api_key_encrypted, good_token)
+
+
+_HOST = 'stocktrace.yumeat.cc.cd'
+_ORIGIN = 'https://stocktrace.yumeat.cc.cd'
+
+
+class HttpsProxySettingsTests(TestCase):
+    """SEC-05：HTTPS 反代下的受信来源 / Secure Cookie / HSTS 配置"""
+
+    def test_production_defaults(self):
+        v = _settings_values(
+            {'DJANGO_DEBUG': 'False'},
+            'CORS_ALLOWED_ORIGINS', 'CSRF_TRUSTED_ORIGINS', 'SECURE_PROXY_SSL_HEADER',
+            'SESSION_COOKIE_SECURE', 'CSRF_COOKIE_SECURE',
+            'SECURE_HSTS_SECONDS', 'SECURE_HSTS_INCLUDE_SUBDOMAINS',
+        )
+        self.assertEqual(v['CORS_ALLOWED_ORIGINS'], [_ORIGIN])
+        self.assertEqual(v['CSRF_TRUSTED_ORIGINS'], [_ORIGIN])
+        self.assertEqual(v['SECURE_PROXY_SSL_HEADER'], ['HTTP_X_FORWARDED_PROTO', 'https'])
+        self.assertTrue(v['SESSION_COOKIE_SECURE'])
+        self.assertTrue(v['CSRF_COOKIE_SECURE'])
+        self.assertEqual(v['SECURE_HSTS_SECONDS'], 0)
+        self.assertFalse(v['SECURE_HSTS_INCLUDE_SUBDOMAINS'])
+
+    def test_no_http_origin_by_default(self):
+        v = _settings_values({'DJANGO_DEBUG': 'False'}, 'CORS_ALLOWED_ORIGINS')
+        self.assertFalse([o for o in v['CORS_ALLOWED_ORIGINS'] if o.startswith('http:')])
+
+    def test_overrides(self):
+        v = _settings_values(
+            {
+                'DJANGO_DEBUG': 'False',
+                'STOCKTRACE_TRUSTED_ORIGINS': 'https://a.example.com/, https://b.example.com',
+                'STOCKTRACE_SECURE_COOKIES': '0',
+                'STOCKTRACE_HSTS_SECONDS': '31536000',
+                'STOCKTRACE_HSTS_INCLUDE_SUBDOMAINS': '1',
+            },
+            'CORS_ALLOWED_ORIGINS', 'CSRF_TRUSTED_ORIGINS', 'SESSION_COOKIE_SECURE',
+            'SECURE_HSTS_SECONDS', 'SECURE_HSTS_INCLUDE_SUBDOMAINS',
+        )
+        expected = ['https://a.example.com', 'https://b.example.com']
+        self.assertEqual(v['CORS_ALLOWED_ORIGINS'], expected)
+        self.assertEqual(v['CSRF_TRUSTED_ORIGINS'], expected)
+        self.assertFalse(v['SESSION_COOKIE_SECURE'])
+        self.assertEqual(v['SECURE_HSTS_SECONDS'], 31536000)
+        self.assertTrue(v['SECURE_HSTS_INCLUDE_SUBDOMAINS'])
+
+    def test_debug_defaults_to_insecure_cookies(self):
+        v = _settings_values({'DJANGO_DEBUG': 'True'}, 'SESSION_COOKIE_SECURE')
+        self.assertFalse(v['SESSION_COOKIE_SECURE'])
+
+
+@override_settings(
+    ALLOWED_HOSTS=[_HOST], CSRF_TRUSTED_ORIGINS=[_ORIGIN],
+    SESSION_COOKIE_SECURE=True, CSRF_COOKIE_SECURE=True,
+)
+class AdminLoginBehindHttpsProxyTests(TestCase):
+    """SEC-05：Nginx 终止 TLS 后转发 http + X-Forwarded-Proto，admin 登录应 302 而非 403"""
+
+    def setUp(self):
+        get_user_model().objects.create_superuser('admin', 'a@example.com', 'pw-Very-Long-123')
+        self.client = Client(enforce_csrf_checks=True)
+        self.proxy = {
+            'HTTP_HOST': _HOST, 'HTTP_X_FORWARDED_PROTO': 'https', 'HTTP_ORIGIN': _ORIGIN,
+            'HTTP_REFERER': _ORIGIN + '/admin/login/',
+        }
+
+    def _login(self, **extra):
+        resp = self.client.get('/admin/login/', **{**self.proxy, **extra})
+        self.assertEqual(resp.status_code, 200)
+        token = resp.cookies['csrftoken'].value
+        self.assertTrue(resp.cookies['csrftoken']['secure'])
+        return self.client.post(
+            '/admin/login/?next=/admin/',
+            {'username': 'admin', 'password': 'pw-Very-Long-123', 'csrfmiddlewaretoken': token},
+            **{**self.proxy, **extra},
+        )
+
+    def test_admin_login_redirects_behind_https_proxy(self):
+        resp = self._login()
+        self.assertEqual(resp.status_code, 302)
+        self.assertEqual(resp['Location'], '/admin/')
+        self.assertTrue(resp.cookies['sessionid']['secure'])
+
+    def test_untrusted_origin_still_rejected(self):
+        resp = self._login(HTTP_ORIGIN='https://evil.example.com')
+        self.assertEqual(resp.status_code, 403)

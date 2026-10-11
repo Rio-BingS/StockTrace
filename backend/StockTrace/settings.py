@@ -208,12 +208,37 @@ STATIC_URL = 'static/'
 # 静态文件收集目录（生产环境用）
 STATIC_ROOT = '/opt/stocktrace/staticfiles'
 
+# 受信来源（SEC-05）：同时用于 CORS 白名单与 CSRF_TRUSTED_ORIGINS（含 scheme，逗号分隔）。
+# 站点只经 HTTPS 对外，删除了原 http 源，避免明文页面被当作受信来源。
+STOCKTRACE_TRUSTED_ORIGINS = [
+    o.strip().rstrip('/') for o in os.environ.get(
+        'STOCKTRACE_TRUSTED_ORIGINS', 'https://stocktrace.yumeat.cc.cd'
+    ).split(',') if o.strip()
+]
+
 # CORS - 限制只允许指定域名
 CORS_ALLOW_ALL_ORIGINS = False
-CORS_ALLOWED_ORIGINS = [
-    'https://stocktrace.yumeat.cc.cd',
-    'http://stocktrace.yumeat.cc.cd',
-]
+CORS_ALLOWED_ORIGINS = list(STOCKTRACE_TRUSTED_ORIGINS)
+CSRF_TRUSTED_ORIGINS = list(STOCKTRACE_TRUSTED_ORIGINS)
+
+# HTTPS 反代（SEC-05）：TLS 在 Cloudflare/Nginx 终止，Gunicorn 收到的是 http。
+# 不信任 X-Forwarded-Proto 时 request.is_secure() 恒为 False，admin 登录的
+# CSRF Origin 校验（https 源 vs http 请求）必然 403。Nginx 必须覆盖写入该头
+# （proxy_set_header X-Forwarded-Proto $scheme），否则客户端可伪造。
+SECURE_PROXY_SSL_HEADER = ('HTTP_X_FORWARDED_PROTO', 'https')
+# 生产默认 Cookie 只走 HTTPS；本地 http 调试 admin 时可设 STOCKTRACE_SECURE_COOKIES=0
+_secure_cookies = os.environ.get('STOCKTRACE_SECURE_COOKIES', '')
+SECURE_COOKIES = (
+    _secure_cookies.lower() in ('1', 'true', 'yes') if _secure_cookies else not DEBUG
+)
+SESSION_COOKIE_SECURE = SECURE_COOKIES
+CSRF_COOKIE_SECURE = SECURE_COOKIES
+# HSTS 默认关闭（0）：一旦下发，浏览器在有效期内拒绝 http，误配难以撤回；
+# 确认全站 HTTPS 稳定后再按需开启（如 31536000），子域名同理单独开关
+SECURE_HSTS_SECONDS = int(os.environ.get('STOCKTRACE_HSTS_SECONDS', '0'))
+SECURE_HSTS_INCLUDE_SUBDOMAINS = (
+    os.environ.get('STOCKTRACE_HSTS_INCLUDE_SUBDOMAINS', '').lower() in ('1', 'true', 'yes')
+)
 
 # DRF
 # ⚠️ 安全边界：本应用自身没有任何认证/授权（AllowAny、无 CSRF），
