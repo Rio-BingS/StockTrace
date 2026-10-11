@@ -89,3 +89,62 @@ def registry_params(key):
     from .detector import registry
 
     return dict(registry.DIMENSION_MAP[key]['defaults'])
+
+
+def _scan_patches(targets=None, ctx_builder=None, calm_result=(False, {'reason': '不平静'})):
+    """run_scan 的公共打桩：固定收盘后时钟、关掉两融与指数上游。"""
+    from contextlib import ExitStack
+
+    from .tests_detector import _after_close_clock
+
+    stack = ExitStack()
+    stack.enter_context(patch('stocks.services.is_trading_day', _trading_true))
+    stack.enter_context(patch.object(scan, 'timezone', _after_close_clock()))
+    stack.enter_context(patch.object(scan, 'save_margin_snapshot', return_value=0))
+    stack.enter_context(patch.object(scan, 'build_index_context', return_value=(None, '指数日线不可用')))
+    if targets is not None:
+        stack.enter_context(patch.object(scan, '_collect_targets', return_value=targets))
+    if ctx_builder is not None:
+        stack.enter_context(patch.object(scan, '_build_context', side_effect=ctx_builder))
+    if calm_result is not None:
+        stack.enter_context(patch.object(scan.calm_mod, 'is_calm', return_value=calm_result))
+    return stack
+
+
+class FreshnessGateTests(TestCase):
+    """ALG-11：最新数据日早于扫描交易日的对象跳过并记 degraded。"""
+
+    def test_stale_target_is_degraded_and_not_evaluated(self):
+        targets = [
+            {'kind': 'stock', 'code': '000001', 'name': '停牌股'},
+            {'kind': 'stock', 'code': '000002', 'name': '正常股'},
+        ]
+        as_of = {'000001': _TODAY - timedelta(days=30), '000002': _TODAY}
+
+        def build(t):
+            return {'kind': t['kind'], 'code': t['code'], 'as_of': as_of[t['code']].isoformat()}, ''
+
+        with _scan_patches(targets, build):
+            summary = scan.run_scan()
+        self.assertEqual(summary['targets_scanned'], 1)
+        from .models import DetectorRun
+
+        reasons = {d['target']: d['reason'] for d in DetectorRun.objects.get(trade_date=_TODAY).degraded}
+        self.assertIn('数据过期', reasons['stock:000001'])
+        self.assertNotIn('stock:000002', reasons)
+
+    def test_sector_missing_today_snapshot_produces_no_old_dated_signal(self):
+        from .models import MarketDailySnapshot
+        from .tests_detector import SectorSignalScanTests
+
+        seeder = SectorSignalScanTests()
+        seeder.setUp()
+        seeder._seed_full_history()
+        MarketDailySnapshot.objects.filter(trade_date=_TODAY).delete()
+        with _scan_patches(calm_result=None):
+            scan.run_scan()
+        self.assertFalse(DetectorSignal.objects.filter(target_kind='industry').exists())
+        from .models import DetectorRun
+
+        reasons = {d['target']: d['reason'] for d in DetectorRun.objects.get(trade_date=_TODAY).degraded}
+        self.assertIn('数据过期', reasons['industry:测试行业'])

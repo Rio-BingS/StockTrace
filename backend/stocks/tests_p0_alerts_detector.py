@@ -220,7 +220,8 @@ class ScanTargetIsolationTests(TestCase):
                 patch.object(scan, 'save_margin_snapshot', return_value=0), \
                 patch.object(scan, '_collect_targets', return_value=targets), \
                 patch.object(scan, '_build_context',
-                             side_effect=lambda t: ({'kind': t['kind'], 'code': t['code']}, None)), \
+                             side_effect=lambda t: ({'kind': t['kind'], 'code': t['code'],
+                                                     'as_of': _TODAY.isoformat()}, None)), \
                 patch.object(scan.calm_mod, 'is_calm', side_effect=fake_calm), \
                 self.assertLogs('stocks.detector.scan', level='ERROR'):
             summary = scan.run_scan()

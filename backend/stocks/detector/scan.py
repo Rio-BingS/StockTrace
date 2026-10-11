@@ -104,6 +104,20 @@ def _build_context(target):
     return build_sector_context(kind, target['code'])
 
 
+def _stale_reason(ctx, trade_date):
+    """对象数据日期与扫描交易日不一致时返回降级原因，一致返回空串。"""
+    as_of = ctx.get('as_of')
+    try:
+        as_of_date = signals._as_date(as_of) if as_of else None
+    except (TypeError, ValueError):
+        as_of_date = None
+    if as_of_date is None:
+        return '数据日期缺失，无法校验新鲜度'
+    if as_of_date != trade_date:
+        return f'数据过期：最新数据日 {as_of_date.isoformat()}，扫描交易日 {trade_date.isoformat()}'
+    return ''
+
+
 def _sort_matrix_key(row):
     values = [abs(v) for v in row['values'].values() if v is not None]
     return max(values) if values else 0.0
@@ -144,12 +158,19 @@ def run_scan(trade_date=None):
             ctx, err = _build_context(target)
         except Exception as e:  # noqa: BLE001  单对象异常只降级自己
             ctx, err = None, f'序列构建异常: {e}'
+        target_key = f"{target['kind']}:{target['code']}"
         if ctx is None:
-            degraded.append({'target': f"{target['kind']}:{target['code']}", 'reason': err})
+            degraded.append({'target': target_key, 'reason': err})
+            continue
+        # 新鲜度闸门（ALG-11）：对象最新数据日必须就是扫描交易日。停牌、日线
+        # 拉取持续失败或板块当日缺快照时，旧数据会以旧日期产出「今天」的信号、
+        # 重复计数并立刻满足回看 cutoff——如实降级，不评估。
+        stale_reason = _stale_reason(ctx, trade_date)
+        if stale_reason:
+            degraded.append({'target': target_key, 'reason': stale_reason})
             continue
 
         scanned += 1
-        target_key = f"{target['kind']}:{target['code']}"
         # 平静判定与维度评估同样按单对象隔离：一个对象的脏序列不能让整轮扫描崩溃（P0 ALG-01）
         try:
             is_calm, _meta = calm_mod.is_calm(ctx)
