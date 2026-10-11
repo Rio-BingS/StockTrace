@@ -344,3 +344,67 @@ class AiAnalysisFinalQuotesTests(TestCase):
         self.assertIn('最新交易日：2026-09-04', text)
         self.assertNotIn('2026-09-07', text)
         self.assertNotIn('11.11', text)
+
+
+class SchedulerStepIsolationTests(TestCase):
+    """REL-08：任务链逐步容错；探测器按快照依赖延后重试。"""
+
+    def test_daily_summary_failure_does_not_skip_later_steps(self):
+        from stocks import scheduler
+        calls = []
+        with mock.patch('stocks.services.fetch_daily_summary', side_effect=RuntimeError('x')), \
+                mock.patch.object(scheduler, '_evaluate_alerts', lambda: calls.append('alerts')), \
+                mock.patch.object(scheduler, '_cleanup_ai_logs', lambda: calls.append('ai')), \
+                mock.patch.object(scheduler, '_cleanup_market_snapshots',
+                                  side_effect=lambda: calls.append('snap')), \
+                self.assertLogs('stocks.scheduler', level='ERROR') as logs:
+            failed = scheduler._daily_summary_job()
+        self.assertEqual(calls, ['alerts', 'ai', 'snap'])
+        self.assertEqual(failed, ['收盘日线汇总'])
+        self.assertTrue(any('Traceback' in line for line in logs.output))
+
+    def test_intraday_failure_still_evaluates_alerts(self):
+        from stocks import scheduler
+        calls = []
+        with mock.patch('stocks.services.fetch_intraday_update', side_effect=RuntimeError('x')), \
+                mock.patch.object(scheduler, '_evaluate_alerts', lambda: calls.append('alerts')), \
+                self.assertLogs('stocks.scheduler', level='ERROR'):
+            scheduler._intraday_job()
+        self.assertEqual(calls, ['alerts'])
+
+    def _at(self, hh, mm):
+        from datetime import datetime
+        from zoneinfo import ZoneInfo
+        return datetime(2026, 9, 7, hh, mm, tzinfo=ZoneInfo('Asia/Shanghai'))
+
+    def _run_detector(self, hh, mm):
+        from stocks import scheduler
+        with mock.patch('stocks.services.is_trading_day', return_value=True), \
+                mock.patch('stocks.scheduler.timezone.localtime', return_value=self._at(hh, mm)), \
+                mock.patch('stocks.detector.scan.run_scan') as run_scan:
+            scheduler._detector_scan_job()
+        return run_scan
+
+    def test_detector_defers_until_snapshots_ready(self):
+        from datetime import date
+        from stocks.models import DetectorRun, MarketDailySnapshot
+        with self.assertLogs('stocks.scheduler', level='WARNING'):
+            self.assertFalse(self._run_detector(17, 15).called)
+        for kind in ('industry_ff', 'market_ff'):
+            MarketDailySnapshot.objects.create(kind=kind, trade_date=date(2026, 9, 7), payload={})
+        self.assertTrue(self._run_detector(17, 45).called)
+        # 当日已扫过：后续重试点直接跳过
+        DetectorRun.objects.create(trade_date=date(2026, 9, 7), status='ok')
+        self.assertFalse(self._run_detector(18, 15).called)
+
+    def test_detector_last_attempt_runs_degraded(self):
+        with self.assertLogs('stocks.scheduler', level='WARNING'):
+            self.assertTrue(self._run_detector(18, 45).called)
+
+    def test_detector_cron_has_retry_slots(self):
+        from apscheduler.schedulers.background import BackgroundScheduler
+        from stocks.scheduler import register_jobs
+        sched = register_jobs(BackgroundScheduler())
+        trigger = str(sched.get_job('detector_scan').trigger)
+        self.assertIn("hour='17-18'", trigger)
+        self.assertIn("minute='15,45'", trigger)

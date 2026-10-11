@@ -152,18 +152,39 @@ def _release_lock():
     _lock_fh = None
 
 
+def _run_steps(job_name, steps):
+    """逐步执行任务链（REL-08）：每一步单独 try，前一步异常不跳过后面的提醒与清理。
+
+    steps: [(步骤名, 可调用对象)]。返回失败的步骤名列表；全部失败信息带堆栈写日志。
+    """
+    failed = []
+    for name, step in steps:
+        try:
+            step()
+        except Exception:
+            failed.append(name)
+            logger.exception(f'定时任务 {job_name} 的步骤「{name}」失败，继续后续步骤')
+    if failed:
+        logger.error(f'定时任务 {job_name} 完成，失败步骤：{"、".join(failed)}')
+    return failed
+
+
 def _intraday_job():
     from .services import fetch_intraday_update
-    fetch_intraday_update()
-    _evaluate_alerts()
+    return _run_steps('intraday_fetch', [
+        ('盘中行情拉取', fetch_intraday_update),
+        ('价格提醒评估', _evaluate_alerts),
+    ])
 
 
 def _daily_summary_job():
     from .services import fetch_daily_summary
-    fetch_daily_summary()
-    _evaluate_alerts()
-    _cleanup_ai_logs()
-    _cleanup_market_snapshots()
+    return _run_steps('daily_summary', [
+        ('收盘日线汇总', fetch_daily_summary),
+        ('价格提醒评估', _evaluate_alerts),
+        ('AI 调用记录清理', _cleanup_ai_logs),
+        ('市场快照清理', _cleanup_market_snapshots),
+    ])
 
 
 def _evaluate_alerts():
@@ -171,8 +192,8 @@ def _evaluate_alerts():
     from .alerts import evaluate_alerts
     try:
         evaluate_alerts()
-    except Exception as e:
-        logger.error(f"价格提醒评估失败: {e}")
+    except Exception:
+        logger.exception("价格提醒评估失败")
 
 
 def _cleanup_ai_logs():
@@ -267,12 +288,39 @@ def _post_close_lagging_job():
     warm_post_close_lagging()
 
 
+# 探测器依赖的当日快照（REL-08）：17:15 首次尝试，缺快照则每 30 分钟重试，
+# 最后一次（18:45）不再等待，降级照跑（维度自行标记降级）
+_DETECTOR_REQUIRED_SNAPSHOTS = ('industry_ff', 'market_ff')
+_DETECTOR_LAST_ATTEMPT = dt_time(18, 45)
+
+
+def _detector_dependencies_ready(trade_date):
+    """返回 (是否应现在扫描, 原因)。已扫过的当日不重复；快照未齐且非最后一次则延后。"""
+    from .models import DetectorRun, MarketDailySnapshot
+
+    done = DetectorRun.objects.filter(trade_date=trade_date).exclude(status='failed').exists()
+    if done:
+        return False, 'already_done'
+    have = set(MarketDailySnapshot.objects.filter(
+        trade_date=trade_date, kind__in=_DETECTOR_REQUIRED_SNAPSHOTS,
+    ).values_list('kind', flat=True))
+    missing = [k for k in _DETECTOR_REQUIRED_SNAPSHOTS if k not in have]
+    if not missing:
+        return True, 'ready'
+    if timezone.localtime().time() >= _DETECTOR_LAST_ATTEMPT:
+        logger.warning(f'探测器最后一次尝试：当日快照仍缺 {missing}，降级扫描')
+        return True, 'degraded'
+    logger.warning(f'探测器延后：当日快照未落库 {missing}，30 分钟后重试')
+    return False, 'waiting'
+
+
 def _detector_scan_job():
-    """探测器日度扫描：每交易日 17:15（快照已落库、两融 T+1 基本可取）。
+    """探测器日度扫描：每交易日 17:15 起（快照已落库、两融 T+1 基本可取）。
 
     为什么 17:15 独立成任务而不是并入 15:30 预热链：板块/大盘快照要等
     15:30/16:00 两轮预热写完，且融资余额快照只应每天探测一次（深市按日
-    探测有请求成本）；失败只记日志，不影响其他任务。
+    探测有请求成本）；失败只记日志，不影响其他任务。按依赖编排（REL-08）：
+    当日 industry_ff/market_ff 快照未落库则延后 30 分钟重试，最多 3 次。
     """
     if os.environ.get('STOCKTRACE_DETECTOR', '1').lower() in ('0', 'false', 'no', 'off'):
         return
@@ -287,12 +335,16 @@ def _detector_scan_job():
         logger.debug('未到 15:30 收盘，跳过探测器扫描')
         return
 
+    ready, _reason = _detector_dependencies_ready(now.date())
+    if not ready:
+        return
+
     from .detector.scan import run_scan
 
     try:
         run_scan()
-    except Exception as e:
-        logger.error(f'探测器扫描失败: {e}')
+    except Exception:
+        logger.exception('探测器扫描失败')
 
 
 # 任务互斥（REL-04）：与手动拉取、管理命令共用 task_lock 的同名锁。
@@ -357,10 +409,11 @@ def register_jobs(sched):
         CronTrigger(day_of_week='mon-fri', hour='15,16,17,18,19,20,21', minute='0,30', timezone=SCHEDULER_TZ),
         'post_close_lagging', 900)
 
-    # 探测器：交易日 17:15（板块/大盘快照已在前两轮预热落库）
+    # 探测器：交易日 17:15（板块/大盘快照已在前两轮预热落库）；
+    # 17:45/18:15/18:45 为依赖未齐时的重试点，当日已扫过则直接跳过（REL-08）
     add(_guarded(_detector_scan_job, 'detector_scan', _DAILY_WAIT_SECONDS),
-        CronTrigger(day_of_week='mon-fri', hour=17, minute=15, timezone=SCHEDULER_TZ),
-        'detector_scan', 3600)
+        CronTrigger(day_of_week='mon-fri', hour='17-18', minute='15,45', timezone=SCHEDULER_TZ),
+        'detector_scan', 1500)
 
     # 分钟 K 线保留期清理：每日 02:30 低峰执行（PERF-02）
     add(_guarded(_minute_bar_cleanup_job, 'minute_bar_cleanup', _DAILY_WAIT_SECONDS),
