@@ -8,21 +8,29 @@
 3. 新增维度 = 注册表加一个条目 + dimensions.py 加一个评估函数，扫描、
    热力图、配置页自动跟上。
 
-params 约定：
+params 约定（阈值一律用「自身分布单位」表达，#1）：
 - min   投票下限：|原始漂移| 低于它视为「没有微变」；
-- mild  温和带上限的归一化基准（value = raw/mild×50）；
-- max   突变上限：超过它说明已不是「早期迹象」，如实不投票；
+- mild  温和带的归一化基准（value = raw/mild×50）；
+- max   旧的跨品种绝对突变上限。噪声闸门开启且配置了 noise_hi 时不再参与
+  （上限改为 noise_hi × 自身噪声带）；库里旧配置行残留的 max 因此失效；
 - 迭代优化（review.py）只微调 min（灵敏度）与权重，min 的调整边界是
   [0.5×, 2×] 默认值，权重边界 [0.5, 2.0]，防止自动调参失控；
-- noise_pct / noise_window / noise_min  噪声闸门（ALG-04）：|原始漂移| 还须
-  超过自身近 noise_window 个历史漂移绝对值的 noise_pct 分位才投票，历史不足
-  noise_min 个不投票。min 是跨品种绝对常数，单靠它在随机游走上也会大量出
-  信号；噪声闸门不参与自动调参，noise_pct 置 0 即关闭；
-- compress_pct / drift_z  波动率压缩专用：当前宽度 ≤ 自身历史 compress_pct
-  分位才算压缩，压缩期漂移的 t 值 ≥ drift_z 才投票（2.13≈自由度 4 的双侧 10%）。
+- noise_pct / noise_window / noise_min / noise_hi  噪声闸门（ALG-04/#10）：
+  |原始漂移| 须超过自身近 noise_window 个历史漂移绝对值的 noise_pct 分位
+  （Harrell-Davis 估计）才投票，且不超过 noise_hi 倍该分位；历史不足 noise_min
+  个不投票。噪声闸门不参与自动调参，noise_pct 置 0 即关闭；
+- z_lo / z_hi / z_mild / sigma_window / sigma_min  价格类维度（vol_compress、
+  ma_relation）：raw 先除以由近 sigma_window 个日收益 σ 解析推导的噪声尺度
+  得到 z，z_lo < |z| ≤ z_hi 才投票，value = z/z_mild×50。随机游走下 |z| 近似
+  标准正态，单维度名义投票率 2·(Φ(−z_lo) − Φ(−z_hi))，与标的波动率无关；
+  z_lo=0 即关闭下限闸门；
+- compress_pct  波动率压缩专用：当前宽度 ≤ 自身历史 compress_pct 分位才算压缩。
+  （旧参数 drift_z=2.13 的注释称「≈自由度 4 的双侧 10%」，但 t 的分母取自按
+  「标准差小」筛出的同一窗口，压缩条件下实际假阳约 28%，已改为 σ60 的 z，#3/#17。）
 
 校准依据：backend/stocks/tests_p2_detector.py 的随机游走回归测试——默认参数
-下平静对象的噪声信号率须 < 5%（修复前约 31%）。
+下平静对象的噪声信号率须 < 5%（修复前约 31%）；以及 detector-research 回测原型
+的合成数据（纯噪声假阳率、植入形态检测力）与真实缓存数据对比。
 """
 
 from __future__ import annotations
