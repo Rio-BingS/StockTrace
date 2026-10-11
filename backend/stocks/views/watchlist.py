@@ -9,7 +9,7 @@ from rest_framework import status, viewsets
 from rest_framework.decorators import action, api_view
 from rest_framework.response import Response
 
-from ..common.envelope import list_response
+from ..common.envelope import EnvelopePagination, list_response, wants_envelope
 from ..common.params import parse_bool, parse_date, positive_int
 from ..models import DailyQuote, MinuteBar, Stock
 from ..serializers import (
@@ -36,6 +36,21 @@ class StockViewSet(viewsets.ModelViewSet):
     """关注股票 CRUD"""
     queryset = Stock.objects.filter(is_active=True)
     serializer_class = StockSerializer
+
+    @property
+    def paginator(self):
+        """?envelope=1 时改用外壳分页（ARC-04 步骤 4d），否则沿用全局 PageNumberPagination。
+
+        旧输出 {count, next, previous, results} 在过渡期保持不变；外壳模式支持
+        ?page_size=N（上限 1000），前端 api 层据 total_pages 取齐全量自选。
+        """
+        if not hasattr(self, '_paginator'):
+            request = getattr(self, 'request', None)
+            if request is not None and wants_envelope(request):
+                self._paginator = EnvelopePagination()
+            else:
+                self._paginator = self.pagination_class() if self.pagination_class else None
+        return self._paginator
 
     def create(self, request, *args, **kwargs):
         """添加关注：如果股票已存在但被软删除，则恢复；创建/恢复后后台拉行情"""

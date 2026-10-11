@@ -255,3 +255,59 @@ class WantsEnvelopeTests(SimpleTestCase):
             self.assertTrue(wants_envelope(self._req()))
             self.assertTrue(wants_envelope(self._req('?envelope=')))
             self.assertFalse(wants_envelope(self._req('?envelope=0')))
+
+
+# ------------------------------------------------------------
+# 自选列表 ?envelope=1：EnvelopePagination（步骤 4d）
+# ------------------------------------------------------------
+
+class StockListEnvelopeTests(ListFixtureMixin, TestCase):
+    def _get(self, **params):
+        r = self.client.get('/api/stocks/', {'envelope': 1, **params})
+        self.assertEqual(r.status_code, 200)
+        return r.json()
+
+    def test_default_page_contains_all_items(self):
+        body = self._get()
+        self.assertEqual(list(body), ['items', 'pagination', 'meta'])
+        self.assertEqual(body['pagination'], {'page': 1, 'page_size': 100, 'total': 2, 'total_pages': 1})
+        self.assertEqual(body['meta'], {})
+        legacy = self.client.get('/api/stocks/').json()
+        self.assertEqual(body['items'], legacy['results'])
+
+    def test_page_size_and_clamping(self):
+        Stock.objects.create(code='600036', name='招商银行')
+        body = self._get(page_size=2, page=2)
+        self.assertEqual([s['code'] for s in body['items']], ['600036'])
+        self.assertEqual(body['pagination'], {'page': 2, 'page_size': 2, 'total': 3, 'total_pages': 2})
+        # 超出总页数钳到最后一页、非法页码回到第 1 页（DRF 默认是 404）
+        self.assertEqual(self._get(page_size=2, page=99)['pagination']['page'], 2)
+        self.assertEqual(self._get(page_size=2, page='abc')['pagination']['page'], 1)
+        # page_size 上限 1000，非法值回到默认 100
+        self.assertEqual(self._get(page_size=5000)['pagination']['page_size'], 1000)
+        self.assertEqual(self._get(page_size=0)['pagination']['page_size'], 100)
+        self.assertEqual(self._get(page_size='x')['pagination']['page_size'], 100)
+
+    def test_more_than_legacy_page_size(self):
+        """旧分页每页 100 条会截断；外壳模式可用 page_size 一次取全。"""
+        Stock.objects.bulk_create([Stock(code=f'{688000 + i}', name=f'S{i}') for i in range(120)])
+        legacy = self.client.get('/api/stocks/').json()
+        self.assertEqual((legacy['count'], len(legacy['results'])), (122, 100))
+        body = self._get(page_size=1000)
+        self.assertEqual(len(body['items']), 122)
+        self.assertEqual(body['pagination']['total_pages'], 1)
+        self.assertEqual(self._get()['pagination'], {'page': 1, 'page_size': 100, 'total': 122, 'total_pages': 2})
+
+    def test_empty_list(self):
+        Stock.objects.update(is_active=False)
+        self.assertEqual(self._get(), {
+            'items': [], 'pagination': {'page': 1, 'page_size': 100, 'total': 0, 'total_pages': 1}, 'meta': {},
+        })
+
+    def test_detail_and_actions_unaffected(self):
+        r = self.client.get(f'/api/stocks/{self.s1.id}/', {'envelope': 1})
+        self.assertEqual(r.json()['code'], '600000')
+        r = self.client.patch(f'/api/stocks/{self.s1.id}/?envelope=1', {'quantity': 200},
+                              content_type='application/json')
+        self.assertEqual(r.status_code, 200)
+        self.assertEqual(r.json()['quantity'], 200)

@@ -14,6 +14,8 @@ meta 总是对象，放与条目无关的上下文（查询条件、截断标记
 """
 
 from django.conf import settings
+from django.core.paginator import Paginator
+from rest_framework.pagination import PageNumberPagination
 from rest_framework.response import Response
 
 from .params import parse_bool
@@ -53,3 +55,50 @@ def list_response(request, items, *, pagination=None, meta=None):
         return Response(envelope(items, pagination, meta if meta is not None else {}))
     return Response(items)
 
+
+class EnvelopePagination(PageNumberPagination):
+    """自选列表等 DRF 列表的外壳分页（ARC-04 步骤 4d）。
+
+    与全局 PageNumberPagination 的区别：
+    - 输出 {items, pagination, meta}，pagination 字段与 common.pagination.paginate 一致；
+    - 支持 ?page_size=N（上限 max_page_size），便于前端一次取全量自选；
+    - page 非法回到第 1 页、超出总页数钳到最后一页（与板块/ETF/探测器分页口径一致），
+      不像 DRF 默认那样返回 404。
+    """
+
+    page_size_query_param = 'page_size'
+    max_page_size = 1000
+
+    def paginate_queryset(self, queryset, request, view=None):
+        page_size = self.get_page_size(request)
+        if not page_size:
+            return None
+        self.request = request
+        self.page = Paginator(queryset, page_size).get_page(request.query_params.get(self.page_query_param))
+        return list(self.page)
+
+    def get_pagination(self):
+        paginator = self.page.paginator
+        return {
+            'page': self.page.number,
+            'page_size': paginator.per_page,
+            'total': paginator.count,
+            'total_pages': paginator.num_pages,
+        }
+
+    def get_paginated_response(self, data):
+        return Response(envelope(data, self.get_pagination(), {}))
+
+    def get_paginated_response_schema(self, schema):
+        return {
+            'type': 'object',
+            'required': list(ENVELOPE_KEYS),
+            'properties': {
+                'items': schema,
+                'pagination': {
+                    'type': 'object',
+                    'properties': {k: {'type': 'integer'} for k in ('page', 'page_size', 'total', 'total_pages')},
+                },
+                'meta': {'type': 'object'},
+            },
+        }
