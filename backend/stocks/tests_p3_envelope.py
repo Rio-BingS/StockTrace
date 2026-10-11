@@ -311,3 +311,44 @@ class StockListEnvelopeTests(ListFixtureMixin, TestCase):
                               content_type='application/json')
         self.assertEqual(r.status_code, 200)
         self.assertEqual(r.json()['quantity'], 200)
+
+
+# ------------------------------------------------------------
+# 探测器信号列表改用 envelope() 组装：键顺序与字节不变（步骤 4a 收尾）
+# ------------------------------------------------------------
+
+def _trading_true(_d):
+    return True
+
+
+@mock.patch('stocks.trading_calendar.is_trading_day', _trading_true)
+class DetectorSignalsEnvelopeTests(SnapshotMixin, TestCase):
+    def setUp(self):
+        from .models import DetectorRun, DetectorSignal
+
+        for target, value in (
+            ('django.utils.timezone.now', _FIXED_NOW),
+            ('django.utils.timezone.localdate', _TODAY),
+        ):
+            p = mock.patch(target, return_value=value)
+            p.start()
+            self.addCleanup(p.stop)
+        DetectorRun.objects.create(trade_date=_TODAY, status='ok', targets_scanned=10, calm_count=5, matrix={})
+        for code, sev, score in (('半导体', DetectorSignal.SEVERITY_HIGH, 55), ('银行', DetectorSignal.SEVERITY_LOW, 20)):
+            DetectorSignal.objects.create(
+                target_kind='industry', target_code=code, target_name=code,
+                trade_date=_TODAY, direction='up', cycles=2, score=score,
+                severity=sev, status=DetectorSignal.STATUS_ACTIVE,
+                dimensions={'vol_compress': {'name': '波动率压缩', 'value': 42, 'direction': 'up',
+                                             'weight': 1.0, 'available': True, 'note': ''}},
+            )
+
+    def test_signals_output_and_key_order(self):
+        for key, params in (('detector_signals', {}), ('detector_signals_page2', {'page': 2, 'page_size': 1}),
+                            ('detector_signals_empty', {'date': '2020-01-01'})):
+            with self.subTest(key=key):
+                r = self.client.get('/api/detector/signals/', params)
+                self.assertEqual(r.status_code, 200)
+                self.assertEqual(list(r.json()),
+                                 ['meta', 'trade_date', 'latest_run', 'summary', 'pagination', 'items'])
+                self.assertSnapshot(key, r.content.decode())

@@ -16,6 +16,7 @@ from rest_framework import status
 from rest_framework.decorators import api_view
 from rest_framework.response import Response
 
+from ..common.envelope import envelope
 from ..common.pagination import paginate as _paginate
 from ..common.params import parse_bool, parse_date, positive_int
 from ..trading_calendar import expected_latest_date
@@ -33,6 +34,9 @@ _META_DISCLAIMER = (
     '历史命中不代表未来表现。委比挂单、板块内分化两维度因无数据源暂未启用。'
 )
 
+
+# 信号列表已上线的 JSON 键顺序，接入 common.envelope 时保持不变（ARC-04）
+_SIGNALS_KEY_ORDER = ('meta', 'trade_date', 'latest_run', 'summary', 'pagination', 'items')
 
 # DetectorRun 里的大 JSON 字段：列表/元信息只用标量，读这些字段纯属浪费（PERF-09）
 _HEAVY_RUN_FIELDS = ('matrix', 'degraded', 'adjustments')
@@ -166,14 +170,13 @@ def detector_signals(request):
         summary['by_direction'][row['direction']] = summary['by_direction'].get(row['direction'], 0) + 1
         summary['by_status'][row['status']] = summary['by_status'].get(row['status'], 0) + 1
 
-    return Response({
-        'meta': _meta(latest_run),
-        'trade_date': trade_date.isoformat() if trade_date else (latest_run.trade_date.isoformat() if latest_run else None),
-        'latest_run': _run_brief(latest_run) if latest_run else None,
-        'summary': summary,
-        'pagination': pagination,
-        'items': items,
-    })
+    return Response(envelope(
+        items, pagination, _meta(latest_run),
+        key_order=_SIGNALS_KEY_ORDER,
+        trade_date=trade_date.isoformat() if trade_date else (latest_run.trade_date.isoformat() if latest_run else None),
+        latest_run=_run_brief(latest_run) if latest_run else None,
+        summary=summary,
+    ))
 
 
 def _run_brief(run):
