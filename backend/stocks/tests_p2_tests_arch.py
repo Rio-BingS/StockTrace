@@ -129,6 +129,19 @@ class CalendarFunctionTests(SimpleTestCase):
         self.assertFalse(cal.data_changing_now(timezone.make_aware(datetime(2026, 10, 10, 10, 0), tz)))
 
 
+class TradingTimeTests(SimpleTestCase):
+    def test_session_boundaries(self):
+        from stocks import trading_calendar as cal
+        tz = timezone.get_default_timezone()
+        cases = [((9, 29), False), ((9, 30), True), ((10, 59), True), ((11, 30), True),
+                 ((11, 31), False), ((12, 59), False), ((13, 0), True), ((14, 59), True),
+                 ((15, 0), True), ((15, 1), False)]
+        for (h, m), expected in cases:
+            with self.subTest(t=f'{h}:{m:02d}'):
+                dt = timezone.make_aware(datetime(2026, 10, 12, h, m), tz)
+                self.assertIs(cal.is_trading_time(dt), expected)
+
+
 @patch('stocks.trading_calendar.is_trading_day', side_effect=_fake_is_trading_day)
 class LegacyWrapperTests(SimpleTestCase):
     """旧位置的薄包装与新模块结果一致（合并期间其他方向仍可能调用旧名）。"""
