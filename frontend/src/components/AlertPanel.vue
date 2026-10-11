@@ -2,6 +2,7 @@
 import { onMounted, onUnmounted, ref } from 'vue'
 import { alertApi } from '../api/stocks.js'
 import { formatDateTime } from '../utils/format.js'
+import { errorMessage } from '../utils/errorMessage.js'
 
 // stocks：看板数据（用于添加规则的股票下拉）
 defineProps({
@@ -36,8 +37,8 @@ async function load() {
     unreadCount.value = rulesRes.data.unread_count
     events.value = eventsRes.data
     errorMsg.value = ''
-  } catch {
-    errorMsg.value = '加载提醒数据失败'
+  } catch (e) {
+    errorMsg.value = errorMessage(e, '加载提醒数据失败')
   }
 }
 
@@ -58,7 +59,7 @@ async function addRule() {
     form.value = { stock_id: '', rule_type: f.rule_type, threshold: '', note: '' }
     await load()
   } catch (err) {
-    errorMsg.value = err.response?.data?.detail || '创建提醒失败'
+    errorMsg.value = errorMessage(err, '创建提醒失败')
   } finally {
     loading.value = false
   }
@@ -68,8 +69,8 @@ async function toggleRule(rule) {
   try {
     await alertApi.update(rule.id, { is_active: !rule.is_active })
     await load()
-  } catch {
-    errorMsg.value = '更新提醒失败'
+  } catch (e) {
+    errorMsg.value = errorMessage(e, '更新提醒失败')
   }
 }
 
@@ -78,8 +79,8 @@ async function removeRule(rule) {
   try {
     await alertApi.remove(rule.id)
     await load()
-  } catch {
-    errorMsg.value = '删除提醒失败'
+  } catch (e) {
+    errorMsg.value = errorMessage(e, '删除提醒失败')
   }
 }
 
@@ -87,8 +88,8 @@ async function markAllRead() {
   try {
     await alertApi.markRead()
     await load()
-  } catch {
-    errorMsg.value = '标记已读失败'
+  } catch (e) {
+    errorMsg.value = errorMessage(e, '标记已读失败')
   }
 }
 

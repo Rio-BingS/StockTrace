@@ -7,6 +7,7 @@ import EtfDetailPanel from '../components/EtfDetailPanel.vue'
 import { marketApi } from '../api/stocks.js'
 import { formatNum, formatPct, pctClass } from '../utils/format.js'
 import { formatAmount, formatShare } from '../utils/marketFormat.js'
+import { errorMessage } from '../utils/errorMessage.js'
 
 const route = useRoute()
 const router = useRouter()
@@ -59,7 +60,7 @@ async function load(resetPage = false) {
     })
     data.value = res.data
     page.value = res.data?.pagination?.page || 1
-  } catch (e) { error.value = e.response?.data?.detail || '加载 ETF 雷达失败' }
+  } catch (e) { error.value = errorMessage(e, '加载 ETF 雷达失败') }
   finally { loading.value = false }
 }
 

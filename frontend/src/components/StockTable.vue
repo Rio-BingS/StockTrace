@@ -6,6 +6,8 @@ import { stockApi } from '../api/stocks.js'
 defineProps({
   data: { type: Array, default: () => [] },
   loading: { type: Boolean, default: false },
+  // 加载失败文案：有值时空状态显示错误而不是误导性的"暂无数据"
+  error: { type: String, default: '' },
   groups: { type: Array, default: () => [] },
 })
 
@@ -208,7 +210,8 @@ async function handleDelete(e, item) {
           </tr>
         </template>
         <tr v-if="!data.length">
-          <td colspan="8" class="empty">暂无数据，请先添加关注的股票并点击"刷新数据"</td>
+          <td v-if="error" colspan="8" class="empty error">{{ error }}</td>
+          <td v-else colspan="8" class="empty">暂无数据，请先添加关注的股票并点击"刷新数据"</td>
         </tr>
       </tbody>
     </table>
@@ -315,6 +318,10 @@ async function handleDelete(e, item) {
   text-align: center;
   color: #666;
   padding: 40px !important;
+}
+
+.empty.error {
+  color: #ff8a96;
 }
 
 /* 展开行 */

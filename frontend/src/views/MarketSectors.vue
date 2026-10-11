@@ -10,6 +10,7 @@ import { marketApi } from '../api/stocks.js'
 import { formatDateTime, formatPct, pctClass } from '../utils/format.js'
 import { formatAmount } from '../utils/marketFormat.js'
 import { signedAmount } from '../utils/sectorFlow.js'
+import { errorMessage } from '../utils/errorMessage.js'
 
 const route = useRoute()
 const router = useRouter()
@@ -49,7 +50,7 @@ async function load(reset = false) {
     page.value = data.value.pagination?.page || 1
     syncUrl()
   } catch (e) {
-    error.value = e.response?.data?.detail || '加载板块资金失败'
+    error.value = errorMessage(e, '加载板块资金失败')
   } finally {
     loading.value = false
   }

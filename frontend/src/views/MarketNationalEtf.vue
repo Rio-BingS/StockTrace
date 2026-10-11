@@ -13,6 +13,7 @@ import PeriodPicker from '../components/PeriodPicker.vue'
 import { marketApi } from '../api/stocks.js'
 import { formatPct, formatNum, pctClass } from '../utils/format.js'
 import { formatAmount, formatShare } from '../utils/marketFormat.js'
+import { errorMessage } from '../utils/errorMessage.js'
 
 use([BarChart, GridComponent, TooltipComponent, CanvasRenderer])
 
@@ -46,7 +47,7 @@ function pctSigned(val) {
 async function load() {
   loading.value = true; error.value = ''
   try { data.value = (await marketApi.getNationalEtf()).data }
-  catch (e) { error.value = e.response?.data?.detail || '加载观察名单失败' }
+  catch (e) { error.value = errorMessage(e, '加载观察名单失败') }
   finally { loading.value = false }
 }
 function select(row) { selectedCode.value = row.code; router.replace({ query: { code: row.code } }) }
@@ -70,7 +71,7 @@ async function loadFlow() {
       ? { start: flowCustomStart.value, end: flowCustomEnd.value }
       : { period: flowPeriod.value }
     flowData.value = (await marketApi.getNationalEtfFlow(params)).data
-  } catch (e) { flowError.value = e.response?.data?.detail || '加载区间资金流向失败' }
+  } catch (e) { flowError.value = errorMessage(e, '加载区间资金流向失败') }
   finally { flowLoading.value = false }
 }
 function setFlowPeriod(p) {

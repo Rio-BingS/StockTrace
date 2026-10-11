@@ -14,6 +14,7 @@ import MarketSubNav from '../components/MarketSubNav.vue'
 import PeriodPicker from '../components/PeriodPicker.vue'
 import { marketApi } from '../api/stocks.js'
 import { formatPct, pctClass } from '../utils/format.js'
+import { errorMessage } from '../utils/errorMessage.js'
 
 use([
   LineChart,
@@ -120,7 +121,7 @@ async function load() {
     data.value = res.data
   } catch (e) {
     console.error(e)
-    error.value = e.response?.data?.detail || '加载走势失败'
+    error.value = errorMessage(e, '加载走势失败')
   } finally {
     loading.value = false
   }

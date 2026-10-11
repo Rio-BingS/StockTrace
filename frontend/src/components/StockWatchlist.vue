@@ -1,6 +1,7 @@
 <script setup>
 import { ref, onUnmounted } from 'vue'
 import { stockApi } from '../api/stocks.js'
+import { errorMessage } from '../utils/errorMessage.js'
 
 const emit = defineEmits(['refresh'])
 
@@ -48,7 +49,7 @@ async function addStock(code, name) {
     if (e.response?.data?.code) {
       alert('该股票已在关注列表中')
     } else {
-      alert('添加失败，请重试')
+      alert(errorMessage(e, '添加失败'))
     }
   } finally {
     adding.value = false

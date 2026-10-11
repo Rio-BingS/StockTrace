@@ -14,6 +14,7 @@ import { marketApi } from '../api/stocks.js'
 import PeriodPicker from '../components/PeriodPicker.vue'
 import { formatPct, formatNum, pctClass } from '../utils/format.js'
 import { formatYi, formatYiAxis, formatTurnover, formatAmount } from '../utils/marketFormat.js'
+import { errorMessage } from '../utils/errorMessage.js'
 
 use([
   BarChart,
@@ -65,7 +66,7 @@ async function loadFlow() {
     flowData.value = (await marketApi.getMarketFlow({ period: flowPeriod.value })).data
   } catch (e) {
     console.error(e)
-    flowError.value = e.response?.data?.detail || '加载大盘资金流区间失败'
+    flowError.value = errorMessage(e, '加载大盘资金流区间失败')
   } finally {
     flowLoading.value = false
   }
@@ -149,7 +150,7 @@ async function loadMarket() {
     overview.value = res.data
   } catch (e) {
     console.error(e)
-    error.value = e.response?.data?.detail || '加载大盘数据失败'
+    error.value = errorMessage(e, '加载大盘数据失败')
   } finally {
     loading.value = false
   }

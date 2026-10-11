@@ -5,10 +5,12 @@ import { stockApi, dashboardApi, groupApi } from '../api/stocks.js'
 import StockTable from '../components/StockTable.vue'
 import StockWatchlist from '../components/StockWatchlist.vue'
 import AlertPanel from '../components/AlertPanel.vue'
+import { errorMessage } from '../utils/errorMessage.js'
 
 const router = useRouter()
 const dashboardData = ref([])
 const loading = ref(false)
+const loadError = ref('')
 const fetchLoading = ref(false)
 const fetchMessage = ref('')
 let refreshTimer = null
@@ -41,7 +43,7 @@ async function addGroup() {
     await groupApi.create(name.trim())
     await loadGroups()
   } catch (e) {
-    alert(e.response?.data?.detail || '创建分组失败')
+    alert(errorMessage(e, '创建分组失败'))
   }
 }
 
@@ -52,7 +54,7 @@ async function renameGroup(g) {
     await groupApi.update(g.id, { name: name.trim() })
     await Promise.all([loadGroups(), loadDashboard()])
   } catch (e) {
-    alert(e.response?.data?.detail || '重命名失败')
+    alert(errorMessage(e, '重命名失败'))
   }
 }
 
@@ -62,8 +64,8 @@ async function removeGroup(g) {
     await groupApi.remove(g.id)
     if (activeGroup.value === g.id) activeGroup.value = 'all'
     await Promise.all([loadGroups(), loadDashboard()])
-  } catch {
-    alert('删除分组失败')
+  } catch (e) {
+    alert(errorMessage(e, '删除分组失败'))
   }
 }
 
@@ -87,8 +89,9 @@ async function loadDashboard() {
   try {
     const res = await dashboardApi.get()
     dashboardData.value = res.data
+    loadError.value = ''
   } catch (e) {
-    console.error('加载面板数据失败', e)
+    loadError.value = errorMessage(e, '加载看板数据失败')
   } finally {
     loading.value = false
   }
@@ -145,8 +148,7 @@ async function fetchAllData() {
       pollTimer = setInterval(pollFetchStatus, 3000)
       await pollFetchStatus()
     } else {
-      console.error('拉取数据失败', e)
-      fetchMessage.value = '启动拉取失败'
+      fetchMessage.value = errorMessage(e, '启动拉取失败')
     }
   }
 }
@@ -156,8 +158,7 @@ async function removeStock(item) {
     await stockApi.remove(item.id)
     loadDashboard()
   } catch (e) {
-    console.error('删除失败', e)
-    alert('取消关注失败，请重试')
+    alert(errorMessage(e, '取消关注失败'))
   }
 }
 
@@ -229,9 +230,14 @@ onUnmounted(() => {
       <button class="g-add" @click="addGroup">＋ 新分组</button>
     </div>
 
+    <div v-if="loadError && dashboardData.length" class="load-error">
+      {{ loadError }}（当前显示的是上次成功加载的数据）
+    </div>
+
     <StockTable
       :data="filteredData"
       :loading="loading"
+      :error="loadError"
       :groups="groups"
       @row-click="goToDetail"
       @ai-click="goToDetail"
@@ -262,6 +268,12 @@ onUnmounted(() => {
 
 .fetch-msg {
   color: #aaa;
+  font-size: 13px;
+}
+
+.load-error {
+  margin-bottom: 10px;
+  color: #ff8a96;
   font-size: 13px;
 }
 

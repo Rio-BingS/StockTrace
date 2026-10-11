@@ -8,6 +8,7 @@ import { LineChart } from 'echarts/charts'
 import { GridComponent, TooltipComponent, MarkLineComponent } from 'echarts/components'
 import { CanvasRenderer } from 'echarts/renderers'
 import { detectorApi } from '../api/stocks.js'
+import { errorMessage } from '../utils/errorMessage.js'
 
 use([LineChart, GridComponent, TooltipComponent, MarkLineComponent, CanvasRenderer])
 
@@ -86,7 +87,7 @@ async function load() {
   try {
     detail.value = (await detectorApi.getSignalDetail(props.signalId)).data
   } catch (e) {
-    error.value = e.response?.data?.detail || '加载信号详情失败'
+    error.value = errorMessage(e, '加载信号详情失败')
   } finally {
     loading.value = false
   }

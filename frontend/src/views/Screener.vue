@@ -4,6 +4,7 @@ import { useRouter } from 'vue-router'
 import { aiApi, presetApi, stockApi } from '../api/stocks.js'
 import { aiDisclaimer, aiErrorText, createAiTask, isCanceled } from '../utils/aiRequest.js'
 import { formatPct, formatNum, pctClass } from '../utils/format.js'
+import { errorMessage } from '../utils/errorMessage.js'
 
 const router = useRouter()
 
@@ -234,7 +235,7 @@ async function savePreset() {
     notice.value = `预设「${name}」已保存`
     await loadPresets()
   } catch (e) {
-    errorMsg.value = '保存预设失败：' + errText(e)
+    errorMsg.value = errorMessage(e, '保存预设失败')
   }
 }
 
@@ -271,8 +272,8 @@ async function deletePreset() {
     await presetApi.remove(p.id)
     selectedPreset.value = ''
     await loadPresets()
-  } catch {
-    errorMsg.value = '删除预设失败'
+  } catch (e) {
+    errorMsg.value = errorMessage(e, '删除预设失败')
   }
 }
 
@@ -298,7 +299,7 @@ async function runManual() {
     appliedConditions.value = spec
     resultDisclaimer.value = ''
   } catch (e) {
-    errorMsg.value = errText(e)
+    errorMsg.value = errorMessage(e, '筛选失败')
   } finally {
     manualLoading.value = false
   }
@@ -361,7 +362,7 @@ async function addToWatchlist(row) {
     await stockApi.add(row.code, row.name)
     notice.value = `${row.code} ${row.name} 已加入自选`
   } catch (e) {
-    errorMsg.value = '加入自选失败：' + errText(e)
+    errorMsg.value = errorMessage(e, '加入自选失败')
   }
 }
 

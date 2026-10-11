@@ -9,6 +9,7 @@ import { marketApi } from '../api/stocks.js'
 import { formatNum, formatPct, pctClass } from '../utils/format.js'
 import { formatAmount, formatShare } from '../utils/marketFormat.js'
 import MarketDataStatus from './MarketDataStatus.vue'
+import { errorMessage } from '../utils/errorMessage.js'
 
 use([LineChart, BarChart, GridComponent, TooltipComponent, LegendComponent, DataZoomComponent, CanvasRenderer])
 
@@ -84,7 +85,7 @@ async function load() {
     const res = await marketApi.getEtfDetail(props.code, params)
     data.value = res.data
   } catch (e) {
-    error.value = e.response?.data?.detail || 'ETF 详情加载失败'
+    error.value = errorMessage(e, 'ETF 详情加载失败')
     data.value = null
   } finally { loading.value = false }
 }

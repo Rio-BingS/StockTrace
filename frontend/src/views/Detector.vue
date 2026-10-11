@@ -6,6 +6,7 @@ import MarketDataStatus from '../components/MarketDataStatus.vue'
 import DetectorSignalDetail from '../components/DetectorSignalDetail.vue'
 import DetectorHeatmap from '../components/DetectorHeatmap.vue'
 import { detectorApi } from '../api/stocks.js'
+import { errorMessage } from '../utils/errorMessage.js'
 
 const loading = ref(false), error = ref('')
 const data = ref(null)
@@ -60,7 +61,7 @@ async function loadSignals() {
     }
     data.value = (await detectorApi.getSignals(params)).data
   } catch (e) {
-    signalsError.value = e.response?.data?.detail || '加载信号列表失败'
+    signalsError.value = errorMessage(e, '加载信号列表失败')
   } finally {
     loadingSignals.value = false
   }
@@ -87,7 +88,7 @@ async function loadHeatmap() {
   try {
     heatmap.value = (await detectorApi.getHeatmap({ board: board.value })).data
   } catch (e) {
-    heatmapError.value = e.response?.data?.detail || '加载热力图失败'
+    heatmapError.value = errorMessage(e, '加载热力图失败')
   } finally {
     heatmapLoading.value = false
   }
@@ -105,6 +106,10 @@ async function toggleConfig() {
     configLoading.value = true
     try {
       config.value = (await detectorApi.getConfig()).data
+    } catch (e) {
+      // 失败时收起面板并提示，下次点击可重试（FEF-07）
+      showConfig.value = false
+      alert(errorMessage(e, '加载维度配置失败'))
     } finally {
       configLoading.value = false
     }

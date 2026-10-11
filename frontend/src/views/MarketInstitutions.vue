@@ -14,6 +14,7 @@ import PeriodPicker from '../components/PeriodPicker.vue'
 import { marketApi } from '../api/stocks.js'
 import { formatPct, pctClass } from '../utils/format.js'
 import { formatAmount } from '../utils/marketFormat.js'
+import { errorMessage } from '../utils/errorMessage.js'
 
 use([BarChart, LineChart, TooltipComponent, GridComponent, LegendComponent, CanvasRenderer])
 
@@ -51,7 +52,7 @@ async function loadNorth() {
     northData.value = (await marketApi.getNorthbound({ period: northPeriod.value })).data
   } catch (e) {
     console.error(e)
-    northError.value = e.response?.data?.detail || '加载北向区间数据失败'
+    northError.value = errorMessage(e, '加载北向区间数据失败')
   } finally {
     northLoading.value = false
   }
@@ -118,7 +119,7 @@ async function load(code = null) {
     }
   } catch (e) {
     console.error(e)
-    error.value = e.response?.data?.detail || '加载机构持仓失败'
+    error.value = errorMessage(e, '加载机构持仓失败')
   } finally {
     loading.value = false
   }
@@ -140,7 +141,7 @@ async function loadDetail() {
     }
   } catch (e) {
     console.error(e)
-    detailError.value = e.response?.data?.detail || '查询失败'
+    detailError.value = errorMessage(e, '查询失败')
     stockDetail.value = null
   } finally {
     detailLoading.value = false
