@@ -400,8 +400,8 @@ class SnapshotRetentionSettingTests(TestCase):
 class EnvExampleTests(TestCase):
     """OPS-06：env.example 的每个变量都被代码读取；代码读取的环境变量都写进了 env.example"""
 
-    # Django/系统内部变量，不属于部署配置
-    _INTERNAL = {'RUN_MAIN', 'DJANGO_SETTINGS_MODULE'}
+    # Django/系统内部变量与测试专用开关，不属于部署配置
+    _INTERNAL = {'RUN_MAIN', 'DJANGO_SETTINGS_MODULE', 'STOCKTRACE_TEST_ALLOW_NETWORK'}
 
     def _example_vars(self):
         import re
