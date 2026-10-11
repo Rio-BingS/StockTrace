@@ -197,7 +197,7 @@ class _Src(services.DataSource):
         return self._ret()
 
 
-@patch('stocks.services.time.sleep')
+@patch('stocks.datasources.chain.time.sleep')
 class TrySourcesTests(SimpleTestCase):
     """多源 failover：异常/空结果切下一个源，退避节奏 1s,1s,2s（DAT-03 / ARC-03 现状锁定）"""
 
@@ -236,7 +236,7 @@ def _daily_df(rows):
     return pd.DataFrame(rows, columns=['日期', '开盘', '收盘', '最高', '最低', '成交量', '成交额'])
 
 
-@patch('stocks.services.time.sleep')
+@patch('stocks.datasources.chain.time.sleep')
 class FetchDailyDataTests(TestCase):
     def setUp(self):
         self.stock = Stock.objects.create(code='600000', name='浦发银行')
@@ -321,7 +321,7 @@ class SaveMinuteBarsTests(TestCase):
         self.assertEqual(services._save_minute_bars(self.stock, df, D), 0)
 
 
-@patch('stocks.services.time.sleep')
+@patch('stocks.datasources.chain.time.sleep')
 class FetchMinuteDataTests(TestCase):
     def setUp(self):
         self.stock = Stock.objects.create(code='600000', name='浦发银行')
@@ -374,7 +374,7 @@ class FetchMinuteDataTests(TestCase):
         self.assertIsNotNone(res['high_time'])
 
 
-@patch('stocks.services.time.sleep')
+@patch('stocks.jobs.time.sleep')
 class FetchOrchestrationTests(TestCase):
     def setUp(self):
         self.stock = Stock.objects.create(code='600000', name='600000')

@@ -500,7 +500,7 @@ class SourceChainTests(SimpleTestCase):
             def fetch_daily(self, *a):
                 return pd.DataFrame({'日期': ['2026-09-01']})
 
-        with patch('stocks.services.time.sleep') as sleep:
+        with patch('stocks.datasources.chain.time.sleep') as sleep:
             for _ in range(3):
                 source, df = services._try_sources(
                     'fetch_daily', '600000', '20260901', '20260901', sources=[Bad(), Good()])

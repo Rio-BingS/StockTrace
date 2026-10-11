@@ -21,7 +21,7 @@ def _aware(s):
 
 class _NoSleep:
     def setUp(self):
-        p = patch('stocks.services.time.sleep')
+        p = patch('stocks.datasources.chain.time.sleep')
         p.start()
         self.addCleanup(p.stop)
         super().setUp()

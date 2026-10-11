@@ -47,7 +47,7 @@ def _make_quote(stock, d, close=10, **kw):
 
 class _NoSleep:
     def setUp(self):
-        p = patch('stocks.services.time.sleep')
+        p = patch('stocks.datasources.chain.time.sleep')
         p.start()
         self.addCleanup(p.stop)
         super().setUp()
@@ -422,7 +422,7 @@ class TradeCalendarTests(SimpleTestCase):
             self.assertTrue(services.is_trading_day(date(2027, 1, 4)))
         bs.assert_called_once()
         # TTL 过期后重新查询
-        with patch('stocks.services.time.time', return_value=time.time() + trading_calendar._TRADE_DAY_TTL + 10), \
+        with patch('stocks.trading_calendar.time.time', return_value=time.time() + trading_calendar._TRADE_DAY_TTL + 10), \
                 patch('akshare.tool_trade_date_hist_sina', return_value=self.cal), \
                 patch('stocks.trading_calendar._baostock_is_trading_day', return_value=False) as bs2:
             self.assertFalse(services.is_trading_day(date(2027, 1, 4)))
@@ -436,7 +436,7 @@ class TradeCalendarTests(SimpleTestCase):
         self.assertEqual(cal.call_count, 1)
         self.assertEqual(bs.call_count, 1)
         # 冷却期过后恢复：不再沿用「未知」，也没有永久缓存旧的猜测
-        with patch('stocks.services.time.time', return_value=time.time() + trading_calendar._CALENDAR_FAIL_TTL + 1), \
+        with patch('stocks.trading_calendar.time.time', return_value=time.time() + trading_calendar._CALENDAR_FAIL_TTL + 1), \
                 patch('akshare.tool_trade_date_hist_sina', return_value=self.cal):
             self.assertFalse(services.is_trading_day(date(2026, 10, 8)))
             self.assertTrue(services.is_trading_day(date(2026, 10, 9)))
@@ -444,7 +444,7 @@ class TradeCalendarTests(SimpleTestCase):
     def test_refresh_failure_keeps_stale_table(self):
         with patch('akshare.tool_trade_date_hist_sina', return_value=self.cal):
             self.assertTrue(services.is_trading_day(date(2026, 10, 9)))
-        with patch('stocks.services.time.time', return_value=time.time() + trading_calendar._TRADE_CAL_TTL + 10), \
+        with patch('stocks.trading_calendar.time.time', return_value=time.time() + trading_calendar._TRADE_CAL_TTL + 10), \
                 patch('akshare.tool_trade_date_hist_sina', side_effect=RuntimeError('down')):
             self.assertTrue(services.is_trading_day(date(2026, 10, 9)))
             self.assertFalse(services.is_trading_day(date(2026, 10, 1)))
