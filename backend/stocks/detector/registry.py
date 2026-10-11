@@ -110,11 +110,11 @@ DIMENSIONS = [
         'targets': ('index', 'stock', 'industry', 'concept'),
         'enabled': True,
         'note': (
-            '20日均线距离的3日漂移；板块价格由真实日涨跌幅链式合成（基期100）。'
-            '距均线过远（趋势已展开）如实不投票。'
+            '收盘相对20日均线的距离，按近60日波动换算成 z 值（随机游走下近似标准正态），'
+            '|z| 超过 1.28 才投票；板块价格由真实日涨跌幅链式合成（基期100）。'
+            '|z| 超过 2（趋势已展开）如实不投票。'
         ),
-        'defaults': {'ma': 20, 'slope_days': 3, 'mild': 0.6, 'min': 0.08, 'max': 3.0,
-                     'max_dist': 4.0, **_NOISE},
+        'defaults': {'ma': 20, 'z_lo': 1.282, 'z_hi': 2.0, 'z_mild': 2.0, **_SIGMA},
         'evaluate': _dims.eval_ma_relation,
     },
     {

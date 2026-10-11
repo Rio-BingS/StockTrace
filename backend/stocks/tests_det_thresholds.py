@@ -3,6 +3,7 @@
 纯函数测试：不碰库、不触网；蒙特卡洛一律固定随机种子，结果确定。
 """
 
+import math
 import random
 from statistics import NormalDist
 
@@ -163,3 +164,82 @@ class VolCompressZTests(SimpleTestCase):
         res = D.eval_vol_compress(_ctx_from_returns(rets), _params('vol_compress'))
         self.assertTrue(res['available'], res['note'])
         self.assertEqual(res['direction'], 'up', res['note'])
+
+
+class MaRelationLevelZTests(SimpleTestCase):
+    """#13/#1：ma_relation 改测均线距离水平的 z 值。"""
+
+    def test_steady_slow_trend_is_detected(self):
+        # 稳态缓慢趋势：前 40 日纯噪声，后 30 日每日 +0.5%（σ=1.5%）。
+        # 旧口径（距离的 3 日漂移）在稳态下回到噪声水平，几乎从不投票；
+        # 新口径的 up 投票率应明显高于纯噪声下的单侧名义率（约 7.7%）
+        rng = random.Random(6)
+        hits = 0
+        for _ in range(300):
+            rets = [rng.gauss(0, 1.5) for _ in range(40)] + [0.5 + rng.gauss(0, 1.5) for _ in range(30)]
+            hits += D.eval_ma_relation(_ctx_from_returns(rets), _params('ma_relation'))['direction'] == 'up'
+        self.assertGreater(hits / 300, 2.5 * _nominal_rate(_params('ma_relation')) / 2)
+
+    def test_vote_is_volatility_invariant(self):
+        # 同一形态按 3 倍波动放大：z 基本不变（旧绝对 max=3/max_dist=4 会让高波动版失明）
+        rng = random.Random(7)
+        rets = [rng.gauss(0, 0.8) for _ in range(55)] + [0.25] * 15
+        lo = D.eval_ma_relation(_ctx_from_returns(rets), _params('ma_relation'))
+        hi = D.eval_ma_relation(_ctx_from_returns([r * 3 for r in rets]), _params('ma_relation'))
+        self.assertEqual(lo['direction'], 'up', lo['note'])
+        self.assertEqual(hi['direction'], 'up', hi['note'])
+        self.assertAlmostEqual(lo['value'], hi['value'], delta=6)
+
+    def test_far_from_ma_is_not_early(self):
+        rets = [0.3, -0.3] * 30 + [1.5] * 10
+        res = D.eval_ma_relation(_ctx_from_returns(rets), _params('ma_relation'))
+        self.assertTrue(res['available'])
+        self.assertIsNone(res['direction'])
+        self.assertIn('趋势已展开', res['note'])
+
+    def test_null_vote_rate_matches_nominal_across_volatility(self):
+        params = _params('ma_relation')
+        nominal = _nominal_rate(params)          # z_lo=1.282、z_hi=2.0 → 约 15.4%
+        for sigma in (0.8, 1.5, 2.5, 4.0):
+            rng = random.Random(8)
+            votes = sum(
+                D.eval_ma_relation(_ctx_from_returns([rng.gauss(0, sigma) for _ in range(70)]),
+                                   params)['direction'] is not None
+                for _ in range(1500)
+            )
+            self.assertLess(abs(votes / 1500 - nominal), 0.04, (sigma, votes / 1500, nominal))
+
+    def test_works_with_250_bars_and_sector_series(self):
+        rng = random.Random(9)
+        ctx = _ctx_from_returns([rng.gauss(0, 1.5) for _ in range(250)])
+        self.assertTrue(D.eval_ma_relation(ctx, _params('ma_relation'))['available'])
+        dates = [str(i) for i in range(45)]
+        sector = {'kind': 'concept', 'code': 'x', 'name': 'x', 'dates': dates, 'net': [1.0] * 45,
+                  'change_pct': [rng.gauss(0, 2.0) for _ in range(45)], 'as_of': dates[-1]}
+        self.assertTrue(D.eval_ma_relation(sector, _params('ma_relation'))['available'])
+
+    def test_scale_factor(self):
+        # m=20：sqrt(19·39/120) ≈ 2.485
+        self.assertAlmostEqual(D._ma_dist_scale(20), math.sqrt(19 * 39 / 120))
+
+
+class LongContextNoiseTests(SimpleTestCase):
+    """#10：70 根与 250 根上下文下，随机游走的单日信号率都 < 5%。"""
+
+    def _rate(self, n_bars, paths):
+        from .detector import registry
+
+        rng = random.Random(10)
+        specs = [s for s in registry.DIMENSIONS if s['enabled'] and 'stock' in s['targets']]
+        fired = 0
+        for _ in range(paths):
+            ctx = _ctx_from_returns([rng.gauss(0, 1.5) for _ in range(n_bars)])
+            ctx['volume'] = [1e6 * math.exp(rng.gauss(0, 0.3)) for _ in range(n_bars)]
+            dirs = [s['evaluate'](ctx, dict(s['defaults']))['direction'] for s in specs]
+            up, down = dirs.count('up'), dirs.count('down')
+            fired += (up >= 2 and down == 0) or (down >= 2 and up == 0)
+        return fired / paths
+
+    def test_70_and_250_bars(self):
+        self.assertLess(self._rate(70, 400), 0.05)
+        self.assertLess(self._rate(250, 150), 0.05)

@@ -198,9 +198,10 @@ class RandomWalkNoiseTests(TestCase):
         self.assertLess(given_calm, 0.05)
 
     def test_without_noise_gate_the_simulation_does_catch_noise(self):
-        # 守护测试本身的灵敏度：关掉噪声闸门（旧口径）时模拟必须能测出大量噪声信号
+        # 守护测试本身的灵敏度：关掉噪声闸门（旧口径）时模拟必须能测出大量噪声信号。
+        # 价格类维度的闸门是解析 z 下限（#1/#3），z_lo=0 即关闭
         overall, _given_calm, _n = self._rates(
-            'stock', _random_walk_ctx, 300, overrides={'noise_pct': 0})
+            'stock', _random_walk_ctx, 300, overrides={'noise_pct': 0, 'z_lo': 0.0})
         self.assertGreater(overall, 0.2)
 
 

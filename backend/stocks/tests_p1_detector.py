@@ -66,11 +66,15 @@ class SectorPriceGapTests(TestCase):
         pcts[5] = None  # 缺口在均线窗口之前
         res = dimensions.eval_ma_relation(self._ctx(pcts), params)
         self.assertTrue(res['available'], res['note'])
-        # level 跨缺口保持：窗口全在缺口之后时，结果与该日涨跌 0% 的完整序列一致
+        # level 跨缺口保持：窗口全在缺口之后时，均线距离与该日涨跌 0% 的完整序列一致
+        # （value 是 z 值，σ 估计少一个样本会略有差别，#13）
         filled = list(pcts)
         filled[5] = 0.0
         clean = dimensions.eval_ma_relation(self._ctx(filled), params)
-        self.assertAlmostEqual(res['value'], clean['value'], places=6)
+        tail = [p['value'] for p in res['series'][-5:]]
+        self.assertEqual(tail, [p['value'] for p in clean['series'][-5:]])
+        self.assertEqual(res['direction'], clean['direction'])
+        self.assertAlmostEqual(res['value'], clean['value'], delta=1.0)
 
     def test_price_series_keeps_level_across_gap(self):
         out = dimensions._sector_price_series({'change_pct': [1.0, None, 1.0]})

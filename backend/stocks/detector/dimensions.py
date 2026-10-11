@@ -1139,22 +1139,37 @@ def _sector_price_series(ctx):
     return out
 
 
-def eval_ma_relation(ctx, params):
-    """价格与均线关系（全部对象）：20 日均线距离的 3 日漂移。
+def _ma_dist_scale(ma_days):
+    """随机游走下「收盘/均线 − 1」的标准差相对日收益 σ 的倍数。
 
-    为什么用「距离的漂移」而不是「价格在上/在下」：平静期价格贴近均线，
-    距离开始单侧缓慢扩大是趋势萌芽的最早形态；而距离已拉得很远说明趋势
-    展开（追认而非早期），如实不投票。
+    对数近似：dist_t = Σ_{j=0}^{m−2} r_{t−j}·(m−1−j)/m，故
+    Var = σ²·Σ_{i=1}^{m−1} i² / m² = σ²·(m−1)(2m−1)/(6m)。m=20 时约 2.485σ。
     """
-    ma_days, slope_days = params['ma'], params['slope_days']
+    m = int(ma_days)
+    return ((m - 1) * (2 * m - 1) / (6 * m)) ** 0.5
+
+
+def eval_ma_relation(ctx, params):
+    """价格与均线关系（全部对象）：20 日均线距离水平的 z 值（#13/#1）。
+
+    为什么改测「距离水平」：旧实现测距离的 3 日漂移（二阶量），稳态缓慢
+    趋势下距离趋于常数、漂移回到噪声，正是要找的「渐进微变」反而测不到。
+    现在 z = dist / (σ_long × 均线距离的随机游走尺度)，σ_long 取近
+    sigma_window 个日收益的标准差：随机游走下 z 近似标准正态，与标的波动率
+    无关；日漂移 μ 的稳态趋势下 E[dist] ≈ (m−1)/2·μ，z 随趋势持续累积。
+    z_lo < |z| ≤ z_hi 才投票：|z| > z_hi 说明价格已远离均线（趋势已展开，
+    追认而非早期），取代旧的绝对 max/max_dist——那两个百分比上限与随 σ
+    增长的噪声带相撞，σ≥1.5% 的标的可投票区间为空。
+    """
+    ma_days = params['ma']
     if ctx.get('change_pct') is not None:
         closes = _sector_price_series(ctx)
         dates = ctx['dates']
     else:
         closes, dates = ctx.get('close'), ctx['dates']
-    if not closes or len(closes) < ma_days + slope_days + 1:
+    if not closes or len(closes) < ma_days + 1:
         return _unavailable('收盘序列不足（均线窗口不齐）')
-    if any(v is None for v in closes[-(ma_days + slope_days + 1):]):
+    if any(v is None for v in closes[-ma_days:]):
         return _unavailable('均线窗口存在缺失数据')
 
     # 严格窗口：板块伪价格缺口前后水平不可比，跨缺口的均线不能算（ALG-06）
@@ -1163,18 +1178,19 @@ def eval_ma_relation(ctx, params):
         (closes[i] / ma[i] - 1) * 100 if ma[i] and closes[i] is not None else None
         for i in range(len(closes))
     ]
-    if dist[-1] is None or dist[-1 - slope_days] is None:
+    if dist[-1] is None:
         return _unavailable('均线距离序列不齐')
-    raws = [
-        dist[i] - dist[i - slope_days]
-        if i >= slope_days and dist[i] is not None and dist[i - slope_days] is not None
-        else None
-        for i in range(len(dist))
-    ]
-    raw = raws[-1]
-    value, direction, note = _gated(raw, raws[:-1], params)
-    if abs(dist[-1]) > params['max_dist'] and direction is not None:
-        direction, note = None, f'距均线 {dist[-1]:.1f}%，趋势已展开，非早期迹象'
+    sigma = _long_sigma(
+        _return_series(ctx) or [],
+        params.get('sigma_window', SIGMA_DEFAULTS['sigma_window']),
+        params.get('sigma_min', SIGMA_DEFAULTS['sigma_min']),
+    )
+    if sigma is None:
+        return _unavailable('长窗口波动样本不足，无法换算均线距离的噪声尺度')
+    z = dist[-1] / (sigma * _ma_dist_scale(ma_days))
+    value, direction, note = _zband(z, params)
+    if direction is None and note.startswith('偏离达'):
+        note = f'距均线 {dist[-1]:.1f}%（{abs(z):.1f} 倍噪声尺度），趋势已展开，非早期迹象'
     return _result(
         value, direction, note,
         _series_points(dates, dist),

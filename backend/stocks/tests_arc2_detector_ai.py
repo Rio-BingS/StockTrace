@@ -58,12 +58,16 @@ class DetectorConstantsTests(SimpleTestCase):
         spec = registry.DIMENSION_MAP
         self.assertEqual(spec['vol_compress']['defaults']['compress_pct'], 0.25)
         self.assertEqual(spec['turnover_pct']['defaults']['split_ratio'], 1.2)
-        for key in ('big_order_net', 'vol_ratio_slope', 'turnover_pct', 'margin_north', 'ma_relation'):
+        for key in ('big_order_net', 'vol_ratio_slope', 'turnover_pct', 'margin_north'):
             for k, v in constants.NOISE_DEFAULTS.items():
                 self.assertEqual(spec[key]['defaults'][k], v, (key, k))
         self.assertEqual(spec['vol_compress']['defaults']['noise_window'], 120)
         self.assertEqual(spec['vol_compress']['defaults']['noise_min'], 15)
-        self.assertNotIn('noise_pct', spec['vol_compress']['defaults'])
+        # 价格类维度改用 σ60 解析 z 闸门（#1/#3/#13），不再走经验分位噪声闸门
+        for key in ('vol_compress', 'ma_relation'):
+            self.assertNotIn('noise_pct', spec[key]['defaults'])
+            for k, v in constants.SIGMA_DEFAULTS.items():
+                self.assertEqual(spec[key]['defaults'][k], v, (key, k))
 
 
 class AiQuotesFinalOnlyTests(TestCase):
