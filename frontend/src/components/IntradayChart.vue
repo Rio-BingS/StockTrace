@@ -79,14 +79,19 @@ function findLocalExtrema(prices, windowSize = 20) {
   return { peaks, valleys }
 }
 
+// 排序、价格序列、阶段极值只在分钟数据变化时算一次，走势图与阶段高低点表共用（FEX-07）
+const sortedBars = computed(() => [...props.minuteData].sort(byKey('datetime')))
+const priceSeries = computed(() => sortedBars.value.map(d => Number(d.close)))
+const extrema = computed(() => findLocalExtrema(priceSeries.value))
+
 // 走势图配置
 const chartOption = computed(() => {
   if (!props.minuteData.length) return {}
 
-  const sorted = [...props.minuteData].sort(byKey('datetime'))
+  const sorted = sortedBars.value
 
   const times = sorted.map(d => d.datetime.slice(11, 16))
-  const prices = sorted.map(d => Number(d.close))
+  const prices = priceSeries.value
 
   const openPrice = props.dailyQuote?.open_price ? Number(props.dailyQuote.open_price) : null
   const closePrice = props.dailyQuote?.close_price ? Number(props.dailyQuote.close_price) : null
@@ -104,8 +109,8 @@ const chartOption = computed(() => {
   })
   const currentIdx = prices.length - 1 // 现价 = 最后一个点
 
-  // 阶段高低点检测
-  const { peaks, valleys } = findLocalExtrema(prices)
+  // 阶段高低点
+  const { peaks, valleys } = extrema.value
 
   // 构建 MarkPoint 数据
   const markPointData = []
@@ -318,9 +323,8 @@ const tableData = computed(() => {
     close_price: q.close_price,
     high_price: q.high_price,
     low_price: q.low_price,
-    current_price: props.minuteData.length
-      ? props.minuteData[props.minuteData.length - 1].close
-      : null,
+    // 现价取按时间排序后的最后一根，不依赖接口返回顺序
+    current_price: priceSeries.value.length ? priceSeries.value[priceSeries.value.length - 1] : null,
     prev_close: q.prev_close,
     change_pct: q.change_pct,
     open_close_pct: q.open_close_pct,
@@ -331,9 +335,8 @@ const tableData = computed(() => {
 // 阶段高低点列表
 const extremaList = computed(() => {
   if (!props.minuteData.length) return []
-  const sorted = [...props.minuteData].sort(byKey('datetime'))
-  const prices = sorted.map(d => Number(d.close))
-  const { peaks, valleys } = findLocalExtrema(prices)
+  const sorted = sortedBars.value
+  const { peaks, valleys } = extrema.value
 
   const list = []
   peaks.forEach(p => {

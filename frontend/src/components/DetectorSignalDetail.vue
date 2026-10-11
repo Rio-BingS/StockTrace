@@ -81,6 +81,12 @@ function chartOption(dim) {
   }
 }
 
+// 每个维度的图表配置只在数据变化时算一次；模板里原来 filter + 绑定各调用一次，
+// 每次渲染都重建全部 option，触发图表整体重绘（FEX-07）
+const dimCharts = computed(() => dims.value
+  .map(dim => ({ dim, option: chartOption(dim) }))
+  .filter(c => c.option))
+
 async function load() {
   loading.value = true
   error.value = ''
@@ -133,9 +139,9 @@ onMounted(load)
       </div>
 
       <div class="charts">
-        <div v-for="dim in dims.filter(d => chartOption(d))" :key="'c-' + dim.key" class="chart-cell">
+        <div v-for="{ dim, option } in dimCharts" :key="'c-' + dim.key" class="chart-cell">
           <label>{{ dim.name }}（{{ dim.direction === 'up' ? '向上' : dim.direction === 'down' ? '向下' : '未投票' }}）</label>
-          <v-chart :option="chartOption(dim)" autoresize style="height: 130px; width: 100%" />
+          <v-chart :option="option" autoresize style="height: 130px; width: 100%" />
         </div>
       </div>
       <p class="hint">曲线为该维度归一化微变分值（-100~100，正=向上、负=向下），按最新序列重算供观察后续演化。</p>
