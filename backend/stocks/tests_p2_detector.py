@@ -98,3 +98,29 @@ class CalmBaselineTests(TestCase):
         self.assertEqual(len(flow_base), 20 - 3)   # 不含末尾 3 日窗口
         self.assertEqual(len(std_base), 20 - 5)    # 不含末尾 5 日窗口
         self.assertNotIn(calm._std(pcts[-5:]), std_base)
+
+
+class SignValueBoundaryTests(TestCase):
+    """ALG-15：_sign_value 的零值与非法参数边界。"""
+
+    def test_zero_raw_has_no_direction_even_when_min_is_zero(self):
+        from .detector.dimensions import _sign_value
+
+        value, direction, _note = _sign_value(0.0, {'mild': 1.0, 'min': 0.0, 'max': 2.0})
+        self.assertEqual(value, 0.0)
+        self.assertIsNone(direction)
+
+    def test_invalid_params_do_not_vote(self):
+        from .detector.dimensions import _sign_value
+
+        for params in (
+            {'mild': 0, 'min': 0.1, 'max': 2.0},
+            {'mild': -1, 'min': 0.1, 'max': 2.0},
+            {'mild': 1.0, 'min': 3.0, 'max': 2.0},
+            {'mild': 1.0, 'min': -0.1, 'max': 2.0},
+            {'mild': 1.0, 'min': None, 'max': 2.0},
+        ):
+            value, direction, note = _sign_value(0.5, params)
+            self.assertIsNone(direction, params)
+            self.assertIsNone(value, params)
+            self.assertIn('参数非法', note)

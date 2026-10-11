@@ -70,14 +70,28 @@ def _sign_value(raw, params):
     - |raw| > max：变化过猛，疑似已进入突变/趋势展开阶段，不是早期迹象，
       如实标注不投票（这是「识别早期而非追认突变」的关键闸门）；
     - value = raw/mild × 50，让 ±mild（温和带边界）对应 ±50 分。
+
+    边界（ALG-15）：raw == 0 没有方向，不投票（旧实现 min=0 时会判成 down）；
+    参数可在库里手改，mild ≤ 0 或不满足 0 ≤ min < max 视为配置错误，如实
+    不投票、value 为 None（旧实现 mild=0 时热力图显示 0 却照常投票）。
     """
-    mild = params['mild']
-    value = _clamp(raw / mild * 50, -100, 100) if mild else 0.0
-    if abs(raw) < params['min']:
+    mild, lo, hi = params.get('mild'), params.get('min'), params.get('max')
+    if not _params_valid(mild, lo, hi):
+        return None, None, '维度参数非法（需 mild > 0 且 0 ≤ min < max），不投票'
+    value = _clamp(raw / mild * 50, -100, 100)
+    if raw == 0 or abs(raw) < lo:
         return value, None, ''
-    if abs(raw) > params['max']:
+    if abs(raw) > hi:
         return value, None, '幅度超出温和区间，疑似突变而非早期迹象'
     return value, ('up' if raw > 0 else 'down'), ''
+
+
+def _params_valid(mild, lo, hi):
+    """温和带参数合法性：mild > 0 且 0 ≤ min < max（数值类型）。"""
+    try:
+        return float(mild) > 0 and 0 <= float(lo) < float(hi)
+    except (TypeError, ValueError):
+        return False
 
 
 def _unavailable(note):
