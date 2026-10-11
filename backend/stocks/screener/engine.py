@@ -185,10 +185,9 @@ def _up_days(ctx):
 _MACD_MIN_BARS = 120
 _KDJ_MIN_BARS = 12    # RSV9 + K/D 递推预热
 _BOLL_N = 20
-# BOLL 标准差口径（ALG-12）：ddof=0 即总体标准差（除以 N），按终审报告的建议
-# 与通达信 BOLL 一致；各软件口径不一（部分资料称通达信 STD 为样本标准差），
-# 改口径只需改这里
-_BOLL_DDOF = 0
+# BOLL 标准差口径（ALG-12）：ddof=1 即样本标准差（除以 N-1），
+# 与通达信 STD 函数口径一致；改口径只需改这里
+_BOLL_DDOF = 1
 
 
 def _ema_series(values, n):

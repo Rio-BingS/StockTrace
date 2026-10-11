@@ -900,7 +900,7 @@ class ScreenerCrossSectionTests(TestCase):
 
 @patch('stocks.ai.valuation.fetch_valuation_map', new=lambda codes: {})
 class ScreenerIndicatorConventionTests(TestCase):
-    """ALG-12：MACD 预热 ≥120 根、BOLL 总体标准差、新高新低看最高/最低价且并列不算。"""
+    """ALG-12：MACD 预热 ≥120 根、BOLL 样本标准差、新高新低看最高/最低价且并列不算。"""
 
     def setUp(self):
         from datetime import date
@@ -923,19 +923,19 @@ class ScreenerIndicatorConventionTests(TestCase):
         _screener_bars(self.stock, [10.6 + i * 0.01 for i in range(60)], self.start + timedelta(days=60))
         self.assertIsNotNone(self._values()['macd_dif'])
 
-    def test_boll_uses_population_std(self):
+    def test_boll_uses_sample_std(self):
         from .ai import screener
 
-        # 取 x 使两种口径结论不同：总体口径（÷N）std 更小 → 上轨更低 → 触及；
-        # 样本口径（÷N-1）上轨更高 → 不触及
+        # 取 x 使两种口径结论不同：总体口径（÷N）上轨更低 → 触及；
+        # 样本口径（÷N-1，通达信 STD）上轨更高 → 不触及
         closes = [9.8, 10.2] * 9 + [10.0, 10.455]
         _screener_bars(self.stock, closes, self.start)
         mid = sum(closes) / 20
         pop = (sum((c - mid) ** 2 for c in closes) / 20) ** 0.5
         samp = (sum((c - mid) ** 2 for c in closes) / 19) ** 0.5
         self.assertTrue(mid + 2 * pop <= closes[-1] < mid + 2 * samp)
-        self.assertEqual(screener._BOLL_DDOF, 0)
-        self.assertEqual(self._values()['above_boll_upper'], 1)
+        self.assertEqual(screener._BOLL_DDOF, 1)
+        self.assertEqual(self._values()['above_boll_upper'], 0)
 
     def test_new_high_uses_high_price_and_ties_are_not_new(self):
         closes = [10.0] * 20
