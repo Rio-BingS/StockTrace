@@ -12,6 +12,9 @@ from .crypto import encrypt_api_key, decrypt_api_key, mask_api_key
 from .llm import validate_base_url
 
 
+PRIORITY_MAX = 9999
+
+
 class AiProviderSerializer(serializers.ModelSerializer):
     # 读：脱敏尾四位；写：明文 key，只写不读
     api_key_masked = serializers.SerializerMethodField()
@@ -20,7 +23,7 @@ class AiProviderSerializer(serializers.ModelSerializer):
     class Meta:
         model = AiProvider
         fields = [
-            'id', 'name', 'base_url', 'model', 'is_enabled',
+            'id', 'name', 'base_url', 'model', 'is_enabled', 'priority', 'param_style',
             'api_key', 'api_key_masked', 'created_at', 'updated_at',
         ]
         read_only_fields = ['id', 'created_at', 'updated_at']
@@ -31,6 +34,12 @@ class AiProviderSerializer(serializers.ModelSerializer):
         except ValueError:
             # SECRET_KEY 轮换后旧密文解不开：如实标注而不是假装正常
             return '(无法解密，请重新录入)'
+
+    def validate_priority(self, value: int) -> int:
+        # 数字越小越优先（AIX-07）；限定范围，避免误填超大/负数打乱排序
+        if not 0 <= value <= PRIORITY_MAX:
+            raise serializers.ValidationError(f'优先级须在 0–{PRIORITY_MAX} 之间')
+        return value
 
     def validate_base_url(self, value: str) -> str:
         # 只允许 https 公网地址（含 DNS 解析后检查），防 Key 外泄与 SSRF（SEC-01）

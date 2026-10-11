@@ -13,13 +13,31 @@ class AiProvider(models.Model):
     api_key_encrypted = models.TextField('加密的 API Key')
     model = models.CharField('模型名', max_length=100)
     is_enabled = models.BooleanField('启用', default=True)
+    # 多服务商选择/回退顺序（AIX-07）：数字越小越优先，相同时按录入顺序
+    priority = models.IntegerField('优先级', default=100,
+                                   help_text='数字越小越优先；相同时按录入顺序')
+    # 请求参数风格（AIX-07）：auto 按模型名判断；推理模型不传 temperature，
+    # OpenAI o 系列/gpt-5 还要把 max_tokens 换成 max_completion_tokens
+    PARAM_STYLE_AUTO = 'auto'
+    PARAM_STYLE_STANDARD = 'standard'
+    PARAM_STYLE_REASONING = 'reasoning'
+    PARAM_STYLE_OPENAI_REASONING = 'openai_reasoning'
+    PARAM_STYLE_CHOICES = [
+        (PARAM_STYLE_AUTO, '自动（按模型名判断）'),
+        (PARAM_STYLE_STANDARD, '标准（temperature + max_tokens）'),
+        (PARAM_STYLE_REASONING, '推理模型（不传 temperature）'),
+        (PARAM_STYLE_OPENAI_REASONING, 'OpenAI 推理（max_completion_tokens）'),
+    ]
+    param_style = models.CharField('参数风格', max_length=20, choices=PARAM_STYLE_CHOICES,
+                                   default=PARAM_STYLE_AUTO)
     created_at = models.DateTimeField('创建时间', auto_now_add=True)
     updated_at = models.DateTimeField('更新时间', auto_now=True)
 
     class Meta:
         verbose_name = 'AI 服务商'
         verbose_name_plural = 'AI 服务商'
-        ordering = ['-is_enabled', 'id']
+        # 与调用时的选择/回退顺序一致：启用的在前，再按优先级、录入顺序
+        ordering = ['-is_enabled', 'priority', 'id']
 
     def __str__(self):
         return f"{self.name} ({self.model})"

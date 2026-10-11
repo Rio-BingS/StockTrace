@@ -324,18 +324,9 @@ class LlmClient:
 
 # ---- 多服务商（AIX-07）----
 
-def _provider_has_field(name):
-    from ..models import AiProvider
-    try:
-        AiProvider._meta.get_field(name)
-        return True
-    except Exception:  # noqa: BLE001  FieldDoesNotExist
-        return False
-
-
 def provider_ordering():
-    """服务商选择/回退顺序：有 priority 字段时按优先级（小的先），再按录入顺序。"""
-    return ('priority', 'id') if _provider_has_field('priority') else ('id',)
+    """服务商选择/回退顺序：按优先级（小的先），再按录入顺序（AIX-07）。"""
+    return ('priority', 'id')
 
 
 def enabled_providers():
@@ -369,7 +360,7 @@ _REASONING_RE = re.compile(r'reasoner|(^|[-_.:])r1($|[-_.:])|qwq|thinking')
 
 
 def param_style(provider):
-    """按服务商配置（param_style 字段，待迁移）或模型名判断请求参数风格。"""
+    """按服务商配置的 param_style 判断请求参数风格；auto/未知值时按模型名推断。"""
     explicit = getattr(provider, 'param_style', None)
     if explicit in (PARAM_STANDARD, PARAM_REASONING, PARAM_OPENAI_REASONING):
         return explicit
