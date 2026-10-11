@@ -164,6 +164,25 @@ def _last_session_close():
     return close
 
 
+def _session_date_at(ts):
+    """写入时刻 ts 时数据所属的交易日（ISO 字符串）：当日开盘（09:15）后写入算当日，
+    否则算之前最近一个交易日；日历未知时返回 None。最多回看 20 天。"""
+    from django.utils import timezone
+    from ..services import is_trading_day
+
+    at = timezone.localtime(datetime.fromtimestamp(ts, tz=dt_timezone.utc))
+    day = at.date()
+    for _ in range(20):
+        if day < at.date() or at.time() >= dt_time(9, 15):
+            verdict = is_trading_day(day)
+            if verdict is None:
+                return None
+            if verdict:
+                return day.isoformat()
+        day -= timedelta(days=1)
+    return None
+
+
 def _data_changing_now(now):
     """交易日 09:15–21:00 数据仍可能变化（盘中 + 收盘后晚到），沿用 TTL。"""
     from ..services import is_trading_day
@@ -200,11 +219,13 @@ def _cache_meta(cache_key, ttl, source, available, source_data_date=None, discla
         cache_status = 'fresh' if _is_fresh(item['ts'], ttl) else 'stale'
         fetched_at = _local_iso(item['ts'])
 
-    data_as_of = None
-    if _calendar_enabled():
+    # data_as_of 是数据本身所属日期（DAT-19）：优先上游给的数据日期；没有时按缓存
+    # 写入时刻推算所属交易日；都不知道给 null。不再用「日历上最近收盘日」——
+    # _stale_or 返回几天前的旧数据时会被误标成最新交易日
+    data_as_of = str(source_data_date)[:10] if source_data_date else None
+    if data_as_of is None and item and not item.get('neg') and _calendar_enabled():
         try:
-            close = _last_session_close()
-            data_as_of = close.date().isoformat() if close else None
+            data_as_of = _session_date_at(item['ts'])
         except Exception:
             data_as_of = None
 

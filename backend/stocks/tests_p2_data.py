@@ -189,3 +189,61 @@ class LocalDateTests(SimpleTestCase):
         with patch('django.utils.timezone.now', return_value=self._UTC_NIGHT):
             window = resolve_period(lambda k, d='': {'period': '1d'}.get(k, d), ['1d'])
         self.assertEqual(window.end.isoformat(), '2026-10-12')
+
+
+class MetaAccuracyTests(SimpleTestCase):
+    """DAT-19：data_as_of 跟数据走；ETF 历史 items 与来源同一缓存值；份额曲线 meta 不再恒为 unavailable。"""
+
+    def test_data_as_of_prefers_source_data_date(self):
+        from .market._cache import _cache_meta, _cache_set
+
+        _cache_set('k_meta', [1])
+        meta = _cache_meta('k_meta', 60, 'src', True, source_data_date='2026-09-04')
+        self.assertEqual(meta['data_as_of'], '2026-09-04')
+        meta = _cache_meta('k_meta', 60, 'src', True)
+        self.assertIsNone(meta['data_as_of'])  # 测试进程不查日历：未知如实 null
+
+    def test_session_date_at_follows_write_time(self):
+        from datetime import date, datetime
+
+        from django.utils import timezone
+
+        from .market._cache import _session_date_at
+
+        def trading(d):
+            return d.weekday() < 5
+
+        with patch('stocks.services.is_trading_day', side_effect=trading):
+            # 周一 08:00 写入（未开盘）→ 上周五；周一 10:00 → 周一
+            mon_8 = timezone.make_aware(datetime(2026, 9, 7, 8, 0)).timestamp()
+            mon_10 = timezone.make_aware(datetime(2026, 9, 7, 10, 0)).timestamp()
+            self.assertEqual(_session_date_at(mon_8), date(2026, 9, 4).isoformat())
+            self.assertEqual(_session_date_at(mon_10), date(2026, 9, 7).isoformat())
+        with patch('stocks.services.is_trading_day', return_value=None):
+            self.assertIsNone(_session_date_at(mon_10))
+
+    @patch('stocks.market.etf.fetch_holder_structure', new=_no_holders)
+    @patch('stocks.market.etf._normalized_etf_items', return_value=_QUOTE)
+    def test_history_items_and_source_share_one_key(self, _items):
+        from .market import _cache as _cache_dict
+        from .market.etf import _history_cache_key
+
+        sina_df = pd.DataFrame([
+            {'date': '2026-08-03', 'open': 4.0, 'high': 4.1, 'low': 3.9, 'close': 4.0, 'volume': 1000},
+        ])
+        with patch('akshare.fund_etf_hist_em', side_effect=RuntimeError('502')), patch(
+            'akshare.fund_etf_hist_sina', return_value=sina_df,
+        ), patch('stocks.market.snapshots.share_history_series', return_value=[
+            {'date': '2026-08-03', 'share': 1.0e10},
+        ]):
+            data = market.get_etf_detail(
+                '510300', 'custom', start_date='2026-08-01', end_date='2026-08-31')
+        from datetime import date
+
+        key = _history_cache_key('510300', 'custom', date(2026, 8, 1), date(2026, 8, 31))
+        self.assertNotIn(f'{key}_src', _cache_dict)
+        self.assertEqual(_cache_dict[key]['data']['source'], 'sina_etf_hist')
+        self.assertEqual(data['history']['meta']['source'], 'akshare.sina_etf_hist')
+        share_meta = data['share_history']['meta']
+        self.assertEqual(share_meta['cache_status'], 'fresh')
+        self.assertEqual(share_meta['data_as_of'], '2026-08-03')

@@ -272,7 +272,7 @@ def _etf_history(code, range_name='3m', start_date=None, end_date=None, ttl=1200
     cache_key = _history_cache_key(code, range_name, start_date, end_date)
     cached = _cache_get(cache_key, ttl)
     if cached is not None:
-        return cached
+        return cached['items']
 
     if start_date:
         start = start_date
@@ -292,7 +292,7 @@ def _etf_history(code, range_name='3m', start_date=None, end_date=None, ttl=1200
         (lambda: ak.fund_etf_hist_sina(symbol=_etf_sina_symbol(code)), 'sina_etf_hist'),
     ])
     if df is None or df.empty:
-        return _stale_or(cache_key, [])
+        return (_stale_or(cache_key, None) or {}).get('items', [])
 
     if source == 'em_etf_hist':
         items = []
@@ -315,9 +315,14 @@ def _etf_history(code, range_name='3m', start_date=None, end_date=None, ttl=1200
         start_s, end_s = start.isoformat(), end.isoformat()
         items = [item for item in items if start_s <= item['date'] <= end_s]
 
-    _cache_set(cache_key, items)
-    _cache_set(f'{cache_key}_src', source)
+    # items 与来源存同一个缓存值（DAT-19）：分两个 key 会被 LRU 分别淘汰，meta 来源误标
+    _cache_set(cache_key, {'available': bool(items), 'items': items, 'source': source})
     return items
+
+
+def _history_source(cache_key):
+    """缓存里该段历史的实际来源；无缓存时按主源东财。"""
+    return (_stale_or(cache_key, None) or {}).get('source') or 'em_etf_hist'
 
 
 def _period_return(history, bars):
@@ -392,7 +397,7 @@ def get_etf_detail(code, range_name='3m', start_date=None, end_date=None):
     history = _etf_history(code, range_name=range_name, start_date=start, end_date=end)
     history_key = _history_cache_key(code, range_name, start, end)
     history_dates = [item['date'] for item in history if item.get('date')]
-    history_src = _stale_or(f'{history_key}_src', 'em_etf_hist')
+    history_src = _history_source(history_key)
     history_adjust = _ETF_HIST_ADJUST.get(history_src, 'none')
     share_series = snapshots.share_history_series(code, start, end)
     if share_series:
@@ -427,14 +432,17 @@ def get_etf_detail(code, range_name='3m', start_date=None, end_date=None):
             'available': bool(share_series),
             'items': share_series or [],
             'message': share_note,
-            'meta': _cache_meta(
-                'etf_share_snapshots',
-                0,
-                '本站日度快照（沪市历史来自上交所官方接口回填）',
-                bool(share_series),
-                source_data_date=share_series[-1]['date'] if share_series else None,
-                disclaimer='份额为收盘口径；沪市历史由上交所官方接口回填，深市随本站快照积累。',
-            ),
+            # 直接读库、不走进程内缓存：原先套一个从不写入的缓存 key，
+            # cache_status 永远是 unavailable（DAT-19）
+            'meta': {
+                'available': bool(share_series),
+                'source': '本站日度快照（沪市历史来自上交所官方接口回填）',
+                'source_data_date': share_series[-1]['date'] if share_series else None,
+                'data_as_of': share_series[-1]['date'] if share_series else None,
+                'fetched_at': None,
+                'cache_status': 'fresh' if share_series else 'unavailable',
+                'disclaimer': '份额为收盘口径；沪市历史由上交所官方接口回填，深市随本站快照积累。',
+            },
         },
         'holder_structure': fetch_holder_structure(code),
         'history': {
