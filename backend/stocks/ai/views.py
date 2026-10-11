@@ -50,10 +50,16 @@ class AiProviderViewSet(viewsets.ModelViewSet):
                 [{'role': 'user', 'content': '回复"ok"两个字母即可'}],
                 max_tokens=10,
                 timeout=15,
+                # 测试要快速给结论，不做重试
+                max_retries=0,
             )
         except ValueError:
             return _test_failed('config', None)
         except LlmError as exc:
+            if exc.kind == 'busy':
+                # 并发已满：没有真正调用上游，撤销预占的流水
+                call_log.delete()
+                return _busy_response()
             # 详情只进服务端日志（不含上游响应体），对外仅给分类
             logger.warning('AI 服务商 %s 连通性测试失败：kind=%s status=%s',
                            provider.pk, exc.kind, exc.status_code)
@@ -75,6 +81,15 @@ _TEST_ERROR_TEXT = {
     'bad_response': '服务商响应格式异常',
     'upstream': '服务商返回错误',
 }
+
+
+_BUSY_TEXT = '已有 AI 请求正在进行，请稍后再试'
+
+
+def _busy_response():
+    # 并发上限已满（AIX-02）：未调用上游，不记流水、不占每日额度
+    return Response({'detail': _BUSY_TEXT, 'error': 'busy'},
+                    status=status.HTTP_429_TOO_MANY_REQUESTS)
 
 
 def _test_failed(kind, status_code):
@@ -117,7 +132,10 @@ def stock_ai_analysis(request, pk):
     try:
         text, usage = client.chat(build_analysis_messages(stock), max_tokens=1500)
     except (LlmError, ValueError) as exc:
-        log_call('analysis', provider=client.provider, stock=stock, success=False)
+        if getattr(exc, 'kind', None) == 'busy':
+            return _busy_response()
+        log_call('analysis', provider=client.provider, stock=stock, success=False,
+                 usage=getattr(exc, 'usage', None))
         logger.warning('AI 分析失败 %s: %s', stock.code, exc)
         return Response({'detail': str(exc)}, status=status.HTTP_502_BAD_GATEWAY)
 
@@ -153,7 +171,10 @@ def screener_ai(request):
     try:
         spec, usage = client.chat_json(build_translate_messages(query))
     except (LlmError, ValueError) as exc:
-        log_call('screener_translate', provider=client.provider, success=False)
+        if getattr(exc, 'kind', None) == 'busy':
+            return _busy_response()
+        log_call('screener_translate', provider=client.provider, success=False,
+                 usage=getattr(exc, 'usage', None))
         return Response({'detail': str(exc)}, status=status.HTTP_502_BAD_GATEWAY)
 
     log_call('screener_translate', provider=client.provider, usage=usage)
@@ -190,7 +211,10 @@ def screener_ai_comment(request):
     try:
         text, usage = client.chat(build_comment_messages(rows, query), max_tokens=800)
     except (LlmError, ValueError) as exc:
-        log_call('screener_comment', provider=client.provider, success=False)
+        if getattr(exc, 'kind', None) == 'busy':
+            return _busy_response()
+        log_call('screener_comment', provider=client.provider, success=False,
+                 usage=getattr(exc, 'usage', None))
         return Response({'detail': str(exc)}, status=status.HTTP_502_BAD_GATEWAY)
 
     log_call('screener_comment', provider=client.provider, usage=usage)

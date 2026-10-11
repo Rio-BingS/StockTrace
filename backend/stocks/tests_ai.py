@@ -400,6 +400,8 @@ def _fake_response(status_code, text='', json_data=None):
     return resp
 
 
+# 关闭重试：这里只验证单次请求的安全行为与错误分类，重试见 tests_p1_ai.py
+@override_settings(STOCKTRACE_LLM_MAX_RETRIES=0)
 @patch('stocks.ai.llm.socket.getaddrinfo', side_effect=_fake_getaddrinfo(_PUBLIC_DNS))
 class LlmClientSecurityTests(TestCase):
     """SEC-01：LlmClient 调用前再次校验地址、不跟随重定向"""

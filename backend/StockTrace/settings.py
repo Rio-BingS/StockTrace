@@ -77,6 +77,11 @@ socket.setdefaulttimeout(int(os.environ.get('STOCKTRACE_UPSTREAM_TIMEOUT', '30')
 # stocks/ai/ 可调参数（llm.py 与 throttle.py 经 settings 读取，必须在此接线环境变量）
 STOCKTRACE_LLM_TIMEOUT = int(os.environ.get('STOCKTRACE_LLM_TIMEOUT', '60'))
 STOCKTRACE_AI_DAILY_LIMIT = int(os.environ.get('STOCKTRACE_AI_DAILY_LIMIT', '100'))
+# AIX-02：同时进行的 LLM 调用上限（满了立即 429，不排队）、跨重试的总时长上限（秒）、
+# 429/5xx/连接失败的重试次数
+STOCKTRACE_AI_MAX_CONCURRENCY = int(os.environ.get('STOCKTRACE_AI_MAX_CONCURRENCY', '1'))
+STOCKTRACE_LLM_TOTAL_TIMEOUT = int(os.environ.get('STOCKTRACE_LLM_TOTAL_TIMEOUT', '90'))
+STOCKTRACE_LLM_MAX_RETRIES = int(os.environ.get('STOCKTRACE_LLM_MAX_RETRIES', '1'))
 # AI 服务商 base_url 安全校验（SEC-01）：默认只允许 https 公网地址。
 # AI_ALLOW_HTTP_BASE_URL=1 放行 http（仅本地开发）；AI_BASE_URL_ALLOWED_HOSTS 逗号分隔的主机白名单，
 # 非空时只允许白名单主机，且白名单主机跳过内网地址检查（本地开发如 127.0.0.1）。
