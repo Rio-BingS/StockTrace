@@ -5,6 +5,7 @@ import { stockApi, marketApi } from '../api/stocks.js'
 import { formatPct, formatNum, formatRate, formatSigned, formatDateTime, pctClass } from '../utils/format.js'
 import { formatAmount } from '../utils/marketFormat.js'
 import { quoteForDate } from '../utils/intraday.js'
+import { pageTitle } from '../utils/routerHelpers.js'
 import KlineChart from '../components/KlineChart.vue'
 import IntradayChart from '../components/IntradayChart.vue'
 import AiAnalysisPanel from '../components/AiAnalysisPanel.vue'
@@ -151,6 +152,11 @@ watch(stockId, () => {
 watch(code, (c) => {
   if (c) loadMargin()
   else margin.value = null
+})
+
+// 标题带上股票代码与名称，多标签页时便于区分（FEF-16）
+watch(latestQuote, (q) => {
+  if (q?.code) document.title = pageTitle(`${q.code} ${q.name || ''}`.trim())
 })
 </script>
 
