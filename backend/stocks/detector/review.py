@@ -43,14 +43,16 @@ def _stock_move(signal):
     if stock is None:
         return None, None
     rows = list(
-        DailyQuote.objects.filter(stock=stock, trade_date__gt=signal.trade_date)
+        # 只用已收盘日线（DAT-13）：盘中当日 bar 的收盘价是盘中价，算出的
+        # 前瞻收益会随拉取时刻漂移，不能用来调权重
+        DailyQuote.objects.filter(stock=stock, trade_date__gt=signal.trade_date, is_final=True)
         .order_by('trade_date')
         .values_list('trade_date', 'close_price')[:REVIEW_LOOKBACK]
     )
     if not rows or signal.score is None:
         return None, None
     base = (
-        DailyQuote.objects.filter(stock=stock, trade_date=signal.trade_date)
+        DailyQuote.objects.filter(stock=stock, trade_date=signal.trade_date, is_final=True)
         .values_list('close_price', flat=True)
         .first()
     )

@@ -143,9 +143,13 @@ def build_index_context(code, name):
 
 
 def build_stock_context(stock):
-    """自选股上下文：DailyQuote（本站已拉取的日线），零新增上游请求。"""
+    """自选股上下文：DailyQuote（本站已拉取的日线），零新增上游请求。
+
+    只用已收盘的日线（DAT-13）：盘中拉到的当日 bar 量价不完整，混进序列会
+    让振幅/量比/均线距离按半天数据投票。
+    """
     rows = list(
-        DailyQuote.objects.filter(stock=stock)
+        DailyQuote.objects.filter(stock=stock, is_final=True)
         .order_by('-trade_date')
         .values_list(
             'trade_date', 'open_price', 'high_price', 'low_price',

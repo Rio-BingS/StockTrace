@@ -552,6 +552,20 @@ class FinalBarReadersTests(TestCase):
             is_final=is_final,
         )
 
+    def test_detector_context_skips_intraday_bar(self):
+        from datetime import timedelta
+
+        from .detector.dimensions import MIN_PRICE_BARS, build_stock_context
+        start = date(2026, 7, 1)
+        for i in range(MIN_PRICE_BARS):
+            self._bar(start + timedelta(days=i), 10)
+        last_final = start + timedelta(days=MIN_PRICE_BARS - 1)
+        self._bar(last_final + timedelta(days=1), 20, is_final=False)
+        ctx, _ = build_stock_context(self.stock)
+        self.assertEqual(ctx['as_of'], last_final.isoformat())
+        self.assertEqual(len(ctx['close']), MIN_PRICE_BARS)
+        self.assertNotIn(20.0, ctx['close'])
+
     @patch('stocks.ai.valuation.fetch_valuation_map', new=lambda codes: {})
     def test_screener_uses_latest_final_bar(self):
         from .ai.screener import run_screener
@@ -572,3 +586,26 @@ class FinalBarReadersTests(TestCase):
         self._bar(date(2026, 9, 4), 11, is_final=False)
         rows = _comment_rows(['600000'])
         self.assertEqual(rows[0]['trade_date'], date(2026, 9, 3))
+
+    def test_review_ignores_intraday_bars(self):
+        from types import SimpleNamespace
+
+        from .detector.review import _stock_move
+        self._bar(date(2026, 9, 1), 10)
+        self._bar(date(2026, 9, 2), 10.2)
+        self._bar(date(2026, 9, 3), 12, is_final=False)  # 盘中价不算兑现
+        signal = SimpleNamespace(target_code='600000', trade_date=date(2026, 9, 1),
+                                 score=1.0, direction='up')
+        move, hit_date = _stock_move(signal)
+        self.assertAlmostEqual(move, 2.0)
+        self.assertEqual(hit_date, date(2026, 9, 2))
+
+    def test_review_base_must_be_final(self):
+        from types import SimpleNamespace
+
+        from .detector.review import _stock_move
+        self._bar(date(2026, 9, 1), 10, is_final=False)
+        self._bar(date(2026, 9, 2), 10.2)
+        signal = SimpleNamespace(target_code='600000', trade_date=date(2026, 9, 1),
+                                 score=1.0, direction='up')
+        self.assertEqual(_stock_move(signal), (None, None))
