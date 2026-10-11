@@ -7,7 +7,7 @@ from rest_framework import viewsets, status
 from rest_framework.decorators import action, api_view
 from rest_framework.response import Response
 
-from ..models import AiProvider, Stock
+from ..models import AiCallLog, AiProvider, Stock
 from ..ai_serializers import (
     AiProviderSerializer,
     ScreenerAiInputSerializer,
@@ -230,17 +230,17 @@ def stock_ai_analysis(request, pk):
 
     if _wants_async(request):
         # 异步：同步完成校验与额度预占（429/400 立即返回），LLM 调用进后台队列
-        prepared, failed = _prepare_llm('analysis', stock=stock)
+        prepared, failed = _prepare_llm(AiCallLog.PURPOSE_ANALYSIS, stock=stock)
         if failed:
             return failed
 
         def work():
             try:
                 with hold_ai_slot(_job_slot_wait()):
-                    text, failed = _execute_llm('analysis', invoke, prepared, stock=stock)
+                    text, failed = _execute_llm(AiCallLog.PURPOSE_ANALYSIS, invoke, prepared, stock=stock)
             except LlmError as exc:
                 # 排队等名额超时：没有调用上游，撤销占位
-                failed = _llm_failed(exc, 'analysis', prepared[1], stock=stock)
+                failed = _llm_failed(exc, AiCallLog.PURPOSE_ANALYSIS, prepared[1], stock=stock)
             if failed:
                 return failed.status_code, failed.data
             return 200, {'analysis': text, 'disclaimer': DISCLAIMER}
@@ -252,7 +252,7 @@ def stock_ai_analysis(request, pk):
             status=status.HTTP_202_ACCEPTED,
         )
 
-    text, failed = _run_llm('analysis', invoke, stock=stock)
+    text, failed = _run_llm(AiCallLog.PURPOSE_ANALYSIS, invoke, stock=stock)
     if failed:
         return failed
     return Response({'analysis': text, 'disclaimer': DISCLAIMER})
@@ -307,7 +307,7 @@ def screener_ai(request):
     query = ser.validated_data['query']
 
     messages = build_translate_messages(query)
-    spec, failed = _run_llm('screener_translate', lambda c: c.chat_json(messages))
+    spec, failed = _run_llm(AiCallLog.PURPOSE_SCREENER_TRANSLATE, lambda c: c.chat_json(messages))
     if failed:
         return failed
 
@@ -364,7 +364,7 @@ def screener_ai_comment(request):
 
     messages = build_comment_messages(rows, query)
     text, failed = _run_llm(
-        'screener_comment', lambda c: c.chat(messages, max_tokens=800))
+        AiCallLog.PURPOSE_SCREENER_COMMENT, lambda c: c.chat(messages, max_tokens=800))
     if failed:
         return failed
     return Response({'comment': text, 'disclaimer': DISCLAIMER})
