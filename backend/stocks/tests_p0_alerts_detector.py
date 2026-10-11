@@ -111,8 +111,9 @@ class AlertStaleDataTests(TestCase):
         self.pct_alert = PriceAlert.objects.create(
             stock=self.stock, rule_type=PriceAlert.DAILY_PCT_ABOVE, threshold=Decimal('5'),
         )
+        # 阈值高于昨收 10.60：上穿语义下今天涨过 11 才算穿越（ALG-14）
         self.price_alert = PriceAlert.objects.create(
-            stock=self.stock, rule_type=PriceAlert.PRICE_ABOVE, threshold=Decimal('10.5'),
+            stock=self.stock, rule_type=PriceAlert.PRICE_ABOVE, threshold=Decimal('11'),
         )
 
     def _eval(self, now):
@@ -144,10 +145,11 @@ class AlertStaleDataTests(TestCase):
         self.assertTrue(all(e.trade_date == _TODAY for e in events))
 
     def test_intraday_pct_uses_today_bar_vs_prev_close(self):
-        # 当日最新价 10.70 / 昨收 10.60 = +0.94%，不应因昨日 change_pct=6 触发
+        # 当日最新价 10.70 / 昨收 10.60 = +0.94%，不应因昨日 change_pct=6 触发；
+        # 10.70 也没上穿 11，价格规则同样不触发
         _make_bar(self.stock, datetime.combine(_TODAY, time(10, 0)), Decimal('10.70'))
         events = self._eval(_at(10, 5))
-        self.assertEqual([e.alert_id for e in events], [self.price_alert.id])
+        self.assertEqual(events, [])
 
     def test_after_close_uses_today_daily_change_pct(self):
         _make_daily(self.stock, _TODAY, Decimal('11.20'), 5.66)

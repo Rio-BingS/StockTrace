@@ -9,6 +9,13 @@
 数据，拿昨日涨跌幅以今天的日期触发既是误报，又会占掉当日去重名额（P0 DAT-08）。
 收盘后（15:00 以后）照常评估，供收盘汇总任务使用。
 
+穿越语义（ALG-14）：「价格上穿/下穿」比较的是「上一交易日收盘在阈值哪一侧」与
+「当日价格在哪一侧」——昨收在阈值下方、今天到达或超过阈值才算上穿（下穿对称）。
+旧实现是水平判断（价格 ≥ 阈值），价格一直在阈值上方时每个交易日都重复触发。
+不需要新增「上次状态」字段：上一交易日收盘就是上一次评估结束时的状态。
+上一交易日收盘缺失（新加自选、无历史）时无法判断方向，退回水平判断，最多每天一次。
+涨跌幅规则两侧对称：阈值一律取绝对值（涨幅 ≥ |x|、跌幅 ≤ -|x|）。
+
 去重：同一规则同一交易日只产生一条 AlertEvent；陈旧数据根本不会被评估，不占名额。
 可选推送：settings 里配 STOCKTRACE_PUSH_URL（Server酱兼容，POST {title, desp}）。
 """
@@ -83,14 +90,19 @@ def _current_pct(stock, today):
     return (float(bar.close) - prev_close) / prev_close * 100
 
 
-def _hit(alert, price, pct):
+def _hit(alert, price, pct, prev_close=None):
+    """规则是否命中。prev_close 是上一交易日收盘（价格穿越规则用，缺失则按水平判断）。"""
     threshold = float(alert.threshold)
     if alert.rule_type == PriceAlert.PRICE_ABOVE:
-        return price is not None and price >= threshold
+        if price is None or price < threshold:
+            return False
+        return prev_close is None or prev_close < threshold
     if alert.rule_type == PriceAlert.PRICE_BELOW:
-        return price is not None and price <= threshold
+        if price is None or price > threshold:
+            return False
+        return prev_close is None or prev_close > threshold
     if alert.rule_type == PriceAlert.DAILY_PCT_ABOVE:
-        return pct is not None and pct >= threshold
+        return pct is not None and pct >= abs(threshold)
     if alert.rule_type == PriceAlert.DAILY_PCT_BELOW:
         return pct is not None and pct <= -abs(threshold)
     return False
@@ -105,8 +117,8 @@ def _message(alert, price, desc='现价'):
             f' {alert.threshold}'
         )
     if alert.rule_type == PriceAlert.DAILY_PCT_ABOVE:
-        return f'{name} 日涨幅已达 {alert.threshold}%'
-    return f'{name} 日跌幅已达 {alert.threshold}%'
+        return f'{name} 日涨幅已达 {abs(alert.threshold)}%'
+    return f'{name} 日跌幅已达 {abs(alert.threshold)}%'
 
 
 def push_message(title, desp):
@@ -132,12 +144,14 @@ def _push(events):
 def _evaluate_one(alert, today):
     """评估单条规则；命中则落库并返回 AlertEvent，否则返回 None。"""
     stock = alert.stock
-    price = pct = desc = None
+    price = pct = desc = prev_close = None
     if alert.rule_type in (PriceAlert.PRICE_ABOVE, PriceAlert.PRICE_BELOW):
         price, desc = _current_price(stock, today)
+        if price is not None:
+            prev_close = _prev_close(stock, today)
     elif alert.rule_type in (PriceAlert.DAILY_PCT_ABOVE, PriceAlert.DAILY_PCT_BELOW):
         pct = _current_pct(stock, today)
-    if not _hit(alert, price, pct):
+    if not _hit(alert, price, pct, prev_close):
         return None
     # (alert, trade_date) 有唯一约束：并发评估时另一方已写入则视为已触发（PERF-06）
     try:

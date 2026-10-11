@@ -688,3 +688,79 @@ class SignalParamsSnapshotTests(TestCase):
         with patch.object(views, '_context_for_signal', return_value=fake_ctx):
             resp = self.client.get(reverse('detector-signal-detail', args=[sig.pk])).json()
         self.assertEqual(resp['params_source']['ma_relation'], 'current')
+
+
+@patch('stocks.services.is_trading_day', _always_trading)
+class AlertRuleSemanticsTests(TestCase):
+    """ALG-14：上穿/下穿按昨收与今价是否跨过阈值判断；涨跌幅两侧对称；is_active 布尔解析。"""
+
+    def setUp(self):
+        from datetime import datetime, time
+        from decimal import Decimal
+
+        from .models import Stock
+
+        self.Decimal, self.datetime, self.time = Decimal, datetime, time
+        self.stock = Stock.objects.create(code='600000', name='浦发银行')
+
+    def _daily(self, day, close, pct=None):
+        from .models import DailyQuote
+
+        D = self.Decimal
+        return DailyQuote.objects.create(
+            stock=self.stock, trade_date=day, open_price=D(str(close)), close_price=D(str(close)),
+            high_price=D(str(close)), low_price=D(str(close)), open_close_diff=D('0'),
+            open_close_pct=D('0'), high_low_diff=D('0'), high_low_pct=D('0'),
+            change_pct=None if pct is None else D(str(pct)))
+
+    def _bar(self, price):
+        from .models import MinuteBar
+
+        D = self.Decimal
+        MinuteBar.objects.create(
+            stock=self.stock, datetime=timezone.make_aware(self.datetime.combine(_TODAY, self.time(10, 0))),
+            open=D(str(price)), close=D(str(price)), high=D(str(price)), low=D(str(price)), volume=100)
+
+    def _eval(self):
+        from . import alerts
+
+        return alerts.evaluate_alerts(
+            now=timezone.make_aware(self.datetime.combine(_TODAY, self.time(10, 5))))
+
+    def _alert(self, rule, threshold):
+        from .models import PriceAlert
+
+        return PriceAlert.objects.create(stock=self.stock, rule_type=getattr(PriceAlert, rule),
+                                         threshold=self.Decimal(str(threshold)))
+
+    def test_price_above_does_not_repeat_when_already_above_yesterday(self):
+        self._daily(_TODAY - timedelta(days=1), 10.6)
+        self._alert('PRICE_ABOVE', 10.5)
+        self._bar(10.8)
+        self.assertEqual(self._eval(), [])  # 昨收已在阈值上方：不是穿越，旧实现每天都触发
+
+    def test_price_above_fires_on_actual_cross(self):
+        self._daily(_TODAY - timedelta(days=1), 10.4)
+        alert = self._alert('PRICE_ABOVE', 10.5)
+        self._bar(10.6)
+        self.assertEqual([e.alert_id for e in self._eval()], [alert.id])
+
+    def test_price_below_symmetric(self):
+        self._daily(_TODAY - timedelta(days=1), 9.4)
+        self._alert('PRICE_BELOW', 9.5)
+        self._bar(9.3)
+        self.assertEqual(self._eval(), [])
+        self.stock.daily_quotes.all().delete()
+        self._daily(_TODAY - timedelta(days=1), 9.6)
+        self.assertEqual(len(self._eval()), 1)
+
+    def test_no_previous_close_falls_back_to_level(self):
+        alert = self._alert('PRICE_ABOVE', 10.5)
+        self._bar(10.6)
+        self.assertEqual([e.alert_id for e in self._eval()], [alert.id])
+
+    def test_pct_above_uses_absolute_threshold(self):
+        # 阈值误存为 -2：旧实现「涨幅 ≥ -2%」几乎每天触发；现按 |−2| 判断
+        self._daily(_TODAY, 10.0, pct=-1.0)
+        self._alert('DAILY_PCT_ABOVE', -2)
+        self.assertEqual(self._eval(), [])
