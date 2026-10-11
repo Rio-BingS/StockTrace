@@ -281,8 +281,8 @@ REST_FRAMEWORK = {
     'PAGE_SIZE': 100,
 }
 
-# APScheduler
-SCHEDULER_AUTOSTART = True
+# APScheduler：是否在 Web 进程内启动由 STOCKTRACE_SCHEDULER / STOCKTRACE_RUN_SCHEDULER_IN_WEB
+# 环境变量控制（见 stocks/scheduler.py），原 SCHEDULER_AUTOSTART 从未被读取，已删除（REL-10）
 # 调度运行时目录（锁文件/心跳文件）。生产设为 /run/stocktrace（stocktrace-scheduler.service
 # 的 RuntimeDirectory=），本地开发缺省放在 backend/ 下。
 STOCKTRACE_RUN_DIR = Path(os.environ.get('STOCKTRACE_RUN_DIR') or BASE_DIR)

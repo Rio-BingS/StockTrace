@@ -156,7 +156,6 @@ cd /opt/stocktrace/backend
 sudo -u www -E venv/bin/python manage.py migrate
 sudo -u www -E venv/bin/python manage.py collectstatic --noinput
 sudo cp /opt/stocktrace/deploy/stocktrace.service /opt/stocktrace/deploy/stocktrace-scheduler.service /etc/systemd/system/
-sudo cp /opt/stocktrace/deploy/gunicorn_config.py /opt/stocktrace/backend/gunicorn_config.py   # 若两份不同
 sudo systemctl daemon-reload
 sudo systemctl enable stocktrace stocktrace-scheduler
 sudo systemctl start stocktrace stocktrace-scheduler

@@ -457,3 +457,22 @@ class FetchStockDataCommandTests(TestCase):
         for args in (('--days', '9', '--all'), ('999999',), (), ('--all', '--source', 'sina')):
             with self.assertRaises(CommandError, msg=args):
                 self._call(*args)
+
+
+class GunicornConfigTests(TestCase):
+    """REL-10：只有一份 gunicorn 配置；显式关闭 preload；无效配置已删除。"""
+
+    def test_single_config_without_preload(self):
+        import runpy
+        from pathlib import Path
+        from django.conf import settings
+        backend = Path(settings.BASE_DIR)
+        self.assertFalse((backend.parent / 'deploy' / 'gunicorn_config.py').exists())
+        conf = runpy.run_path(str(backend / 'gunicorn_config.py'))
+        self.assertIs(conf['preload_app'], False)
+        self.assertEqual(Path(conf['chdir']), backend)
+        self.assertEqual(conf['wsgi_app'], 'StockTrace.wsgi:application')
+
+    def test_scheduler_autostart_removed(self):
+        from django.conf import settings
+        self.assertFalse(hasattr(settings, 'SCHEDULER_AUTOSTART'))
