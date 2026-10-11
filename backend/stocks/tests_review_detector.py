@@ -1,13 +1,15 @@
-"""探测器复盘口径 v2 与自动调参重写的回归测试（#5 #7 #12）。
+"""探测器复盘口径 v2 与自动调参重写的回归测试（#5 #7 #12 #16）。
 
 - #12：阈值 k·σ20·√h、板块 T+1 收盘基期、h 日相对沪深300 超额落库；
 - #7：DetectorRun 落库基线/超额命中率/独立样本数，API 返回，旧行为空不报错；
 - #5：自动调参默认关闭只演练；开启后跨日累计、按日聚类、Beta 后验显著才调，
-  目标值向默认值收缩且有界，调的是 noise_pct 与权重。
+  目标值向默认值收缩且有界，调的是 noise_pct 与权重；
+- #16：调参流水独立表，不随 DetectorRun 清理，迁移搬运旧流水。
 """
 
 from __future__ import annotations
 
+import importlib
 import math
 from datetime import timedelta
 from unittest.mock import patch
@@ -21,6 +23,7 @@ from .models import (
     DetectorDimConfig,
     DetectorRun,
     DetectorSignal,
+    DetectorTuneLog,
     MarketDailySnapshot,
 )
 
@@ -226,8 +229,14 @@ class AutoTuneTests(TestCase):
         self.assertTrue(summary['tune_stats'])
         after = {c.key: (c.weight, dict(c.params or {})) for c in DetectorDimConfig.objects.all()}
         self.assertEqual(after, before)
-        stat = next(x for x in summary['tune_stats'] if x['dim'] == 'vol_ratio_slope')
-        self.assertGreaterEqual(stat['prob_above'], review.TUNE_CONFIDENCE)  # 显著但只演练
+        logs = DetectorTuneLog.objects.filter(dim_key='vol_ratio_slope')
+        self.assertEqual(logs.count(), 1)
+        self.assertEqual(logs[0].source, DetectorTuneLog.SOURCE_DRY_RUN)
+        self.assertFalse(logs[0].applied)
+        self.assertIn('weight', logs[0].changes)
+        # 同日重跑：演练流水不重复
+        review.tune_dims(_TODAY, _configs())
+        self.assertEqual(DetectorTuneLog.objects.filter(dim_key='vol_ratio_slope').count(), 1)
 
     @override_settings(DETECTOR_AUTO_TUNE=True)
     def test_same_day_signals_are_one_independent_sample(self):
@@ -325,6 +334,41 @@ class BetaPosteriorTests(TestCase):
         self.assertLess(review._prob_above(10, 10, 0.95), review.TUNE_CONFIDENCE)
 
 
+class TuneLogRetentionTests(TestCase):
+    """#16：调参流水不随 DetectorRun 120 天清理；迁移搬运旧流水且可重复执行。"""
+
+    def test_cleanup_keeps_tune_log(self):
+        old_day = _TODAY - timedelta(days=400)
+        DetectorRun.objects.create(trade_date=old_day)
+        DetectorTuneLog.objects.create(trade_date=old_day, dim_key='ma_relation',
+                                       source=DetectorTuneLog.SOURCE_AUTO, applied=True)
+        scan._cleanup(_TODAY)
+        self.assertFalse(DetectorRun.objects.filter(trade_date=old_day).exists())
+        self.assertTrue(DetectorTuneLog.objects.filter(trade_date=old_day).exists())
+
+    def test_migration_copies_legacy_adjustments(self):
+        from django.apps import apps
+
+        mod = importlib.import_module('stocks.migrations.0020_detectortunelog')
+        day = _TODAY - timedelta(days=30)
+        DetectorRun.objects.create(trade_date=day, adjustments=[
+            {'dim': 'ma_relation', 'samples': 12, 'hit_rate': 0.7, 'baseline': 0.45, 'excess': 0.25,
+             'from_weight': 1.0, 'to_weight': 1.05, 'from_min': 0.08, 'to_min': 0.076,
+             'reason': '超额命中率过高，放宽投票门槛'},
+            'garbage',
+        ])
+        DetectorRun.objects.create(trade_date=day - timedelta(days=1), adjustments=[])
+        mod.copy_legacy_adjustments(apps, None)
+        mod.copy_legacy_adjustments(apps, None)  # 重复执行不重复搬
+        rows = list(DetectorTuneLog.objects.all())
+        self.assertEqual(len(rows), 1)
+        row = rows[0]
+        self.assertEqual(row.source, DetectorTuneLog.SOURCE_LEGACY)
+        self.assertTrue(row.applied)
+        self.assertEqual(row.changes, {'weight': [1.0, 1.05], 'min': [0.08, 0.076]})
+        self.assertEqual(row.stats['samples'], 12)
+
+
 @patch('stocks.trading_calendar.is_trading_day', _always_trading)
 class ReviewApiTests(TestCase):
     """#7：API 返回 命中/基线/超额/样本数；旧行字段为空时照常返回 None。"""
@@ -357,7 +401,10 @@ class ReviewApiTests(TestCase):
         self.assertEqual(item['benchmark_code'], 'sh000300')
         self.assertEqual(item['review_version'], 2)
 
-    def test_config_exposes_tune_switch_and_rules(self):
+    def test_config_exposes_tune_switch_rules_and_log(self):
+        DetectorTuneLog.objects.create(trade_date=_TODAY, dim_key='ma_relation',
+                                       source=DetectorTuneLog.SOURCE_DRY_RUN,
+                                       changes={'weight': [1.0, 1.2]}, stats={'samples': 12})
         data = self.client.get(reverse('detector-config')).json()
         rules = data['review_rules']
         self.assertFalse(rules['auto_tune'])
@@ -365,6 +412,8 @@ class ReviewApiTests(TestCase):
         self.assertEqual(rules['benchmark'], 'sh000300')
         self.assertEqual(rules['base']['industry'], 'close_t1')
         self.assertEqual(rules['base']['stock'], 'open_t1')
+        self.assertEqual(data['tune_log'][0]['dim_key'], 'ma_relation')
+        self.assertFalse(data['tune_log'][0]['applied'])
         self.assertIn('已关闭', data['meta']['disclaimer'])
         with override_settings(DETECTOR_AUTO_TUNE=True):
             data = self.client.get(reverse('detector-config')).json()

@@ -22,7 +22,7 @@ from ..common.envelope import envelope
 from ..common.pagination import paginate
 from ..common.params import parse_bool, parse_date, positive_int
 from ..trading_calendar import expected_latest_date
-from ..models import DetectorDimConfig, DetectorRun, DetectorSignal
+from ..models import DetectorDimConfig, DetectorRun, DetectorSignal, DetectorTuneLog
 from . import constants, registry
 from .dimensions import (
     build_index_context,
@@ -335,7 +335,7 @@ def detector_heatmap(request):
 
 @api_view(['GET'])
 def detector_config(request):
-    """维度配置与迭代状态（只读）：权重/阈值/启停原因 + 近 10 次运行摘要。"""
+    """维度配置与迭代状态（只读）：权重/阈值/启停原因 + 近 10 次运行摘要 + 调参流水。"""
     cfg_rows = {c.key: c for c in DetectorDimConfig.objects.all()}
     dims = []
     for spec in registry.DIMENSIONS:
@@ -375,6 +375,19 @@ def detector_config(request):
             'tune_params': {k: list(v['bounds']) for k, v in constants.TUNE_PARAMS.items()},
             'min_samples': constants.MIN_ADJ_SAMPLES,
         },
+        # 调参流水（#16，独立表、永久保留）：最近 20 条，含关闭时的演练记录
+        'tune_log': [
+            {
+                'trade_date': t.trade_date,
+                'dim_key': t.dim_key,
+                'source': t.source,
+                'applied': t.applied,
+                'changes': t.changes,
+                'stats': t.stats,
+                'reason': t.reason,
+            }
+            for t in DetectorTuneLog.objects.order_by('-trade_date', '-id')[:20]
+        ],
         # 平静闸门与分级参数只读展示（不参与自动调参，理由见 calm.py 文件尾）
         'calm_rules': {
             'price': dict(constants.PRICE_CALM_PARAMS),

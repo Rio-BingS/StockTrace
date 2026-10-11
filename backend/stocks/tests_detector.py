@@ -19,6 +19,7 @@ from .models import (
     DetectorDimConfig,
     DetectorRun,
     DetectorSignal,
+    DetectorTuneLog,
     MarketDailySnapshot,
     Stock,
 )
@@ -419,8 +420,10 @@ class ReviewTests(TestCase):
         # 真正决定投票的噪声闸门放宽（分位下降），且不越下限
         self.assertLess(cfg.params['noise_pct'], 0.8)
         self.assertGreaterEqual(cfg.params['noise_pct'], review.TUNE_PARAMS['noise_pct']['bounds'][0])
-        entry = next(a for a in summary['adjustments'] if a['dim'] == 'vol_ratio_slope')
-        self.assertEqual(entry['samples'], n)
+        log = DetectorTuneLog.objects.get(dim_key='vol_ratio_slope')
+        self.assertEqual(log.source, DetectorTuneLog.SOURCE_AUTO)
+        self.assertTrue(log.applied)
+        self.assertEqual(log.stats['samples'], n)
 
     @override_settings(DETECTOR_AUTO_TUNE=True)
     def test_miss_marks_and_adjusts_weight_down(self):

@@ -22,8 +22,8 @@
   的信号共享同一段市场走势，按簇计为一个样本（簇内取平均）。
 
 自动调参（#5）：
-- 总开关 settings.DETECTOR_AUTO_TUNE，默认关闭：关闭时照常统计（summary 的
-  tune_stats），显著的结论只演练、不改 DetectorDimConfig；
+- 总开关 settings.DETECTOR_AUTO_TUNE，默认关闭：关闭时照常统计，显著的结论
+  只写演练流水（DetectorTuneLog source=dry_run），不改 DetectorDimConfig；
 - 样本跨日累计：取 TUNE_WINDOW_DAYS 内已用 v2 口径判定、有基线的段首信号
   （cycles == 2，同一段的后续日窗口重叠，不计入），按上面的规则聚类；
 - 显著才调：Beta(1,1) 先验下 P(命中率 > 平均基线) ≥ TUNE_CONFIDENCE 才上调、
@@ -35,7 +35,8 @@
 - 怎么调：目标值是「默认值 + 有效超额的函数」，有效超额 = 超额 × n/(n+n0)
   向 0（即默认值）收缩，再夹到上下限。目标值只由窗口内样本决定、不在当前值上
   累乘，同样的证据重复评估不会把参数一路推到边界；
-- 留痕：生效的调整写进 DetectorRun.adjustments（who/when/from/to/samples）。
+- 留痕：每次生效/演练写一行 DetectorTuneLog（永久保留，#16），生效的同时照旧
+  写进 DetectorRun.adjustments 兼容旧读法。
 """
 
 from __future__ import annotations
@@ -47,7 +48,7 @@ from datetime import timedelta
 from django.conf import settings
 from django.utils import timezone
 
-from ..models import DailyQuote, DetectorDimConfig, DetectorSignal
+from ..models import DailyQuote, DetectorDimConfig, DetectorSignal, DetectorTuneLog
 from ..trading_calendar import MAX_LOOKBACK_DAYS, recent_trading_days
 # 阈值数值集中在 constants.py（ARC-06），这里保留同名引用，review.X 旧路径照常可用
 from .constants import (
@@ -567,12 +568,24 @@ def tune_dims(scan_date, configs):
     每个有样本维度的统计（无论开关、无论是否显著，供 summary/日志）。
     """
     apply = _auto_tune_enabled()
+    source = DetectorTuneLog.SOURCE_AUTO if apply else DetectorTuneLog.SOURCE_DRY_RUN
     adjustments, stats = [], []
     for key, pairs in sorted(_dim_samples(scan_date).items()):
         stat = _dim_stat(key, pairs)
         stats.append(stat)
         entry = _adjust_dim(key, stat, configs, apply=apply)
-        if entry and apply:
+        if not entry:
+            continue
+        DetectorTuneLog.objects.update_or_create(
+            trade_date=scan_date, dim_key=key, source=source,
+            defaults={
+                'applied': apply,
+                'changes': entry['changes'],
+                'stats': stat,
+                'reason': entry['reason'][:300],
+            },
+        )
+        if apply:
             adjustments.append(entry)
     return adjustments, stats
 
