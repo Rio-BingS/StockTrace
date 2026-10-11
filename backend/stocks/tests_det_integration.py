@@ -2,6 +2,8 @@
 
 - 0021 数据迁移：维度改名、失效/过时参数重置为新默认、权重保留、可回滚；
 - settings.DETECTOR_SECTOR_SIGNAL_CAP：环境变量接线，默认 10，0 关闭截断；
+- 配置接口：vote_rules 带加权票下限/对侧比例/信息组/截断上限，维度带适用对象、
+  分组与停用类别（候选维度 vs 无数据源）。
 """
 
 from __future__ import annotations
@@ -11,8 +13,9 @@ import importlib
 from django.apps import apps
 from django.conf import settings
 from django.test import TestCase, override_settings
+from django.urls import reverse
 
-from .detector import registry, scan
+from .detector import constants, registry, scan
 from .models import DetectorDimConfig, DetectorTuneLog
 
 _MIG = importlib.import_module('stocks.migrations.0021_detector_dim_config_refresh')
@@ -93,3 +96,34 @@ class SectorSignalCapSettingTests(TestCase):
                      for i in range(15)]
         kept, cut = scan.truncate_by_strength(collected, scan._sector_signal_cap())
         self.assertEqual((len(kept), len(cut)), (15, 0))
+
+
+class ConfigApiTests(TestCase):
+    def test_vote_rules_expose_grouped_voting(self):
+        body = self.client.get(reverse('detector-config')).json()
+        rules = body['vote_rules']
+        self.assertEqual(rules['min_dims'], constants.VOTE_MIN_DIMS)
+        self.assertEqual(rules['min_weight'], constants.VOTE_MIN_WEIGHT)
+        self.assertEqual(rules['oppose_ratio'], constants.OPPOSE_RATIO)
+        self.assertEqual(rules['sector_signal_cap'], 10)
+        self.assertEqual(rules['groups']['price'], {'role': 'direction',
+                                                    'dims': ['vol_compress', 'ma_relation']})
+        self.assertEqual(rules['groups']['volume']['role'], 'strength')
+        # 停用维度不进计票分组
+        self.assertNotIn('vp_corr', rules['groups']['volume']['dims'])
+
+    @override_settings(DETECTOR_SECTOR_SIGNAL_CAP=0)
+    def test_cap_follows_settings(self):
+        body = self.client.get(reverse('detector-config')).json()
+        self.assertEqual(body['vote_rules']['sector_signal_cap'], 0)
+
+    def test_dims_carry_scope_group_and_disabled_kind(self):
+        dims = {d['key']: d for d in self.client.get(reverse('detector-config')).json()['dims']}
+        self.assertEqual(dims['big_order_net']['targets'], ['industry', 'concept'])
+        self.assertEqual(dims['margin_north']['vote_codes'], ['sh000300'])
+        self.assertEqual((dims['vp_corr']['group'], dims['vp_corr']['role']), ('volume', 'strength'))
+        self.assertEqual(dims['vp_corr']['disabled_kind'], 'candidate')
+        self.assertEqual(dims['order_imbalance']['disabled_kind'], 'no_source')
+        self.assertEqual(dims['ma_relation']['disabled_kind'], '')
+        self.assertEqual(dims['ma_relation']['params']['z_lo'], 1.282)
+

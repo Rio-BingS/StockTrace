@@ -29,6 +29,8 @@ from .dimensions import (
     build_sector_context,
     build_stock_context,
 )
+from .scan import _sector_signal_cap
+from .signals import dim_group
 
 logger = logging.getLogger(__name__)
 
@@ -277,7 +279,8 @@ def detector_signal_detail(request, pk):
         'dimension_series': dimension_series,
         'params_source': params_source,
         'disabled_dims': [
-            {'key': d['key'], 'name': d['name'], 'disabled_reason': d['disabled_reason']}
+            {'key': d['key'], 'name': d['name'], 'disabled_reason': d['disabled_reason'],
+             'disabled_kind': _disabled_kind(d, False)}
             for d in registry.DIMENSIONS if not d['enabled']
         ],
     })
@@ -333,6 +336,26 @@ def detector_heatmap(request):
     })
 
 
+def _disabled_kind(spec, enabled):
+    """停用原因的类别：candidate=已实现但回测未证明有效的候选维度；
+    no_source=本站没有数据源/尚未实现；启用中为空串。"""
+    if enabled:
+        return ''
+    return 'no_source' if spec.get('evaluate') is None else 'candidate'
+
+
+def _vote_groups():
+    """投票信息组（#4）：{group: {'role', 'dims': [启用维度 key...]}}，与 signals.vote 同源。"""
+    groups = {}
+    for spec in registry.DIMENSIONS:
+        if not spec['enabled']:
+            continue
+        group, role = dim_group(spec['key'])
+        entry = groups.setdefault(group, {'role': role, 'dims': []})
+        entry['dims'].append(spec['key'])
+    return groups
+
+
 @api_view(['GET'])
 def detector_config(request):
     """维度配置与迭代状态（只读）：权重/阈值/启停原因 + 近 10 次运行摘要 + 调参流水。"""
@@ -340,11 +363,19 @@ def detector_config(request):
     dims = []
     for spec in registry.DIMENSIONS:
         cfg = cfg_rows.get(spec['key'])
+        enabled = cfg.is_enabled if cfg else spec['enabled']
+        group, role = dim_group(spec['key'])
         dims.append({
             'key': spec['key'],
             'name': cfg.name if cfg and cfg.name else spec['name'],
-            'enabled': cfg.is_enabled if cfg else spec['enabled'],
+            'enabled': enabled,
             'disabled_reason': (cfg.disabled_reason if cfg else None) or spec.get('disabled_reason', ''),
+            'disabled_kind': _disabled_kind(spec, enabled),
+            # 适用对象与投票分组（前端「适用对象」列与计票说明直接用，不再手写映射）
+            'targets': list(spec['targets']),
+            'vote_codes': list(constants.MARGIN_VOTE_CODES) if spec['key'] == 'margin_north' else None,
+            'group': group,
+            'role': role,
             'note': spec['note'],
             'weight': cfg.weight if cfg else 1.0,
             'params': {**spec['defaults'], **((cfg.params or {}) if cfg else {})},
@@ -395,6 +426,12 @@ def detector_config(request):
         },
         'vote_rules': {
             'min_dims': constants.VOTE_MIN_DIMS,
+            # 分组加权投票（#4）：同侧加权票下限、对侧比例、信息组构成
+            'min_weight': constants.VOTE_MIN_WEIGHT,
+            'oppose_ratio': constants.OPPOSE_RATIO,
+            'groups': _vote_groups(),
             'severity': dict(constants.SEVERITY_RULES),
+            # 多重检验（#11）：每日板块信号按强度截断的上限，0 = 不截断
+            'sector_signal_cap': _sector_signal_cap(),
         },
     })
