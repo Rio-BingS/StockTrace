@@ -67,7 +67,12 @@ def _bs_session():
     """持锁执行一次 BaoStock 会话（login → query → logout），yield baostock 模块"""
     import baostock as bs
     with _bs_lock:
-        bs.login()
+        lg = bs.login()
+        # BaoStock 登录失败（网络不可达等）不抛异常，只在返回值里给 error_code；
+        # 不检查的话调用方会拿到空结果当「无数据」，冷却/负缓存都不生效
+        err = getattr(lg, 'error_code', '0')
+        if isinstance(err, str) and err != '0':
+            raise RuntimeError(f"BaoStock 登录失败: {err} {getattr(lg, 'error_msg', '')}")
         try:
             yield bs
         finally:
@@ -533,6 +538,9 @@ def _baostock_is_trading_day(date, now):
     try:
         with _bs_session() as bs:
             rs = bs.query_trade_dates(start_date=date_str, end_date=date_str)
+            err = getattr(rs, 'error_code', '0')
+            if isinstance(err, str) and err != '0':
+                raise RuntimeError(f"查询失败: {err} {getattr(rs, 'error_msg', '')}")
             while rs.next():
                 row = rs.get_row_data()
                 return row[1] == '1'

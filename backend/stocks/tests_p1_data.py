@@ -489,3 +489,47 @@ class SnapshotEtfFreshnessTests(TestCase):
             saved, spot = self._save(RuntimeError('should not be called'))
         spot.assert_not_called()
         self.assertEqual(saved[MarketDailySnapshot.KIND_ETF_SHARE], 2)
+
+
+class BaoStockLoginFailureTests(SimpleTestCase):
+    """BaoStock 不可达时 login 不抛异常只返回 error_code：须识别为失败并进入冷却，
+    不能每个日期都重新登录一次。"""
+
+    class _Result:
+        def __init__(self, code, msg=''):
+            self.error_code = code
+            self.error_msg = msg
+
+    def setUp(self):
+        services._reset_trade_calendar_cache()
+        self.addCleanup(services._reset_trade_calendar_cache)
+
+    def test_login_error_code_enters_cooldown(self):
+        with patch('akshare.tool_trade_date_hist_sina', side_effect=RuntimeError('down')), \
+                patch('baostock.login', return_value=self._Result('10002007', '网络接收错误。')) as login, \
+                patch('baostock.logout') as logout, \
+                patch('baostock.query_trade_dates') as query:
+            for d in range(5, 10):
+                self.assertIsNone(services.is_trading_day(date(2026, 10, d)))
+        self.assertEqual(login.call_count, 1)
+        query.assert_not_called()
+        logout.assert_not_called()  # 未登录成功不登出
+        self.assertFalse(services._bs_lock.locked())
+
+    def test_query_error_code_enters_cooldown(self):
+        rs = self._Result('10004011', '查询失败')
+        rs.next = lambda: False
+        with patch('akshare.tool_trade_date_hist_sina', side_effect=RuntimeError('down')), \
+                patch('baostock.login', return_value=self._Result('0')) as login, \
+                patch('baostock.logout'), \
+                patch('baostock.query_trade_dates', return_value=rs):
+            for d in range(5, 8):
+                self.assertIsNone(services.is_trading_day(date(2026, 10, d)))
+        self.assertEqual(login.call_count, 1)
+
+    def test_login_failure_makes_source_fail(self):
+        with patch('baostock.login', return_value=self._Result('10002007')), \
+                patch('baostock.query_history_k_data_plus') as query:
+            with self.assertRaises(RuntimeError):
+                services.BaoStockSource().fetch_daily('600000', '20260901', '20260901')
+        query.assert_not_called()
