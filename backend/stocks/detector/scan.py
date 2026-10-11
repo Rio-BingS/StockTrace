@@ -265,6 +265,8 @@ def run_scan(trade_date=None):
         if signal_data is None:
             cleared.append((target['kind'], target['code']))
             continue
+        if signal_data.get('cycles_unknown'):
+            degraded.append({'target': target_key, 'reason': '交易日历不可用，周期数无法确认，按周期 1 记'})
         collected.append((target_key, signal_data, dim_results))
 
     for board_rows in matrix.values():

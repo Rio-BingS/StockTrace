@@ -416,3 +416,53 @@ class SectorSnapshotPreloadTests(TestCase):
         with self.assertNumQueries(0):
             for t in targets:
                 scan._build_context(t)
+
+
+class CycleCountTests(TestCase):
+    """ALG-15/PERF-08：周期计数一次查询；日历不可用时如实「未知」，不按自然日推进。"""
+
+    def _sig(self, day, direction='up'):
+        from .models import DetectorSignal
+
+        return DetectorSignal.objects.create(
+            target_kind='stock', target_code='600000', target_name='x',
+            trade_date=day, direction=direction)
+
+    def test_counts_consecutive_trading_days_across_weekend_in_one_query(self):
+        from .detector import signals
+
+        # 周一信号日，上周五、周四有信号：周末不是交易日，连续性不断
+        monday = _TODAY - timedelta(days=_TODAY.weekday()) + timedelta(days=7)
+        self._sig(monday - timedelta(days=3))
+        self._sig(monday - timedelta(days=4))
+        self._sig(monday - timedelta(days=6), direction='down')  # 上周二反向，断链
+
+        def weekday_only(day=None):
+            return day.weekday() < 5
+
+        with patch('stocks.services.is_trading_day', weekday_only), self.assertNumQueries(1):
+            cycles = signals._count_cycles('stock', '600000', 'up', monday)
+        self.assertEqual(cycles, 2)
+
+    def test_unknown_calendar_returns_none_instead_of_natural_days(self):
+        from .detector import signals
+
+        self._sig(_TODAY - timedelta(days=1))
+        with patch('stocks.services.is_trading_day', return_value=None):
+            self.assertIsNone(signals._count_cycles('stock', '600000', 'up', _TODAY))
+        with patch('stocks.services.is_trading_day', side_effect=RuntimeError('down')):
+            self.assertIsNone(signals._count_cycles('stock', '600000', 'up', _TODAY))
+
+    def test_unknown_cycles_marks_signal_and_counts_as_one(self):
+        from .detector import signals
+
+        def ev(ctx, params):
+            return {'available': True, 'value': 30.0, 'direction': 'up', 'note': '', 'series': []}
+
+        configs = [{'key': k, 'name': k, 'weight': 1.0, 'params': {}, 'targets': ('stock',),
+                    'evaluate': ev, 'enabled': True, 'defaults': {}} for k in ('a', 'b')]
+        ctx = {'kind': 'stock', 'code': '600000', 'name': 'x', 'as_of': _TODAY.isoformat()}
+        with patch('stocks.services.is_trading_day', return_value=None):
+            data, _ = signals.evaluate_target(ctx, configs)
+        self.assertEqual(data['cycles'], 1)
+        self.assertTrue(data['cycles_unknown'])
