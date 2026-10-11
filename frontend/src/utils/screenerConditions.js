@@ -4,6 +4,16 @@
  * 现在逐行给出错误，有任何一行不完整就不允许执行。
  */
 
+// 条件行的稳定 key：增删行时 v-for 不能用下标，否则删除中间一行后
+// 下面各行的输入框状态（焦点、未提交的输入法文本）会错位到别的行（FEF-17）
+let condUid = 0
+
+/** 新建一行条件（带稳定 uid，不随序列化提交给后端） */
+export function newCondition(fields = { field: 'change_pct', op: 'gt', value: '' }) {
+  condUid += 1
+  return { uid: condUid, ...fields }
+}
+
 function isBlank(v) {
   return v === undefined || v === null || String(v).trim() === ''
 }

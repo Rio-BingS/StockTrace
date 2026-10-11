@@ -6,7 +6,7 @@ import { aiDisclaimer, aiErrorText, createAiTask, isCanceled } from '../utils/ai
 import { formatPct, formatNum, formatRate, pctClass } from '../utils/format.js'
 import { formatAmount, formatVolume } from '../utils/marketFormat.js'
 import { errorMessage } from '../utils/errorMessage.js'
-import { buildConditions, conditionErrors, hasDetail } from '../utils/screenerConditions.js'
+import { buildConditions, conditionErrors, hasDetail, newCondition } from '../utils/screenerConditions.js'
 
 const router = useRouter()
 
@@ -94,7 +94,7 @@ const resultDisclaimer = ref('')
 
 // 手动条件
 const logic = ref('all')
-const conditions = ref([{ field: 'change_pct', op: 'gt', value: '' }])
+const conditions = ref([newCondition()])
 const manualLoading = ref(false)
 
 // 结果
@@ -176,7 +176,7 @@ function fmtCell(row, col) {
 }
 
 function addCondition() {
-  conditions.value.push({ field: 'change_pct', op: 'gt', value: '' })
+  conditions.value.push(newCondition())
 }
 function removeCondition(i) {
   conditions.value.splice(i, 1)
@@ -240,14 +240,14 @@ async function savePreset() {
 
 function applyPreset(p) {
   logic.value = p.spec.logic || 'all'
-  conditions.value = (p.spec.conditions || []).map(c => ({
+  conditions.value = (p.spec.conditions || []).map(c => newCondition({
     field: c.field,
     op: c.op,
     value: c.op === 'between' ? c.value?.[0] : c.value,
     value2: c.op === 'between' ? c.value?.[1] : undefined,
   }))
   if (!conditions.value.length) {
-    conditions.value = [{ field: 'change_pct', op: 'gt', value: '' }]
+    conditions.value = [newCondition()]
   }
   orderBy.value = p.spec.order_by || ''
   orderDir.value = p.spec.order_dir || 'desc'
@@ -407,7 +407,7 @@ function goDetail(row) {
       <h2>手动条件</h2>
       <div class="conds">
         <div
-          v-for="(c, i) in conditions" :key="i"
+          v-for="(c, i) in conditions" :key="c.uid"
           class="cond-row" :class="{ invalid: condErrors[i] }"
         >
           <select v-model="c.field" @change="onFieldChange(c)">

@@ -1,6 +1,6 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { buildConditions, conditionError, conditionErrors, hasDetail } from '../screenerConditions.js'
+import { buildConditions, conditionError, conditionErrors, hasDetail, newCondition } from '../screenerConditions.js'
 
 const BOOL = new Set(['above_ma5'])
 
@@ -48,4 +48,12 @@ test('hasDetail：stock_id 为空时不能跳转详情', () => {
   assert.equal(hasDetail({ stock_id: null }), false)
   assert.equal(hasDetail({ stock_id: '' }), false)
   assert.equal(hasDetail({}), false)
+})
+
+test('newCondition：每行有唯一 uid，且不进入提交给后端的 spec（FEF-17）', () => {
+  const a = newCondition()
+  const b = newCondition({ field: 'pct_5d', op: 'lt', value: '3' })
+  assert.notEqual(a.uid, b.uid)
+  assert.equal(b.field, 'pct_5d')
+  assert.deepEqual(buildConditions([b], new Set()), [{ field: 'pct_5d', op: 'lt', value: 3 }])
 })
