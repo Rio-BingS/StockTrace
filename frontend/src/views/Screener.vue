@@ -16,7 +16,9 @@ import {
 } from '../utils/screenerConditions.js'
 import { BOOL_FIELDS, ORDER_OPTIONS } from '../constants/screenerFields.js'
 import { extraColumnsFor, fmtCell } from '../utils/screenerColumns.js'
+import { pickScreenerMeta } from '../utils/screenerMeta.js'
 import ScreenerConditionList from '../components/ScreenerConditionList.vue'
+import ScreenerResultMeta from '../components/ScreenerResultMeta.vue'
 
 const router = useRouter()
 
@@ -35,6 +37,8 @@ const manualLoading = ref(false)
 const results = ref([])
 const appliedConditions = ref(null)
 const resultCount = ref(0)
+// 横截面元信息：数据截至日 as_of 与未参与的股票 excluded（ALG-12）
+const resultMeta = ref(null)
 const errorMsg = ref('')
 const notice = ref('')
 
@@ -201,6 +205,7 @@ async function runManual() {
     const res = await aiApi.screener(spec)
     results.value = res.data.results
     resultCount.value = res.data.count
+    resultMeta.value = pickScreenerMeta(res.data)
     appliedConditions.value = spec
     resultDisclaimer.value = ''
   } catch (e) {
@@ -230,6 +235,7 @@ async function runAi() {
     if (!isCurrent()) return
     results.value = data.results
     resultCount.value = data.count
+    resultMeta.value = pickScreenerMeta(data)
     appliedConditions.value = data.conditions
     resultDisclaimer.value = aiDisclaimer(data)
     notice.value = 'AI 已把需求翻译为可复现的结构化条件并执行'
@@ -398,6 +404,7 @@ function goDetail(row) {
       <div v-if="resultDisclaimer" class="disclaimer">
         条件由 AI 翻译生成。{{ resultDisclaimer }}
       </div>
+      <ScreenerResultMeta :meta="resultMeta" />
       <!-- 窄屏下表格横向滚动，不撑宽整页（FEX-05） -->
       <div class="table-scroll">
         <table class="result-table">
@@ -445,6 +452,7 @@ function goDetail(row) {
       </div>
     </div>
     <div v-else-if="appliedConditions && !results.length" class="card hint">
+      <ScreenerResultMeta :meta="resultMeta" />
       没有符合条件的股票。
     </div>
   </div>
