@@ -377,3 +377,42 @@ class TurnoverShareChangeTests(TestCase):
 
         self.assertIsNone(_share_basis_break(self._ctx(split_at=5), 60, 1.2))
         self.assertIsNotNone(_share_basis_break(self._ctx(split_at=40), 60, 1.2))
+
+
+class SectorSnapshotPreloadTests(TestCase):
+    """PERF-04：一次扫描每类板块快照只读一次，各板块共用，结果与逐板块读库一致。"""
+
+    def _seed(self, names, days=20):
+        from .models import MarketDailySnapshot
+
+        for i in range(days):
+            MarketDailySnapshot.objects.create(
+                kind=MarketDailySnapshot.KIND_INDUSTRY_FF,
+                trade_date=_TODAY - timedelta(days=days - 1 - i),
+                payload=[{'name': nm, 'net': 1e8 * (i % 3 - 1), 'change_pct': 0.1 * (i % 5)}
+                         for nm in names],
+            )
+
+    def test_preloaded_context_matches_direct_read(self):
+        from .detector import dimensions
+
+        self._seed(['甲', '乙'])
+        snaps = dimensions.load_sector_snapshots('industry')
+        for name in ('甲', '乙'):
+            direct, _ = dimensions.build_sector_context('industry', name)
+            shared, _ = dimensions.build_sector_context('industry', name, snapshots=snaps)
+            self.assertEqual(direct, shared)
+
+    def test_collect_and_build_read_each_kind_once(self):
+        from .detector import dimensions, scan
+
+        self._seed(['甲', '乙', '丙'])
+        real = dimensions.load_sector_snapshots
+        with patch.object(scan, 'load_sector_snapshots', side_effect=real) as spy:
+            targets = [t for t in scan._collect_targets() if t['kind'] == 'industry']
+            ctxs = [scan._build_context(t)[0] for t in targets]
+        self.assertEqual(spy.call_count, 2)  # industry + concept 各一次
+        self.assertEqual([c['code'] for c in ctxs], ['丙', '乙', '甲'])
+        with self.assertNumQueries(0):
+            for t in targets:
+                scan._build_context(t)

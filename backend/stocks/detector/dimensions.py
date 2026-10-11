@@ -260,30 +260,50 @@ def _price_ctx(kind, code, name, items):
     }
 
 
-def build_sector_context(kind, name, lookback_days=45):
+SECTOR_LOOKBACK_DAYS = 45
+
+
+def _sector_kind_db(kind):
+    return (
+        MarketDailySnapshot.KIND_INDUSTRY_FF
+        if kind == 'industry'
+        else MarketDailySnapshot.KIND_CONCEPT_FF
+    )
+
+
+def load_sector_snapshots(kind, lookback_days=SECTOR_LOOKBACK_DAYS):
+    """一次读出某类板块最近 lookback_days 个快照日并按名字建索引（PERF-04）。
+
+    返回 [(trade_date, {name: row})]，日期升序。扫描时每类只读一次、全部板块
+    共用；旧实现每个板块各自重读 45 天全量 JSON，一次扫描约 2 万次大 JSON
+    反序列化。
+    """
+    rows = (
+        MarketDailySnapshot.objects.filter(kind=_sector_kind_db(kind))
+        .order_by('-trade_date')
+        .values_list('trade_date', 'payload')[:lookback_days]
+    )
+    out = []
+    for trade_date, payload in reversed(list(rows)):
+        out.append((trade_date, {r.get('name'): r for r in (payload or []) if r.get('name')}))
+    return out
+
+
+def build_sector_context(kind, name, lookback_days=SECTOR_LOOKBACK_DAYS, snapshots=None):
     """板块上下文：本站日度快照透视出的逐日 net / change_pct 序列。
 
     「某板块某天缺行就 None」：回填可能只补到部分板块，绝不能拿旧值或 0
     补天（与快照模块「窗口齐全才算数」同一纪律）；各维度在取窗时遇 None
     自行如实不可用。
+    snapshots：load_sector_snapshots 的结果（扫描时预加载、各板块共用）；
+    缺省时自行读库（信号详情页等单板块场景）。
     """
-    kind_db = (
-        MarketDailySnapshot.KIND_INDUSTRY_FF
-        if kind == 'industry'
-        else MarketDailySnapshot.KIND_CONCEPT_FF
-    )
-    rows = (
-        MarketDailySnapshot.objects.filter(kind=kind_db)
-        .order_by('-trade_date')
-        .values_list('trade_date', 'payload')[:lookback_days]
-    )
-    rows = list(rows)[::-1]  # 升序
+    if snapshots is None:
+        snapshots = load_sector_snapshots(kind, lookback_days)
     dates, nets, pcts = [], [], []
     valid = 0
-    for trade_date, payload in rows:
-        row = next(
-            (r for r in (payload or []) if r.get('name') == name), None
-        )
+    for trade_date, by_name in snapshots:
+        row = by_name.get(name)
         dates.append(trade_date.isoformat())
         net = row.get('net') if row else None
         pct = row.get('change_pct') if row else None

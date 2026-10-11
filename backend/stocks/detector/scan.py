@@ -30,10 +30,15 @@ from django.utils import timezone
 
 from ..market.indices import TREND_INDICES
 from ..market.snapshots import save_margin_snapshot
-from ..models import DetectorDimConfig, DetectorRun, DetectorSignal, MarketDailySnapshot, Stock
+from ..models import DetectorDimConfig, DetectorRun, DetectorSignal, Stock
 from . import calm as calm_mod
 from . import registry, review, signals
-from .dimensions import build_index_context, build_sector_context, build_stock_context
+from .dimensions import (
+    build_index_context,
+    build_sector_context,
+    build_stock_context,
+    load_sector_snapshots,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -80,26 +85,24 @@ def load_configs(create=True):
 
 
 def _collect_targets():
-    """对象宇宙：指数 + 自选股 + 板块。板块宇宙只依赖快照，快照缺就不含。"""
+    """对象宇宙：指数 + 自选股 + 板块。板块宇宙只依赖快照，快照缺就不含。
+
+    板块快照每类只读一次（PERF-04）：宇宙取最近 _SECTOR_UNIVERSE_ROWS 个快照日
+    的名字并集，同一份预加载数据挂在板块 target 的 'snapshots' 上，构建序列时
+    直接复用，不再逐板块重读 45 天全量 JSON。
+    """
     targets = []
     for code, name in TREND_INDICES:
         targets.append({'kind': 'index', 'code': code, 'name': name})
     for stock in Stock.objects.filter(is_active=True).order_by('code'):
         targets.append({'kind': 'stock', 'code': stock.code, 'name': stock.name, 'stock': stock})
-    for kind_db, kind in (
-        (MarketDailySnapshot.KIND_INDUSTRY_FF, 'industry'),
-        (MarketDailySnapshot.KIND_CONCEPT_FF, 'concept'),
-    ):
+    for kind in ('industry', 'concept'):
+        snapshots = load_sector_snapshots(kind)
         names = set()
-        rows = MarketDailySnapshot.objects.filter(kind=kind_db).order_by('-trade_date')[
-            :_SECTOR_UNIVERSE_ROWS
-        ]
-        for snap in rows:
-            for row in snap.payload or []:
-                if row.get('name'):
-                    names.add(row['name'])
+        for _trade_date, by_name in snapshots[-_SECTOR_UNIVERSE_ROWS:]:
+            names.update(by_name)
         for name in sorted(names):
-            targets.append({'kind': kind, 'code': name, 'name': name})
+            targets.append({'kind': kind, 'code': name, 'name': name, 'snapshots': snapshots})
     return targets
 
 
@@ -110,7 +113,7 @@ def _build_context(target):
         return build_index_context(target['code'], target['name'])
     if kind == 'stock':
         return build_stock_context(target['stock'])
-    return build_sector_context(kind, target['code'])
+    return build_sector_context(kind, target['code'], snapshots=target.get('snapshots'))
 
 
 def _stale_reason(ctx, trade_date):
