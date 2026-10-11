@@ -627,11 +627,32 @@ def _alert_rule_error(stock_id, rule_type, threshold_raw):
         threshold = Decimal(str(threshold_raw))
     except (TypeError, InvalidOperation):
         return 'threshold 必须是数字'
+    if not threshold.is_finite():
+        return 'threshold 必须是数字'
     if rule_type in (_PA.PRICE_ABOVE, _PA.PRICE_BELOW) and threshold <= 0:
         return '价格阈值必须大于 0'
     if rule_type in (_PA.DAILY_PCT_ABOVE, _PA.DAILY_PCT_BELOW) and abs(threshold) == 0:
         return '涨跌幅阈值不能为 0'
+    if abs(threshold) >= Decimal('1e8'):
+        return 'threshold 超出范围'
     return None
+
+
+def _normalize_threshold(rule_type, raw):
+    """阈值统一为 4 位小数的 Decimal（模型 decimal_places=4）；涨跌幅规则存绝对值。
+
+    旧实现把请求里的原值直接交给 ORM（ALG-14）：字符串/浮点各走各的转换，
+    超精度的值在 SQLite 下原样落库；涨跌幅规则的负数阈值则让「涨幅达到 -2%」
+    几乎每天触发。评估端已按绝对值判断，这里存绝对值让展示与判断一致。
+    """
+    from decimal import ROUND_HALF_UP, Decimal
+
+    from .models import PriceAlert as _PA
+
+    value = Decimal(str(raw)).quantize(Decimal('0.0001'), rounding=ROUND_HALF_UP)
+    if rule_type in (_PA.DAILY_PCT_ABOVE, _PA.DAILY_PCT_BELOW):
+        value = abs(value)
+    return value
 
 
 @api_view(['GET', 'POST'])
@@ -652,7 +673,7 @@ def alert_list(request):
     alert = PriceAlert.objects.create(
         stock_id=stock_id,
         rule_type=rule_type,
-        threshold=request.data.get('threshold'),
+        threshold=_normalize_threshold(rule_type, request.data.get('threshold')),
         note=(request.data.get('note') or '').strip()[:100],
     )
     return Response(_alert_row(alert), status=status.HTTP_201_CREATED)
@@ -670,7 +691,13 @@ def alert_detail(request, pk):
         alert.delete()
         return Response(status=status.HTTP_204_NO_CONTENT)
     if 'is_active' in request.data:
-        alert.is_active = bool(request.data['is_active'])
+        # 按 DRF 布尔口径解析（ALG-14）：bool("false") 是 True，旧实现会把停用请求当启用
+        from rest_framework import serializers as drf_serializers
+
+        try:
+            alert.is_active = drf_serializers.BooleanField().to_internal_value(request.data['is_active'])
+        except drf_serializers.ValidationError:
+            return Response({'detail': 'is_active 必须是布尔值'}, status=status.HTTP_400_BAD_REQUEST)
         alert.save(update_fields=['is_active'])
     if 'note' in request.data:
         alert.note = (request.data.get('note') or '').strip()[:100]

@@ -764,3 +764,50 @@ class AlertRuleSemanticsTests(TestCase):
         self._daily(_TODAY, 10.0, pct=-1.0)
         self._alert('DAILY_PCT_ABOVE', -2)
         self.assertEqual(self._eval(), [])
+
+
+@patch('stocks.services.is_trading_day', _always_trading)
+class AlertApiParsingTests(TestCase):
+    """ALG-14：创建时阈值统一量化（涨跌幅存绝对值）；is_active 按布尔口径解析。"""
+
+    def setUp(self):
+        from decimal import Decimal
+
+        from .models import Stock
+
+        self.Decimal = Decimal
+        self.stock = Stock.objects.create(code='600000', name='浦发银行')
+
+    def _alert(self, rule, threshold):
+        from .models import PriceAlert
+
+        return PriceAlert.objects.create(stock=self.stock, rule_type=getattr(PriceAlert, rule),
+                                         threshold=self.Decimal(str(threshold)))
+
+    def test_create_quantizes_and_normalizes_threshold(self):
+        import json
+
+        from .models import PriceAlert
+
+        resp = self.client.post('/api/alerts/', json.dumps({
+            'stock_id': self.stock.id, 'rule_type': PriceAlert.DAILY_PCT_ABOVE,
+            'threshold': -3.123456}), content_type='application/json')
+        self.assertEqual(resp.status_code, 201)
+        self.assertEqual(PriceAlert.objects.get().threshold, self.Decimal('3.1235'))
+        resp = self.client.post('/api/alerts/', json.dumps({
+            'stock_id': self.stock.id, 'rule_type': PriceAlert.PRICE_ABOVE,
+            'threshold': 'NaN'}), content_type='application/json')
+        self.assertEqual(resp.status_code, 400)
+
+    def test_is_active_parses_string_false(self):
+        import json
+
+        alert = self._alert('PRICE_ABOVE', 10)
+        resp = self.client.patch(f'/api/alerts/{alert.id}/', json.dumps({'is_active': 'false'}),
+                                 content_type='application/json')
+        self.assertEqual(resp.status_code, 200)
+        alert.refresh_from_db()
+        self.assertFalse(alert.is_active)
+        resp = self.client.patch(f'/api/alerts/{alert.id}/', json.dumps({'is_active': 'maybe'}),
+                                 content_type='application/json')
+        self.assertEqual(resp.status_code, 400)
