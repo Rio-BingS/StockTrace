@@ -811,3 +811,18 @@ class AlertApiParsingTests(TestCase):
         resp = self.client.patch(f'/api/alerts/{alert.id}/', json.dumps({'is_active': 'maybe'}),
                                  content_type='application/json')
         self.assertEqual(resp.status_code, 400)
+
+
+class GroupListQueryTests(TestCase):
+    """PERF-08：分组列表一次查询带出各组活跃股票数（不再每组一次 count）。"""
+
+    def test_group_counts_in_constant_queries(self):
+        from .models import Stock, StockGroup
+
+        for g in range(5):
+            group = StockGroup.objects.create(name=f'组{g}', order=g)
+            for i in range(3):
+                Stock.objects.create(code=f'60{g}{i:03d}', name='x', group=group, is_active=i != 0)
+        with self.assertNumQueries(1):
+            data = self.client.get('/api/stock-groups/').json()
+        self.assertEqual([row['stock_count'] for row in data], [2] * 5)

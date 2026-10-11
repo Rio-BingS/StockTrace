@@ -806,11 +806,16 @@ def screener_preset_detail(request, pk):
 # ============================================================
 
 def _group_row(group):
+    # 列表查询已用 annotate 算好活跃股票数（PERF-08：旧实现每组一次 count()）；
+    # 单个分组的新建/修改路径没有注解，退回单次计数
+    count = getattr(group, 'active_stock_count', None)
+    if count is None:
+        count = group.stocks.filter(is_active=True).count()
     return {
         'id': group.id,
         'name': group.name,
         'order': group.order,
-        'stock_count': group.stocks.filter(is_active=True).count(),
+        'stock_count': count,
         'created_at': group.created_at,
     }
 
@@ -821,7 +826,11 @@ def stock_group_list(request):
     from .models import StockGroup
 
     if request.method == 'GET':
-        groups = StockGroup.objects.all()
+        from django.db.models import Count, Q
+
+        groups = StockGroup.objects.annotate(
+            active_stock_count=Count('stocks', filter=Q(stocks__is_active=True)),
+        )
         return Response([_group_row(g) for g in groups])
 
     name = (request.data.get('name') or '').strip()
