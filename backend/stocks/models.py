@@ -205,31 +205,32 @@ class DailyQuote(models.Model):
     )
     trade_date = models.DateField('交易日期')
 
-    open_price = models.DecimalField('开盘价', max_digits=10, decimal_places=2)
-    close_price = models.DecimalField('收盘价', max_digits=10, decimal_places=2)
-    high_price = models.DecimalField('最高价', max_digits=10, decimal_places=2)
-    low_price = models.DecimalField('最低价', max_digits=10, decimal_places=2)
+    # 价格类字段 3 位小数：ETF/LOF 报价精确到 0.001 元，2 位会被舍入失真（DAT-11）
+    open_price = models.DecimalField('开盘价', max_digits=10, decimal_places=3)
+    close_price = models.DecimalField('收盘价', max_digits=10, decimal_places=3)
+    high_price = models.DecimalField('最高价', max_digits=10, decimal_places=3)
+    low_price = models.DecimalField('最低价', max_digits=10, decimal_places=3)
 
     high_time = models.DateTimeField('最高点时间', null=True, blank=True)
     low_time = models.DateTimeField('最低点时间', null=True, blank=True)
 
     # 计算字段
     open_close_diff = models.DecimalField(
-        '收盘-开盘差值', max_digits=10, decimal_places=2
+        '收盘-开盘差值', max_digits=10, decimal_places=3
     )
     open_close_pct = models.DecimalField(
         '收盘-开盘百分比', max_digits=8, decimal_places=4
     )
     high_low_diff = models.DecimalField(
-        '最高-最低差值', max_digits=10, decimal_places=2
+        '最高-最低差值', max_digits=10, decimal_places=3
     )
     high_low_pct = models.DecimalField(
         '最高-最低百分比', max_digits=8, decimal_places=4
     )
 
     # 相对昨收的涨跌
-    prev_close = models.DecimalField('昨收价', max_digits=10, decimal_places=2, null=True, blank=True)
-    change_diff = models.DecimalField('涨跌额', max_digits=10, decimal_places=2, null=True, blank=True)
+    prev_close = models.DecimalField('昨收价', max_digits=10, decimal_places=3, null=True, blank=True)
+    change_diff = models.DecimalField('涨跌额', max_digits=10, decimal_places=3, null=True, blank=True)
     change_pct = models.DecimalField('涨跌幅', max_digits=8, decimal_places=4, null=True, blank=True)
 
     # 单位约定：成交量「股」、成交额「元」（各数据源在适配层换算，见 services.py）
@@ -276,10 +277,10 @@ class MinuteBar(models.Model):
         related_name='minute_bars', verbose_name='股票'
     )
     datetime = models.DateTimeField('分钟时间戳')
-    open = models.DecimalField('开盘价', max_digits=10, decimal_places=2)
-    close = models.DecimalField('收盘价', max_digits=10, decimal_places=2)
-    high = models.DecimalField('最高价', max_digits=10, decimal_places=2)
-    low = models.DecimalField('最低价', max_digits=10, decimal_places=2)
+    open = models.DecimalField('开盘价', max_digits=10, decimal_places=3)
+    close = models.DecimalField('收盘价', max_digits=10, decimal_places=3)
+    high = models.DecimalField('最高价', max_digits=10, decimal_places=3)
+    low = models.DecimalField('最低价', max_digits=10, decimal_places=3)
     volume = models.BigIntegerField('成交量(股)')
     turnover = models.DecimalField(
         '成交额(元)', max_digits=15, decimal_places=2, null=True, blank=True

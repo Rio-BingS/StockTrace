@@ -181,6 +181,8 @@ class SinaSource(DataSource):
 
     def fetch_daily(self, symbol, start_date, end_date):
         # 新浪接口需要 sh/sz 前缀
+        # 注意：akshare stock_zh_a_daily 内部已把 OHLC round 到 2 位，ETF 走此源时
+        # 第 3 位小数已丢失；库字段虽为 3 位（DAT-11），此源无法恢复精度
         bs_code = _to_shsz_prefix(symbol)
         df = ak.stock_zh_a_daily(
             symbol=bs_code, start_date=start_date,
@@ -761,13 +763,20 @@ def fetch_daily_data(stock, start_date=None, end_date=None, full=False, sources=
     return count
 
 
-_PRICE_Q = Decimal('0.01')
+# 价格 3 位小数（ETF/LOF 报价到 0.001 元，DAT-11）；成交额仍为 2 位
+_PRICE_Q = Decimal('0.001')
+_AMOUNT_Q = Decimal('0.01')
 _MINUTE_VALUE_FIELDS = ['open', 'close', 'high', 'low', 'volume', 'turnover']
 _MINUTE_UPDATE_FIELDS = _MINUTE_VALUE_FIELDS + ['source', 'freq']
 
 
 def _dec2(v):
-    """与 DecimalField(decimal_places=2) 入库精度一致，便于和库内值比较"""
+    """与成交额 DecimalField(decimal_places=2) 入库精度一致，便于和库内值比较"""
+    return Decimal(str(v)).quantize(_AMOUNT_Q)
+
+
+def _dec3(v):
+    """与价格 DecimalField(decimal_places=3) 入库精度一致，便于和库内值比较"""
     return Decimal(str(v)).quantize(_PRICE_Q)
 
 
@@ -796,7 +805,7 @@ def _save_minute_bars(stock, df, date_obj, source_name='', freq=1):
             vol = rec.get('成交量')
             amt = rec.get('成交额')
             rows[dt] = (
-                _dec2(rec['开盘']), _dec2(rec['收盘']), _dec2(rec['最高']), _dec2(rec['最低']),
+                _dec3(rec['开盘']), _dec3(rec['收盘']), _dec3(rec['最高']), _dec3(rec['最低']),
                 int(vol) if vol is not None and pd.notna(vol) else 0,
                 _dec2(amt) if amt is not None and pd.notna(amt) else None,
             )
