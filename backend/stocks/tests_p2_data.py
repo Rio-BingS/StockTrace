@@ -414,3 +414,24 @@ class IndexConstraintTests(TestCase):
         MarketDailySnapshot.objects.create(kind='etf_share', trade_date=_D1, payload=[])
         with self.assertRaises(IntegrityError), transaction.atomic():
             MarketDailySnapshot.objects.create(kind='etf_share', trade_date=_D1, payload=[])
+
+
+class AiCallLogObservabilityTests(TestCase):
+    """AIX-08：AiCallLog 可记录模型、耗时、失败原因、tokens 与费用，均可空。"""
+
+    def test_fields_nullable_and_writable(self):
+        from decimal import Decimal
+
+        from .models import AiCallLog
+
+        bare = AiCallLog.objects.create(purpose=AiCallLog.PURPOSE_ANALYSIS)
+        for field in ('model', 'duration_ms', 'error_reason', 'total_tokens', 'cost'):
+            self.assertIsNone(getattr(bare, field))
+        log = AiCallLog.objects.create(
+            purpose=AiCallLog.PURPOSE_ANALYSIS, success=False, model='deepseek-chat',
+            duration_ms=1234, error_reason='x' * 200, total_tokens=321, cost=Decimal('0.001234'),
+        )
+        log.refresh_from_db()
+        self.assertEqual((log.model, log.duration_ms, log.total_tokens), ('deepseek-chat', 1234, 321))
+        self.assertEqual(log.cost, Decimal('0.001234'))
+        self.assertEqual(AiCallLog._meta.get_field('error_reason').max_length, 200)

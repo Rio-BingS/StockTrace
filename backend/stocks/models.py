@@ -46,6 +46,14 @@ class AiCallLog(models.Model):
     success = models.BooleanField('成功', default=True)
     prompt_tokens = models.IntegerField('输入 tokens', null=True, blank=True)
     completion_tokens = models.IntegerField('输出 tokens', null=True, blank=True)
+    # 可观测性字段（AIX-08）：均可空，旧行与未知值保持 NULL，不拿 0 冒充
+    model = models.CharField('模型名', max_length=100, null=True, blank=True)
+    duration_ms = models.PositiveIntegerField('耗时(毫秒)', null=True, blank=True)
+    error_reason = models.CharField('失败原因', max_length=200, null=True, blank=True,
+                                    help_text='失败时的简短原因，写入前截断到 200 字')
+    total_tokens = models.IntegerField('总 tokens', null=True, blank=True)
+    cost = models.DecimalField('估算费用', max_digits=12, decimal_places=6, null=True, blank=True,
+                               help_text='按服务商计价币种估算；无单价配置时为空')
     created_at = models.DateTimeField('创建时间', auto_now_add=True)
 
     class Meta:
