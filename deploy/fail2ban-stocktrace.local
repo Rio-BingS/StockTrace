@@ -1,0 +1,43 @@
+# fail2ban：封禁反复 Basic Auth 失败的客户端（SEC-02）
+#
+# 安装：sudo cp deploy/fail2ban-stocktrace.local /etc/fail2ban/jail.d/stocktrace.local
+#       （并按下方「封禁动作」二选一建好 action 文件）
+#       sudo fail2ban-client reload && sudo fail2ban-client status nginx-http-auth
+#
+# ⚠️ 站点在 Cloudflare 后面：TCP 连接来自 CF 节点，fail2ban 默认的 iptables/nftables
+#    动作封的是真实客户端 IP，对经 CF 进来的流量完全无效（甚至误以为已封住）。
+#    nginx 的 error.log 已经是真实 IP（nginx-stocktrace.conf 里 real_ip_header CF-Connecting-IP），
+#    所以过滤器照常用，只是封禁动作必须换成下面两种之一：
+#
+#    A. nginx deny 文件（推荐，零外部依赖）：把 IP 写进 /etc/nginx/stocktrace-deny.d/fail2ban.conf，
+#       nginx-stocktrace.conf 的 server 块已 include 该目录；被封 IP 之后收到 403。
+#       需要创建 /etc/fail2ban/action.d/stocktrace-nginx-deny.conf，内容如下（去掉行首 "#  "）：
+#
+#  [Definition]
+#  actionstart   = mkdir -p /etc/nginx/stocktrace-deny.d
+#                  touch /etc/nginx/stocktrace-deny.d/fail2ban.conf
+#  actionstop    = truncate -s 0 /etc/nginx/stocktrace-deny.d/fail2ban.conf
+#                  nginx -t -q && systemctl reload nginx
+#  actioncheck   =
+#  actionban     = grep -qxF 'deny <ip>;' /etc/nginx/stocktrace-deny.d/fail2ban.conf || echo 'deny <ip>;' >> /etc/nginx/stocktrace-deny.d/fail2ban.conf
+#                  nginx -t -q && systemctl reload nginx
+#  actionunban   = sed -i '/^deny <ip>;$/d' /etc/nginx/stocktrace-deny.d/fail2ban.conf
+#                  nginx -t -q && systemctl reload nginx
+#
+#    B. Cloudflare API（在 CF 边缘拦截，源站连请求都收不到）：使用 fail2ban 自带的
+#       action.d/cloudflare-token.conf（fail2ban ≥ 1.0；旧版为 cloudflare.conf + Global API Key），
+#       在 /etc/fail2ban/action.d/cloudflare-token.local 里填只授予该 zone「防火墙/WAF 编辑」权限的
+#       API Token 与 zone id，然后把下面的 action 改为 cloudflare-token。Token 文件 chmod 600。
+#
+# 同时仍保留 iptables 动作也无妨（直连源站的扫描器会被封），但不要指望它挡住经 CF 的爆破。
+
+[nginx-http-auth]
+enabled  = true
+port     = http,https
+logpath  = /var/log/nginx/error.log
+# 10 分钟内失败 5 次，封 1 小时；反复被封的由 recidive jail 处理（可选）
+findtime = 10m
+maxretry = 5
+bantime  = 1h
+action   = stocktrace-nginx-deny
+# action = cloudflare-token

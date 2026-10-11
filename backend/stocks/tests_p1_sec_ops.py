@@ -328,3 +328,41 @@ class ApiOriginCheckTests(TestCase):
         resp = client.post('/admin/login/', {'username': 'admin', 'password': 'pw-Very-Long-123'})
         self.assertEqual(resp.status_code, 403)
         self.assertIn('django.middleware.csrf.CsrfViewMiddleware', settings.MIDDLEWARE)
+
+
+REPO_DIR = BACKEND_DIR.parent
+
+
+class NginxRateLimitConfigTests(TestCase):
+    """SEC-02：限流覆盖所有要求 Basic Auth 的路径，admin 单独 zone，文档不暴露用户名"""
+
+    def setUp(self):
+        self.conf = (REPO_DIR / 'deploy' / 'nginx-stocktrace.conf').read_text(encoding='utf-8')
+
+    def _server_443(self):
+        return self.conf.split('listen 443', 1)[1]
+
+    def test_limit_req_at_server_level(self):
+        server = self._server_443()
+        before_first_location = server.split('\n    location ', 1)[0]
+        self.assertIn('limit_req zone=perip', before_first_location)
+        self.assertLess(before_first_location.index('limit_req'), before_first_location.index('auth_basic'))
+
+    def test_admin_has_dedicated_zone_and_api_keeps_perip(self):
+        self.assertIn('zone=admin:', self.conf)
+        admin = self.conf.split('location /admin/', 1)[1].split('}', 1)[0]
+        self.assertIn('limit_req zone=admin', admin)
+        self.assertIn('limit_req zone=perip', admin)
+        api = self.conf.split('location /api/ {', 1)[1].split('}', 1)[0]
+        self.assertIn('limit_req zone=perip', api)
+
+    def test_fail2ban_deny_include_and_jail(self):
+        self.assertIn('include /etc/nginx/stocktrace-deny.d/*.conf;', self.conf)
+        jail = (REPO_DIR / 'deploy' / 'fail2ban-stocktrace.local').read_text(encoding='utf-8')
+        self.assertIn('[nginx-http-auth]', jail)
+        self.assertIn('Cloudflare', jail)
+
+    def test_deploy_doc_uses_username_placeholder(self):
+        doc = (REPO_DIR / 'deploy' / 'DEPLOY.md').read_text(encoding='utf-8')
+        self.assertNotIn('.htpasswd_stocktrace stocktrace', doc)
+        self.assertIn('<username>', doc)

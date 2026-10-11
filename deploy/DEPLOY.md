@@ -85,8 +85,9 @@ sudo cp deploy/stocktrace.service deploy/stocktrace-scheduler.service /etc/syste
 sudo systemctl daemon-reload
 sudo systemctl enable --now stocktrace stocktrace-scheduler
 
-# Nginx + Basic Auth
-sudo htpasswd -c /etc/nginx/.htpasswd_stocktrace stocktrace
+# Nginx + Basic Auth：<username> 换成不显眼的用户名（不要用 stocktrace/admin 等），
+# 密码用长随机串（如 openssl rand -base64 24），用户名与密码都不要写进仓库（SEC-02）
+sudo htpasswd -B -c /etc/nginx/.htpasswd_stocktrace <username>
 sudo cp deploy/nginx-stocktrace.conf /etc/nginx/sites-available/stocktrace
 sudo ln -sf /etc/nginx/sites-available/stocktrace /etc/nginx/sites-enabled/
 sudo nginx -t && sudo systemctl reload nginx
@@ -202,7 +203,7 @@ sudo systemctl stop stocktrace-scheduler
 | Gunicorn workers | 保持 1；内存仍紧再降 threads |
 | 调度进程 | `stocktrace-scheduler` 单独计内存（`MemoryMax=700M`），与 Web 互不拖累 |
 | 勿在 VPS 上 `npm run dev` | 只用 `dist` |
-| 勿提交 | `db.sqlite3`、`.env`、htpasswd、真实 SECRET_KEY |
+| 勿提交 | `db.sqlite3`、`.env`、htpasswd（含用户名）、真实 SECRET_KEY |
 
 ---
 
@@ -237,8 +238,9 @@ sudo nginx -t && sudo systemctl reload nginx
 - **按 Cloudflare 真实 IP 限流**：`set_real_ip_from`（CF 网段，来源
   [cloudflare.com/ips](https://www.cloudflare.com/ips/)，上游更新时需同步）+
   `real_ip_header CF-Connecting-IP`，否则限流会把所有请求算到 CF 节点头上一刀切
-- `limit_req_zone $binary_remote_addr rate=10r/s`，`/api/` 与 `/admin/`
-  `burst=20 nodelay`，超限返回 429。正常看板 60s 轮询远低于阈值，只挡滥刷
+- `limit_req_zone $binary_remote_addr rate=10r/s`，**server 级** `burst=20 nodelay`
+  （`/`、`/static/` 也计入，防止借静态页高速试 Basic Auth 密码；SEC-02），`/admin/` 另叠加
+  `zone=admin`（30r/m，burst=10），超限返回 429。正常看板 60s 轮询远低于阈值，只挡滥刷
 - 进一步可加防火墙：443 只放行 CF 网段、80/8000/8001 全封（服务器侧 ufw/安全组）
 
 ### 5.3 切换 Cloudflare SSL 模式（后台操作）
@@ -254,6 +256,32 @@ sudo tail -f /var/log/nginx/access.log            # 日志里的 IP 应是真实
 
 注意：Origin 证书只被 Cloudflare 信任，浏览器直连源站 IP 会报证书错误——
 这正是预期（源站不该被绕过 CF 直接访问）。
+
+### 5.4 Basic Auth 防爆破与应用层认证（SEC-02）
+
+应用本身没有认证（DRF `AllowAny`），**唯一的门是 Nginx Basic Auth**，所以：
+
+1. **用户名 + 长随机密码**：见第 1 节，文档与仓库里一律写 `<username>`。已部署的旧用户名若曾出现在
+   公开文档里，换一个：`sudo htpasswd -B /etc/nginx/.htpasswd_stocktrace <新用户名>`，
+   再 `sudo htpasswd -D /etc/nginx/.htpasswd_stocktrace <旧用户名>`，`reload nginx`。
+2. **限流**：已在 server 级生效（5.2）。
+3. **fail2ban**：`deploy/fail2ban-stocktrace.local`（`nginx-http-auth` jail，10 分钟失败 5 次封 1 小时）。
+   ⚠️ 站点在 Cloudflare 后面，**默认的 iptables 动作无效**（连接来自 CF 节点）；文件里给了两种动作：
+   写 nginx deny 文件（`/etc/nginx/stocktrace-deny.d/`，nginx 配置已 include）或调 Cloudflare API。
+
+   ```bash
+   sudo apt install -y fail2ban
+   sudo cp deploy/fail2ban-stocktrace.local /etc/fail2ban/jail.d/stocktrace.local
+   sudo nano /etc/fail2ban/action.d/stocktrace-nginx-deny.conf   # 内容见 .local 文件注释
+   sudo fail2ban-client reload
+   sudo fail2ban-client status nginx-http-auth
+   # 验证：另一台机器连续输错 5 次密码 → 之后返回 403；解封：
+   sudo fail2ban-client set nginx-http-auth unbanip <ip>
+   ```
+4. **中期：应用层认证**（未实现，仅记录方案）。任选其一，Basic Auth 退为第二道防线：
+   - Cloudflare Zero Trust **Access**（零代码，邮箱 OTP / SSO 登录后才放行到源站）；
+   - DRF 加 `SessionAuthentication` + `IsAuthenticated` + 登录页（需同时把 /api/ 纳入 Django CSRF，
+     并与 `StockTrace/middleware.py` 的来源校验协调）。
 
 ---
 
