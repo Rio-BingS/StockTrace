@@ -991,7 +991,8 @@ class BuiltinStrategyConsistencyTests(TestCase):
         good = {'pe_ttm': 8.0, 'pb': 1.0, 'total_mv': 1e11}
         self.assertTrue(self._match_all(spec, good))
         self.assertFalse(self._match_all(spec, {**good, 'pe_ttm': 0.0}))
-        self.assertFalse(self._match_all(spec, {**good, 'total_mv': 3e9}))
+        self.assertTrue(self._match_all(spec, {**good, 'total_mv': 3e10}))
+        self.assertFalse(self._match_all(spec, {**good, 'total_mv': 2.9e10}))
 
     def test_pullback_requires_actual_drawdown(self):
         spec = self._spec('缩量回调不破20日线')
