@@ -151,7 +151,8 @@ def _sz_margin_row(date_obj):
     按日回退探测属预期状态，因此不走 _safe_df_call 冷却统计。"""
     try:
         df = ak.stock_margin_szse(date=date_obj.strftime('%Y%m%d'))
-    except Exception:
+    except Exception as e:  # noqa: BLE001 上游边界：深交所对未披露日期直接抛错，属预期的回退探测
+        logger.debug("深市两融 %s 无数据: %s", date_obj, e)
         return None
     if df is None or df.empty or '融资融券余额' not in df.columns:
         return None

@@ -45,8 +45,8 @@ def fetch_holder_structure(code, ttl=_HOLDER_TTL, force=False):
     try:
         r = requests.get(_URL.format(code=code), headers=_HEADERS, timeout=10)
         r.raise_for_status()
-    except Exception as e:
-        logger.warning(f'持有人结构拉取失败（{code}）: {e}')
+    except requests.RequestException as e:
+        logger.warning("持有人结构拉取失败（%s）: %s", code, e)
         return _stale_or(key, fail)
 
     m = re.search(r'content:"(.*)"\};', r.text, re.S)
@@ -54,8 +54,8 @@ def fetch_holder_structure(code, ttl=_HOLDER_TTL, force=False):
         return _stale_or(key, fail)
     try:
         tables = pd.read_html(StringIO(m.group(1)))
-    except Exception as e:
-        logger.warning(f'持有人结构解析失败（{code}）: {e}')
+    except Exception as e:  # noqa: BLE001 上游边界：read_html 解析异常类型不固定（ValueError/lxml 等）
+        logger.warning("持有人结构解析失败（%s）: %s", code, e)
         return _stale_or(key, fail)
     if not tables or tables[0].empty:
         return _stale_or(key, fail)

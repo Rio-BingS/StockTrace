@@ -90,7 +90,7 @@ def _parse_fund_flow_table(df, name_col_candidates):
         if previous is None or abs(item['net']) > abs(previous['net']):
             by_name[item['name']] = item
     if len(by_name) != len(items):
-        logger.warning(f"板块资金上游存在 {len(items) - len(by_name)} 条同名/空名记录，已规范化去重")
+        logger.warning("板块资金上游存在 %s 条同名/空名记录，已规范化去重", len(items) - len(by_name))
     return list(by_name.values())
 
 
@@ -200,7 +200,7 @@ def _ths_fund_flow(board):
     dup = df.duplicated(subset=[name_col], keep='first')
     if dup.any():
         logger.warning(
-            f'同花顺{board}资金流翻页出现 {int(dup.sum())} 行重复（已去重），可能有等量漏行'
+            "同花顺%s资金流翻页出现 %s 行重复（已去重），可能有等量漏行", board, int(dup.sum())
         )
         df = df.loc[~dup].reset_index(drop=True)
     if '序号' in df.columns:
@@ -219,7 +219,7 @@ def _check_ths_pages(frames, board):
     per_page = len(frames[0])
     short = [i + 1 for i, f in enumerate(frames[:-1]) if len(f) < per_page]
     if short:
-        logger.warning(f'同花顺{board}资金流第 {short} 页行数少于首页 {per_page} 行，疑似漏行')
+        logger.warning("同花顺%s资金流第 %s 页行数少于首页 %s 行，疑似漏行", board, short, per_page)
 
 
 def _ths_fund_flow_df(board, source_name):
@@ -374,6 +374,7 @@ def _snapshot_rotation(board, period, q='', order='desc', page=1, page_size=50):
     try:
         latest = snapshots._latest_snapshot(kind)
     except Exception:
+        logger.warning("读取 %s 最新快照失败", kind, exc_info=True)
         latest = None
 
     if nets is None:

@@ -145,3 +145,57 @@ class SchedulerLoggingTests(SimpleTestCase):
         rel.assert_called_once()
         self.assertTrue(any('调度器停止异常' in m for m in cm.output))
         sch._retry_stop.clear()
+
+
+class MarketLoggingTests(TestCase):
+    """5d market 包：查库降级补日志、上游边界、预热失败带堆栈、requests 收窄"""
+
+    def test_snapshot_read_failure_logged_and_degrades(self):
+        from django.db import DatabaseError
+
+        from stocks.market import snapshots
+
+        with patch('stocks.market.snapshots.MarketDailySnapshot.objects') as qs, \
+                self.assertLogs('stocks.market.snapshots', level='WARNING') as cm:
+            qs.filter.side_effect = DatabaseError('locked')
+            self.assertEqual(snapshots.market_ff_snapshot_rows(), [])
+        self.assertIsNotNone(cm.records[0].exc_info)
+
+    def test_sz_margin_expected_failure_is_debug(self):
+        from stocks.market import sentiment
+
+        with patch('stocks.market.sentiment.ak.stock_margin_szse', side_effect=KeyError('x')), \
+                self.assertLogs('stocks.market.sentiment', level='DEBUG') as cm:
+            self.assertIsNone(sentiment._sz_margin_row(date(2026, 9, 1)))
+        self.assertEqual(_levels(cm), [logging.DEBUG])
+
+    def test_warmup_failure_logs_warning_with_traceback(self):
+        from stocks.market import overview
+
+        boom = patch.multiple(
+            'stocks.market.overview',
+            fetch_hsgt_flow=lambda **k: (_ for _ in ()).throw(RuntimeError('a')),
+            fetch_market_fund_flow_hist=lambda **k: None,
+            _fetch_etf_spot_df=lambda **k: None,
+            get_national_team_etfs=lambda **k: None,
+            get_etf_share_radar=lambda **k: None,
+            get_market_overview=lambda: None,
+        )
+        with boom, patch('stocks.market.overview.time.sleep'), \
+                patch('stocks.market.snapshots.save_daily_snapshots', return_value={}), \
+                patch('stocks.market.snapshots.verify_daily_snapshots', return_value=None), \
+                self.assertLogs('stocks.market.overview', level='WARNING') as cm:
+            overview.warm_post_close_lagging()
+        rec = [r for r in cm.records if '预热北向资金失败' in r.getMessage()]
+        self.assertEqual(rec[0].levelno, logging.WARNING)
+        self.assertIsNotNone(rec[0].exc_info)
+
+    def test_holders_request_exception_still_degrades(self):
+        """holders 收窄到 RequestException 后，超时等网络错误仍降级为不可用"""
+        import requests
+
+        from stocks.market import holders
+
+        with patch('stocks.market.holders.requests.get', side_effect=requests.Timeout('t')):
+            d = holders.fetch_holder_structure('510300', force=True)
+        self.assertFalse(d['available'])

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 from datetime import datetime, timedelta
 
 import akshare as ak
@@ -14,6 +15,8 @@ from .holders import fetch_holder_structure
 from ._query import _paginate, _sort_items
 from ._sources import _first_ok, _safe_df_call
 from . import snapshots
+
+logger = logging.getLogger(__name__)
 
 # 国家队 / 汇金 常相关的宽基与政策向 ETF（6 位代码）
 NATIONAL_TEAM_ETFS = [
@@ -496,6 +499,7 @@ def _share_change_signals():
         from . import snapshots
         changes, meta = snapshots.latest_pair_change()
     except Exception:
+        logger.warning("读取份额快照对比失败，份额异动信号按不可用处理", exc_info=True)
         changes, meta = None, None
     if changes is None:
         return {

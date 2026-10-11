@@ -14,6 +14,7 @@ available=False）时只做 60 秒负缓存，不走上面的收盘后保鲜；�
 
 from __future__ import annotations
 
+import logging
 import threading
 import time
 from collections import OrderedDict
@@ -21,6 +22,8 @@ from datetime import datetime, time as dt_time, timedelta, timezone as dt_timezo
 from decimal import InvalidOperation
 
 import pandas as pd
+
+logger = logging.getLogger(__name__)
 
 # 进程内缓存条目上限（LRU）：部分 key 含用户可控输入（个股代码、自定义区间日期），
 # 无上限时可被异常/恶意请求撑爆内存（1H2G 红线）
@@ -183,6 +186,8 @@ def is_fresh(ts, ttl):
         close = _last_session_close()
         return close is not None and ts >= close.timestamp()
     except Exception:
+        # 日历推算意外失败按「不新鲜」处理（触发重拉），留痕
+        logger.debug("缓存新鲜度的日历判定失败，按不新鲜处理", exc_info=True)
         return False
 
 
@@ -205,6 +210,7 @@ def _cache_meta(cache_key, ttl, source, available, source_data_date=None, discla
         try:
             data_as_of = _session_date_at(item['ts'])
         except Exception:
+            logger.debug("按缓存时刻推算数据所属交易日失败", exc_info=True)
             data_as_of = None
 
     return {

@@ -6,6 +6,7 @@
 import json
 
 import pandas as pd
+import requests
 from datetime import date, datetime, time as dt_time, timedelta
 from decimal import Decimal
 from unittest.mock import Mock, patch
@@ -1539,7 +1540,8 @@ class HolderStructureTests(SimpleTestCase):
         self.assertIn('间接观察', d['meta']['disclaimer'])
 
     def test_upstream_fail_degrades(self):
-        with patch('stocks.market.holders.requests.get', side_effect=RuntimeError('boom')):
+        # requests 只抛 RequestException 家族（5d 收窄后 RuntimeError 不再被当作上游失败）
+        with patch('stocks.market.holders.requests.get', side_effect=requests.ConnectionError('boom')):
             d = market.holders.fetch_holder_structure('510300', force=True)
         self.assertFalse(d['available'])
         self.assertTrue(d['message'])

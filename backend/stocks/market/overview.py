@@ -98,14 +98,14 @@ def warm_post_close_lagging():
 
     try:
         fetch_hsgt_flow(force=True)
-    except Exception as e:
-        logger.error(f"预热北向资金失败: {e}")
+    except Exception as e:  # 边界：预热失败只降级，不影响后续预热步骤
+        logger.warning("预热北向资金失败: %s", e, exc_info=True)
     time.sleep(0.8)
 
     try:
         fetch_market_fund_flow_hist(days=30, force=True)
-    except Exception as e:
-        logger.error(f"预热大盘资金历史失败: {e}")
+    except Exception as e:  # 边界：预热失败只降级，不影响后续预热步骤
+        logger.warning("预热大盘资金历史失败: %s", e, exc_info=True)
     time.sleep(0.8)
 
     try:
@@ -113,16 +113,16 @@ def warm_post_close_lagging():
         _fetch_etf_spot_df(force=True)
         get_national_team_etfs(force=True)
         get_etf_share_radar(force=True)
-    except Exception as e:
-        logger.error(f"预热 ETF 份额/雷达失败: {e}")
+    except Exception as e:  # 边界：预热失败只降级，不影响后续预热步骤
+        logger.warning("预热 ETF 份额/雷达失败: %s", e, exc_info=True)
 
     # 上面已把当日板块/ETF 数据拉热，顺手落日度快照（幂等，重跑覆盖）
     try:
         from . import snapshots
         saved = snapshots.save_daily_snapshots()
-        logger.info(f"日度快照落库: {saved}")
-    except Exception as e:
-        logger.error(f"日度快照落库失败: {e}")
+        logger.info("日度快照落库: %s", saved)
+    except Exception as e:  # 边界：预热失败只降级，不影响后续预热步骤
+        logger.warning("日度快照落库失败: %s", e, exc_info=True)
 
     # 快照自检：缺 kind/行数不足时推送告警（每自然日最多推一次，避免 30 分钟轮询刷屏）
     try:
@@ -136,20 +136,20 @@ def warm_post_close_lagging():
             key = f"snapshot_alert_{_tz.localdate().isoformat()}"
             if _cache_get(key, 86400) is None:
                 _cache_set(key, missing)
-                logger.warning(f"日度快照自检缺失: {missing}")
+                logger.warning("日度快照自检缺失: %s", missing)
                 push_message(
                     'StockTrace 快照自检告警',
                     f"{_tz.localdate()} 快照缺失或行数不足: {', '.join(missing)}\n"
                     '（大盘/板块资金流可能受上游影响，详见 /api/market/ sources_health）',
                 )
-    except Exception as e:
-        logger.error(f"快照自检失败: {e}")
+    except Exception as e:  # 边界：预热失败只降级，不影响后续预热步骤
+        logger.warning("快照自检失败: %s", e, exc_info=True)
 
     # 总览扇出预热：压掉重启/隔夜后首个请求的全量上游冷启动（实测冷启 3 分钟级）
     try:
         get_market_overview()
         logger.info("总览预热完成")
-    except Exception as e:
-        logger.error(f"总览预热失败: {e}")
+    except Exception as e:  # 边界：预热失败只降级，不影响后续预热步骤
+        logger.warning("总览预热失败: %s", e, exc_info=True)
 
-    logger.info(f"收盘后晚到数据预热结束，耗时 {time.time() - started:.1f}s")
+    logger.info("收盘后晚到数据预热结束，耗时 %.1fs", time.time() - started)

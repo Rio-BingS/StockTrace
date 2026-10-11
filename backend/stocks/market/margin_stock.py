@@ -77,8 +77,8 @@ def _day_detail(kind, date_obj):
     fn_name, label = _SOURCES[kind]
     try:
         df = getattr(ak, fn_name)(date=date_obj.strftime('%Y%m%d'))
-    except Exception as e:
-        logger.warning(f'{label} {date_obj} 拉取失败: {e}')
+    except Exception as e:  # noqa: BLE001 上游边界：akshare 异常类型不固定
+        logger.warning("%s %s 拉取失败: %s", label, date_obj, e)
         return None
     if df is None or df.empty:
         return None
@@ -149,7 +149,7 @@ def fetch_stock_margin(code, ttl=21600, force=False):
             chg = round(row['rz'] - prev_row['rz'], 4)
             data['chg_1d'] = chg
             data['chg_pct_1d'] = round(chg / prev_row['rz'] * 100, 2) if prev_row['rz'] else None
-    except Exception as e:
-        logger.warning(f'个股两融前一日明细获取失败（{code}）: {e}')
+    except Exception as e:  # noqa: BLE001 边界：前一日明细只影响 chg_1d，其拉取/解析异常类型不固定
+        logger.warning("个股两融前一日明细获取失败（%s）: %s", code, e)
     _cache_set(key, data)
     return data
