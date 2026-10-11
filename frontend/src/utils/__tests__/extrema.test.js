@@ -21,3 +21,7 @@ test('findLocalExtrema：识别阶段峰谷（ARC-09）', () => {
 test('findLocalExtrema：数据不足 2×窗口+1 时不检测', () => {
   assert.deepEqual(findLocalExtrema([1, 2, 3]), { peaks: [], valleys: [] })
 })
+
+test('findLocalExtrema：全天一个价（停牌、一字板）不标阶段高低点', () => {
+  assert.deepEqual(findLocalExtrema(Array(60).fill(10)), { peaks: [], valleys: [] })
+})

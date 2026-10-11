@@ -9,6 +9,8 @@ export function findLocalExtrema(prices, windowSize = 20) {
   const peaks = []
   const valleys = []
   const fullRange = Math.max(...prices) - Math.min(...prices)
+  // 全天一个价（停牌、一字板）：没有阶段高低点；否则 minSwing 为 0，每个点都会被标成峰谷
+  if (fullRange === 0) return { peaks: [], valleys: [] }
   const minSwing = fullRange * 0.01 // 至少为全天振幅的1%
 
   for (let i = windowSize; i < prices.length - windowSize; i++) {
