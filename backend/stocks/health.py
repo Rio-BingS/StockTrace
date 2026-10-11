@@ -1,7 +1,7 @@
 """健康检查 GET /api/health/（REL-02）。
 
 返回：数据库是否可用、调度器心跳（独立进程写的 JSON 文件，见 scheduler.write_heartbeat）、
-各定时任务下次运行时间与最近一次结果、最近一次市场日度快照日期。
+各定时任务下次运行时间与最近一次结果、最近一次市场日度快照日期，以及应用版本号。
 - 全部正常 → 200 {"status": "ok"}；数据库不可用或调度心跳过期 → 503 {"status": "degraded"}。
 - STOCKTRACE_SCHEDULER=0（人为关闭调度）时调度不计入失败。
 - 只做轻量查询（SELECT 1 + 一次按索引取最新日期），供本机 cron / uptime-kuma 每分钟探测。
@@ -80,6 +80,7 @@ def health(request):
     ok = db['ok'] and (sched['alive'] or not sched['enabled'])
     body = {
         'status': 'ok' if ok else 'degraded',
+        'version': getattr(settings, 'APP_VERSION', 'unknown'),
         'time': timezone.now().isoformat(),
         'db': db,
         'scheduler': sched,

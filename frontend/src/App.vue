@@ -8,6 +8,9 @@ import ConfirmDialog from './components/ConfirmDialog.vue'
 
 // KeepAlive 缓存名单来自路由 meta.keepAlive；页面组件用 defineOptions 显式声明同名，
 // 不依赖 SFC 文件名推断的组件名（FEF-15）
+// 构建时由 vite define 注入（来源：仓库根目录 VERSION）
+const appVersion = __APP_VERSION__
+
 const keepAliveNames = useRouter()
   .getRoutes()
   .filter((r) => r.meta?.keepAlive)
@@ -33,7 +36,7 @@ function openDisclaimer() {
       </RouterView>
     </main>
     <footer class="site-footer">
-      <span>StockTrace · 个人自用监控面板</span>
+      <span>StockTrace v{{ appVersion }} · 个人自用监控面板</span>
       <span class="divider">|</span>
       <span>数据来自公开第三方接口，可能延迟或有错漏；AI 内容自动生成，均不构成投资建议</span>
       <a href="#" class="footer-link" @click.prevent="openDisclaimer">免责声明</a>
