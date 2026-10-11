@@ -1,7 +1,7 @@
 """条件选股引擎：结构化条件 DSL + 在最新日线数据上执行。
 
 （ARC-07：原 stocks/ai/screener.py。选股与 LLM 无关，迁到 stocks.screener；
-stocks.ai.screener 保留为兼容别名。）
+旧路径别名已在 v1.6.0 之后删除。）
 
 DSL 示例：
 {

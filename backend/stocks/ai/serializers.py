@@ -1,7 +1,7 @@
 """AI 端点的序列化器：服务商配置读写与 AI 选股入参校验。
 
 （ARC-07：原 stocks/ai_serializers.py，只服务 ai 包，迁入 stocks.ai；
-stocks.ai_serializers 保留为兼容别名。）
+旧路径别名已在 v1.6.0 之后删除。）
 """
 from typing import Any
 

@@ -281,3 +281,16 @@ class RuffConfigTests(SimpleTestCase):
         for pattern, ignored in cfg['lint'].get('per-file-ignores', {}).items():
             if {'G004', 'TRY400', 'BLE001'} & set(ignored):
                 self.assertEqual((pattern, ignored), ('stocks/tests*.py', ['BLE001']))
+
+
+class CompatAliasRemovedTests(SimpleTestCase):
+    """删除 ARC 二轮留下的兼容别名（v1.6.0 已带一版）：旧路径不可再导入，新路径照常可用"""
+
+    def test_ai_alias_modules_removed(self):
+        import importlib
+
+        for old in ('stocks.ai_serializers', 'stocks.ai.screener', 'stocks.ai.strategies'):
+            with self.assertRaises(ModuleNotFoundError, msg=old):
+                importlib.import_module(old)
+        from stocks.ai import serializers  # noqa: F401
+        from stocks.screener import engine, strategies  # noqa: F401
