@@ -181,11 +181,11 @@ class StockViewSet(viewsets.ModelViewSet):
                     {'detail': 'days 必须是正整数'},
                     status=status.HTTP_400_BAD_REQUEST,
                 )
-            start_date = timezone.now().date() - timedelta(days=min(days, 3650))
+            start_date = timezone.localdate() - timedelta(days=min(days, 3650))
             queryset = queryset.filter(trade_date__gte=start_date)
         else:
             # 无参数默认近 365 天，不再整表倒出（PERF-05）
-            queryset = queryset.filter(trade_date__gte=timezone.now().date() - timedelta(days=365))
+            queryset = queryset.filter(trade_date__gte=timezone.localdate() - timedelta(days=365))
 
         queryset = queryset.order_by('-trade_date')
         serializer = DailyQuoteSerializer(queryset, many=True)

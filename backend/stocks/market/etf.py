@@ -5,6 +5,7 @@ from __future__ import annotations
 from datetime import datetime, timedelta
 
 import akshare as ak
+from django.utils import timezone
 
 from ._cache import _cache_get, _cache_meta, _cache_set, _now_str, _stale_or, _to_float
 from .holders import fetch_holder_structure
@@ -275,9 +276,9 @@ def _etf_history(code, range_name='3m', start_date=None, end_date=None, ttl=1200
 
     if start_date:
         start = start_date
-        end = end_date or datetime.now().date()
+        end = end_date or timezone.localdate()
     else:
-        end = datetime.now().date()
+        end = timezone.localdate()
         start = end - timedelta(days=_RANGE_LOOKBACK_DAYS[range_name])
     # 多源路由：东财优先；东财失败/限流时切新浪（新浪无成交额/换手率，字段如实为 None）
     # 东财取前复权（DAT-14）：ETF 份额折算/分红会让不复权价格出现断崖，区间收益失真；
@@ -368,13 +369,13 @@ def get_etf_detail(code, range_name='3m', start_date=None, end_date=None):
         start = _parse_range_date(start_date, 'start_date')
         end = _parse_range_date(end_date, 'end_date') if end_date else None
         if end is None:
-            end = datetime.now().date()
+            end = timezone.localdate()
         if start > end:
             raise ValueError('start_date 不能晚于 end_date')
         if (end - start).days > _CUSTOM_MAX_SPAN_DAYS:
             raise ValueError(f'自定义区间最长 {_CUSTOM_MAX_SPAN_DAYS} 天（约 3 年）')
     else:
-        end = datetime.now().date()
+        end = timezone.localdate()
         start = end - timedelta(days=_RANGE_LOOKBACK_DAYS[range_name])
 
     quote = next((item for item in _normalized_etf_items() if item['code'] == code), None)

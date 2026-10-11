@@ -18,7 +18,7 @@ import sys
 import threading
 import time
 from collections import OrderedDict
-from datetime import datetime, time as dt_time, timedelta
+from datetime import datetime, time as dt_time, timedelta, timezone as dt_timezone
 from decimal import InvalidOperation
 
 import pandas as pd
@@ -198,7 +198,7 @@ def _cache_meta(cache_key, ttl, source, available, source_data_date=None, discla
         fetched_at = None
     else:
         cache_status = 'fresh' if _is_fresh(item['ts'], ttl) else 'stale'
-        fetched_at = datetime.fromtimestamp(item['ts']).astimezone().isoformat(timespec='seconds')
+        fetched_at = _local_iso(item['ts'])
 
     data_as_of = None
     if _calendar_enabled():
@@ -228,5 +228,17 @@ def _to_float(val):
         return None
 
 
+def _local_iso(ts):
+    """时间戳 → 显式按 settings.TIME_ZONE 的 ISO 字符串（DAT-18：不依赖进程 TZ 环境变量）"""
+    from django.utils import timezone
+
+    return timezone.localtime(
+        datetime.fromtimestamp(ts, tz=dt_timezone.utc),
+    ).isoformat(timespec='seconds')
+
+
 def _now_str():
-    return time.strftime('%Y-%m-%d %H:%M:%S')
+    """当前本地时间字符串；显式按 settings.TIME_ZONE，不依赖 Django 注入的 TZ（DAT-18）"""
+    from django.utils import timezone
+
+    return timezone.localtime().strftime('%Y-%m-%d %H:%M:%S')

@@ -610,7 +610,8 @@ def _daily_start_date(stock, bootstrap_days=365, overlap_days=5):
         .first()
     )
     if latest is None:
-        return (timezone.now().date() - timedelta(days=bootstrap_days)).strftime('%Y%m%d')
+        # 本地日期（timezone.now() 是 UTC，北京时间凌晨会落到前一天，DAT-18）
+        return (timezone.localdate() - timedelta(days=bootstrap_days)).strftime('%Y%m%d')
     return (latest - timedelta(days=overlap_days)).strftime('%Y%m%d')
 
 
@@ -1054,9 +1055,10 @@ def fetch_daily_summary():
     stocks = Stock.objects.filter(is_active=True)
     for stock in stocks:
         try:
-            today_str = timezone.now().strftime('%Y%m%d')
-            # 带少量重叠，防止昨日缺漏
-            start = (timezone.now().date() - timedelta(days=3)).strftime('%Y%m%d')
+            # 本地日期（DAT-18）；带少量重叠，防止昨日缺漏
+            today = timezone.localdate()
+            today_str = today.strftime('%Y%m%d')
+            start = (today - timedelta(days=3)).strftime('%Y%m%d')
             fetch_daily_data(stock, start_date=start, end_date=today_str)
             fetch_minute_data(stock)
         except Exception as e:

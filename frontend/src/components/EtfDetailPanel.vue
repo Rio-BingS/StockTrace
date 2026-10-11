@@ -22,13 +22,15 @@ const range = ref('3m')
 
 const RANGE_OPTIONS = [['1w', '1周'], ['1m', '1月'], ['3m', '3月'], ['6m', '半年'], ['1y', '1年'], ['custom', '自定义']]
 const _today = new Date()
+// 本地日期 YYYY-MM-DD；toISOString 是 UTC，北京时间 0-8 点会差一天（DAT-18）
+const _localDate = d => `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`
 const _ago = days => {
   const d = new Date(_today)
   d.setDate(d.getDate() - days)
-  return d.toISOString().slice(0, 10)
+  return _localDate(d)
 }
 const customStart = ref(_ago(30))
-const customEnd = ref(_today.toISOString().slice(0, 10))
+const customEnd = ref(_localDate(_today))
 
 const quote = computed(() => data.value?.quote || {})
 const performance = computed(() => data.value?.price_performance || {})

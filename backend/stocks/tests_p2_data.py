@@ -154,3 +154,38 @@ class ThsVendoredTokenTests(SimpleTestCase):
         self.assertEqual(len(df), 3)
         self.assertEqual(sleep.call_count, 2)
         sleep.assert_called_with(sectors._THS_PAGE_INTERVAL)
+
+
+class LocalDateTests(SimpleTestCase):
+    """DAT-18：「今天」一律取本地日期，时间字符串显式按 TIME_ZONE。"""
+
+    # UTC 2026-10-11 17:30 = 北京时间 2026-10-12 01:30
+    _UTC_NIGHT = __import__('datetime').datetime(
+        2026, 10, 11, 17, 30, tzinfo=__import__('datetime').timezone.utc)
+
+    def test_daily_start_date_uses_local_date(self):
+        from . import services
+
+        with patch('django.utils.timezone.now', return_value=self._UTC_NIGHT), \
+                patch('stocks.services.DailyQuote.objects') as qs:
+            qs.filter.return_value.order_by.return_value.values_list.return_value.first.return_value = None
+            start = services._daily_start_date(object(), bootstrap_days=1)
+        self.assertEqual(start, '20261011')  # 本地 10-12 往前 1 天；UTC 口径会是 10-10
+
+    def test_now_str_and_fetched_at_are_local(self):
+        import sys
+
+        # stocks.market 包把 _cache 字典导出成了同名属性，这里取模块本身
+        _cache = sys.modules['stocks.market._cache']
+        with patch('django.utils.timezone.now', return_value=self._UTC_NIGHT):
+            self.assertEqual(_cache._now_str(), '2026-10-12 01:30:00')
+        self.assertEqual(
+            _cache._local_iso(self._UTC_NIGHT.timestamp()), '2026-10-12T01:30:00+08:00',
+        )
+
+    def test_period_today_defaults_to_local_date(self):
+        from .market.periods import resolve_period
+
+        with patch('django.utils.timezone.now', return_value=self._UTC_NIGHT):
+            window = resolve_period(lambda k, d='': {'period': '1d'}.get(k, d), ['1d'])
+        self.assertEqual(window.end.isoformat(), '2026-10-12')
