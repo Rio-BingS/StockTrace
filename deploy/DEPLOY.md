@@ -229,6 +229,103 @@ print(list(M.objects.values('trade_date','exchange').annotate(n=Count('id')).ord
 此时 MB5 截面窗口凑不齐，融资拥挤度维度会如实「不可用」（不否决、不升级），需另找深市来源。
 扫描日志里的「截面样本 mb5=…」即当日全市场两融截面只数（低于 200 不取分位）。
 
+### 2.1.2 探测器成分池扩容（沪深300+中证500，约 800 只）
+
+探测器的扫描宇宙从「指数 + 自选 + 板块」扩到「+ 成分池」，成分池信号在页面「算法推送」里单列
+（`source=pool`）。成分池日线由**单线程限速队列**全天慢慢拉，不做突发并发（1H2G 红线不变）。
+
+本次带 3 个新迁移（`0026_indexconstituent`、`0027_poolstockstate`、`0028_detector_signal_source_pool`），
+按 2.1 正常升级（`migrate --plan` 应列出这 3 个）后，在 root shell 里加载环境变量再以 www 执行：
+
+```bash
+cd /opt/stocktrace/backend
+set -a; source /etc/stocktrace/env; set +a
+# 1) 建成分表（中证官网成分文件优先、新浪兜底；失败保留旧值，退出码非 0，重跑即可）
+sudo -u www -E venv/bin/python manage.py refresh_index_constituents
+# 2) 看回补进度与预计耗时（不请求上游）
+sudo -u www -E venv/bin/python manage.py backfill_pool_quotes --status
+# 3) 历史回补（后台慢慢跑；可随时 Ctrl-C / 被杀，重跑同一命令从断点继续，已有数据的跳过）
+sudo -u www -E nohup venv/bin/python manage.py backfill_pool_quotes > /tmp/pool_backfill.log 2>&1 &
+tail -f /tmp/pool_backfill.log
+```
+
+不跑第 3 步也可以：调度器的 `pool_quotes` 任务在没有收盘增量要补的时段会自己回补，只是和增量
+共用一个节奏。回补命令与调度任务共用 `pool_quotes` 任务锁，命令运行期间调度任务自动让路，不会并发。
+
+**新命令**
+
+| 命令 | 作用 |
+|---|---|
+| `refresh_index_constituents [--index 000300]` | 手动刷新成分表（每周一 08:30 自动刷新） |
+| `backfill_pool_quotes [--interval 20] [--limit N] [--with-increment] [--status]` | 成分池日线历史回补：限速、单线程、断点续跑 |
+| `run_detector_scan --pool auto\|force\|skip` | 手动扫描时指定成分池方式（默认 auto：完整度达标才扫） |
+
+**新定时任务**（随 `stocktrace-scheduler` 重启自动注册，无需改 systemd 单元）
+
+| 任务 id | 时间（Asia/Shanghai） | 作用 |
+|---|---|---|
+| `index_constituents` | 每周一 08:30 | 刷新沪深300、中证500 当前成分；单个指数失败保留旧成分 |
+| `pool_quotes` | 全天每 `POOL_FETCH_INTERVAL_SECONDS` 秒（默认 20） | 每次最多处理一只：收盘后（15:30 起）为每只补当天 K 线优先，其次历史回补，再次每 7 天刷新一次流通股本缓存 |
+| `detector_scan`（时间段扩大） | 交易日 17:15–23:45 每 30 分钟 | 17:15 照常扫指数/自选/板块；成分池当日日线完整度 < 95% 时标 `pending`，之后每个重试点按完整度决定是否补跑，23:45 截止按现有数据扫（缺数的跳过并记进 `DetectorRun.pool_coverage`） |
+
+**节奏与耗时估算**（按间隔计；每只一次请求，新浪日 K 实测约 4.5 秒/次，含在间隔内）
+
+| 项 | 20 秒间隔（默认） | 30 秒间隔 |
+|---|---|---|
+| 首次历史回补（约 780 只，自选里的成分股不重复拉） | 约 4.3 小时 | 约 6.5 小时 |
+| 每日收盘增量（15:30 起） | 约 4.3 小时，约 19:50 完成 → 20:15 重试点补跑成分池扫描 | 约 6.5 小时，约 22:00 完成 |
+| 股本缓存刷新（7 天一轮，插在空闲时段） | 约 110 次/天 | 同左 |
+
+上游失败时：单只指数退避（5 分钟起翻倍，上限 6 小时），连续 3 次失败整个队列暂停（60 秒起翻倍，
+上限 30 分钟），数据源层另有 SourceChain 冷却；停牌股拉不到当天 bar 时 1 小时后复查，3 次后放弃当天。
+所以上游不稳的日子增量会更晚完成，23:45 截止点保证当晚一定出结果。
+
+**扫描耗时与内存**（`tests_pool_bench`，合成 800 只 × 260 根日线、真实序列构建/平静判定/维度评估；
+开发机测得，VPS CPU 更弱，按 2–3 倍估）：
+
+| 项 | 实测 |
+|---|---|
+| 800 只成分池扫描墙钟 | 约 10 秒（不开 tracemalloc） |
+| 扫描期间 Python 分配峰值，分块 100 只（默认） | 约 9.6 MB |
+| 同上，不分块（对照） | 约 69 MB（进程 RSS 峰值多涨约 240 MB） |
+
+复测方法见 `backend/stocks/tests_pool_bench.py` 模块说明（基准属于测试，只在开发机/CI 跑，不在生产机跑）。
+
+**磁盘体积**：日线行（`DailyQuote`，含索引）实测约 165 字节/行（`VACUUM INTO` 前后对比，含 40 日两融明细，偏上限）。
+
+| 项 | 行数 | 体积 |
+|---|---|---|
+| 首次回补（约 800 只 × 270 交易日） | 约 21.6 万 | 约 35 MB |
+| 之后每年新增（800 只 × 约 245 交易日） | 约 19.6 万/年 | 约 32 MB/年 |
+| `PoolStockState`（含股本历史 JSON） | 800 | < 1 MB |
+
+`DailyQuote` 目前没有保留期清理（自选股历来如此）；按上表 3 年约 130 MB，1H2G 的盘够用，需要时再加清理。
+每只股票一个小事务写入（约 270 行回补 / 5 行增量），SQLite 写锁持有时间是毫秒级，不影响页面读。
+
+**新环境变量**（都有默认值，不配也能跑，见 `env.example`）：`POOL_FETCH_ENABLED`、`POOL_FETCH_INTERVAL_SECONDS`、
+`POOL_BACKFILL_CALENDAR_DAYS`、`POOL_MIN_BARS`、`POOL_DAILY_SOURCES`、`DETECTOR_POOL_ENABLED`、
+`DETECTOR_POOL_SIGNAL_CAP`（每日推送上限，默认 20）、`DETECTOR_POOL_READY_RATIO`（默认 0.95）、
+`DETECTOR_POOL_CHUNK`（默认 100）、`DETECTOR_POOL_DEADLINE`（默认 23:45）。
+
+**需在 VPS 验证**（开发沙箱里能通，境外 VPS 未测）：
+
+1. 中证官网成分文件（`oss-ch.csindex.com.cn`，akshare `index_stock_cons_csindex`）与新浪成分接口能否访问——
+   `refresh_index_constituents` 输出两个指数各 300/500 只即通过；
+2. 新浪个股日 K（`stock_zh_a_daily`，qfq）在 VPS 的成功率与耗时——看回补日志里「失败 … 后重试」的比例；
+   东财 push2his 在 VPS 不可达（已知），成分池默认新浪在前，东财排第二只会偶尔被冷却跳过；
+3. 第一个交易日收盘后，确认增量在晚间完成、`detector_scan` 补跑成分池：
+
+```bash
+sudo journalctl -u stocktrace-scheduler --since "15:30" | grep -E "成分池|探测器扫描完成"
+sudo -u www -E venv/bin/python manage.py shell -c "
+from stocks.models import DetectorRun as R
+r = R.objects.order_by('-trade_date').first()
+print(r.trade_date, r.pool_status, {k: r.pool_coverage.get(k) for k in ('expected','fresh','ratio','scanned','skipped_count','signals_raw','signals_pushed')})"
+```
+
+关闭开关：`POOL_FETCH_ENABLED=0` 停采集（成分池扫描随之因缺数跳过），`DETECTOR_POOL_ENABLED=0` 只停成分池扫描；
+两者都不影响自选股的原有抓取与扫描。
+
 ### 2.2 回滚
 
 `deploy-history.log` 最后一行是本次的 `PREV -> NEW`。
@@ -273,6 +370,10 @@ set -a; source /etc/stocktrace/env; set +a
 sudo -u www -E venv/bin/python manage.py fetch_stock_data --all            # 轻量：分钟线近 2 个交易日
 sudo -u www -E venv/bin/python manage.py fetch_stock_data --all --days 5   # 分钟线回溯 5 个交易日（上限 5）
 
+# 成分池（沪深300+中证500）：成分表刷新、回补进度/回补（限速、可续跑），见 2.1.2
+sudo -u www -E venv/bin/python manage.py refresh_index_constituents
+sudo -u www -E venv/bin/python manage.py backfill_pool_quotes --status
+
 # 只读校验 ETF/板块上游字段与单位；不写数据库、不修改缓存
 sudo -u www -E venv/bin/python manage.py validate_market_sources
 
@@ -294,8 +395,11 @@ sudo systemctl stop stocktrace-scheduler
   （盘中 5 分钟任务 240s，08:50 预热 1800s，15:10 汇总 3600s，探测器 1500s，收盘后预热 900s）。
   宽限内晚到的任务仍会执行（各任务自带交易日 / 收盘时间守卫）。
 - 任务链逐步容错（REL-08）：15:10 汇总里任一步（日线、提醒、AI 流水清理、快照清理）异常只记带堆栈的
-  日志，不影响后续步骤。探测器 17:15 先检查当日 `industry_ff`/`market_ff` 快照，缺失则在
-  17:45/18:15/18:45 重试，最后一次降级照跑；当日已有成功扫描记录时重试点直接跳过。
+  日志，不影响后续步骤。探测器 17:15 先检查当日 `industry_ff`/`concept_ff` 快照，缺失则在
+  17:45/18:15/18:45 重试，最后一次降级照跑；当日已有成功扫描记录时重试点直接跳过——
+  除非成分池还是 `pending`，此时 19:15–23:45 的重试点按成分池完整度补跑（见 2.1.2）。
+- 成分池限速采集 `pool_quotes` 是 interval 任务（默认 20 秒），`max_instances=1`，单次只处理一只股票；
+  回补命令运行时它拿不到 `pool_quotes` 锁会静默跳过（只记 debug）。
 - 锁文件与心跳文件在 `/run/stocktrace/`（`RuntimeDirectory=`，属主 www，开机清空，不会残留 root 属主的锁）。
   拿不到锁时 run_scheduler 每 60s 重试并记 WARNING。
 - 兼容旧部署：`STOCKTRACE_RUN_SCHEDULER_IN_WEB=1` 时仍在 Web 进程内启动（同一把锁，二者不会同时跑）。
@@ -311,7 +415,8 @@ sudo systemctl stop stocktrace-scheduler
 
 | 项 | 建议 |
 |----|------|
-| 自选数量 | 尽量 ≤ 20，盘中任务按股串行 |
+| 自选数量 | 尽量 ≤ 20，盘中任务按股串行（成分池约 800 只不占这个名额：它们只拉收盘日 K、走单线程限速队列，见 2.1.2） |
+| 成分池采集间隔 | 默认 20 秒/只；上游频繁失败时调大 `POOL_FETCH_INTERVAL_SECONDS`（如 30），不要调小到 10 以下 |
 | Gunicorn workers | 1H2G 保持 1（省内存）；内存仍紧再降 threads。AI 后台任务（个股分析、AI 选股翻译/点评，`/api/ai/jobs/<id>/`）已落库到 `AiJob`，不再要求单 worker：加 worker 时任务由各 worker 的后台线程从库里抢占执行、不会重复，轮询打到任一 worker 都能查到；重启后排队中的任务继续执行，执行中被打断的标为失败（需重新发起）。AI 并发上限 `STOCKTRACE_AI_MAX_CONCURRENCY` 对后台任务跨 worker 生效，对同步接口仍是每进程 |
 | 调度进程 | `stocktrace-scheduler` 单独计内存（`MemoryMax=700M`），与 Web 互不拖累 |
 | 勿在 VPS 上 `npm run dev` | 只用 `dist` |
