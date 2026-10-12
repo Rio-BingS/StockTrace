@@ -189,7 +189,8 @@ def detector_signals(request):
     scan_dates = _scan_dates()
     rows = [_signal_row(s, scan_dates) for s in qs]
     if not all_dates and trade_date is None and latest_run is not None:
-        rows.sort(key=lambda r: r['score'], reverse=True)
+        # 向上信号未经验证（多轮前推验证 20/60 日超额均不显著）：降权排在向下信号之后
+        rows.sort(key=lambda r: (r['direction'] == DetectorSignal.DIRECTION_UP, -r['score']))
     items, pagination = paginate(
         rows,
         positive_int(request.query_params, 'page', 1),

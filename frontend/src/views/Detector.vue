@@ -24,6 +24,7 @@ import {
   disabledText,
   voteRuleText,
 } from '../utils/detectorDims.js'
+import { isUnverified, UNVERIFIED_TEXT, UNVERIFIED_TITLE } from '../utils/detectorSignal.js'
 
 const loading = ref(false),
   error = ref('')
@@ -290,13 +291,18 @@ onUnmounted(() => {
             <tr
               v-for="row in data?.items || []"
               :key="row.id"
-              :class="{ selected: selectedSignalId === row.id }"
+              :class="{ selected: selectedSignalId === row.id, unverified: isUnverified(row) }"
               tabindex="0"
               :aria-expanded="selectedSignalId === row.id ? 'true' : 'false'"
               @click="toggleDetail(row.id)"
               @keydown="onActivateKey($event, () => toggleDetail(row.id))"
             >
-              <td :class="dirClass(row.direction)">{{ dirText(row.direction) }}</td>
+              <td :class="dirClass(row.direction)">
+                {{ dirText(row.direction) }}
+                <span v-if="isUnverified(row)" class="tag-unverified" :title="UNVERIFIED_TITLE">{{
+                  UNVERIFIED_TEXT
+                }}</span>
+              </td>
               <td>{{ row.target_kind_display }}</td>
               <td class="name">
                 {{ row.target_name }} <small>{{ row.target_code }}</small>
@@ -666,6 +672,22 @@ tbody tr {
 tbody tr:hover,
 tbody tr.selected {
   background: #162b49;
+}
+/* 向上信号未经验证：降权显示（淡化），排序上后端已排在向下信号之后 */
+tr.unverified td {
+  opacity: 0.6;
+}
+tr.unverified.selected td,
+tr.unverified:hover td {
+  opacity: 0.85;
+}
+.tag-unverified {
+  margin-left: 4px;
+  padding: 1px 5px;
+  border: 1px dashed #4a5a78;
+  border-radius: 4px;
+  color: #8f9bb2;
+  font-size: 10px;
 }
 .name {
   color: #e0e7f1;

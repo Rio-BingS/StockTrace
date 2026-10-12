@@ -103,3 +103,21 @@ class ReviewNodesApiTests(TestCase):
         self.assertAlmostEqual(n20['dir_excess'], 10.0)
         rows = self.client.get('/api/detector/signals/', {'date': t.isoformat()}).json()['items']
         self.assertEqual(rows[0]['elapsed_days'], 25)
+
+
+class SignalListOrderTests(TestCase):
+    def setUp(self):
+        p = patch('stocks.detector.views.expected_latest_date', return_value=date(2026, 10, 9))
+        p.start()
+        self.addCleanup(p.stop)
+
+    def test_up_signals_ranked_after_down(self):
+        from .models import DetectorRun, DetectorSignal
+
+        d = date(2026, 10, 9)
+        DetectorRun.objects.create(trade_date=d)
+        for code, direction, score in (('a', 'up', 90), ('b', 'down', 40), ('c', 'down', 60), ('d', 'up', 50)):
+            DetectorSignal.objects.create(target_kind='industry', target_code=code, target_name=code,
+                                          trade_date=d, direction=direction, score=score)
+        items = self.client.get('/api/detector/signals/').json()['items']
+        self.assertEqual([i['target_code'] for i in items], ['c', 'b', 'a', 'd'])
