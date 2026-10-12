@@ -5,8 +5,11 @@ import {
   dimRoleText,
   isUnverified,
   liftText,
+  nodeCells,
   POSITIONING_TEXT,
   signalBadges,
+  statusClass,
+  statusText,
   trendStateText,
   trendStateTitle,
   UNVERIFIED_TEXT,
@@ -111,4 +114,44 @@ test('vetoedText 与 dimRoleText', () => {
   assert.equal(dimRoleText({ vote_enabled: false, role: 'display' }), '只展示')
   assert.equal(dimRoleText({ vote_enabled: true }), '')
   assert.equal(dimRoleText({}), '')
+})
+
+test('statusText：5 日回看判未兑现但不足 10 个交易日时只显示观察期', () => {
+  assert.equal(statusText({ status: 'missed', elapsed_days: 6 }), '观察期')
+  assert.equal(statusClass({ status: 'missed', elapsed_days: 6 }), 'watching')
+  assert.equal(statusText({ status: 'missed', elapsed_days: 10 }), '未兑现')
+  assert.equal(statusClass({ status: 'missed', elapsed_days: 12 }), 'missed')
+  // 旧接口没有 elapsed_days：照旧显示
+  assert.equal(statusText({ status: 'missed' }), '未兑现')
+  assert.equal(statusText({ status: 'active', elapsed_days: 2 }), '维持中')
+})
+
+test('nodeCells：20/60 日节点——观察期不判定、进行中、到期判方向', () => {
+  const cells = nodeCells({
+    elapsed: 25,
+    no_fail_days: 10,
+    nodes: [
+      { horizon: 20, state: 'done', days: 20, dir_excess: 3.456, verdict: 'pass' },
+      { horizon: 60, state: 'pending', days: 25, dir_excess: -1.2, verdict: null },
+    ],
+  })
+  assert.deepEqual(cells, [
+    { label: '20 日', state: '方向正确', value: '+3.46%', cls: 'ok' },
+    { label: '60 日', state: '进行中（第 25 日）', value: '-1.20%', cls: '' },
+  ])
+  const early = nodeCells({
+    no_fail_days: 10,
+    nodes: [{ horizon: 20, state: 'observe', days: 4, dir_excess: -5, verdict: null }],
+  })
+  assert.equal(early[0].state, '观察期（前 10 日不判定）')
+  assert.equal(early[0].cls, '')
+  const fail = nodeCells({
+    nodes: [{ horizon: 60, state: 'done', dir_excess: -2, verdict: 'fail' }],
+  })
+  assert.equal(fail[0].state, '方向错误')
+  const noBench = nodeCells({
+    nodes: [{ horizon: 20, state: 'done', dir_excess: null, verdict: null }],
+  })
+  assert.equal(noBench[0].value, '-')
+  assert.deepEqual(nodeCells(null), [])
 })

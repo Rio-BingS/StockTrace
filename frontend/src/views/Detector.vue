@@ -10,7 +10,7 @@ import { errorMessage, isCanceled } from '../utils/errorMessage.js'
 import { createRequestGuard } from '../utils/requestGuard.js'
 import { onActivateKey } from '../utils/a11y.js'
 import { toastError } from '../stores/feedback.js'
-import { SEVERITY_LABEL, STATUS_LABEL } from '../constants/labels.js'
+import { SEVERITY_LABEL } from '../constants/labels.js'
 import {
   baseText,
   fmtChanges,
@@ -29,6 +29,8 @@ import {
   isUnverified,
   POSITIONING_TEXT,
   signalBadges,
+  statusClass,
+  statusText,
   trendStateText,
   trendStateTitle,
   UNVERIFIED_TEXT,
@@ -336,9 +338,7 @@ onUnmounted(() => {
                 <span class="sev" :class="row.severity">{{ SEVERITY_LABEL[row.severity] }}</span>
               </td>
               <td>
-                <span class="status" :class="row.status">{{
-                  STATUS_LABEL[row.status] || row.status
-                }}</span>
+                <span class="status" :class="statusClass(row)">{{ statusText(row) }}</span>
               </td>
             </tr>
           </tbody>
@@ -451,7 +451,10 @@ onUnmounted(() => {
           }}
           且不利波动未先触及同等幅度记为兑现（σ 不可得时按 σ={{ config.review_rules.hit_pct }}%）；
           同时记录相对沪深300 的 {{ config.review_rules.lookback_days }} 日超额收益。
-          命中率与同标的历史基线比较，同日同类信号按一个独立样本计。
+          命中率与同标的历史基线比较，同日同类信号按一个独立样本计。5 日判定只作辅助： 信号详情以
+          {{ (config.review_rules.node_horizons || [20, 60]).join(' / ') }}
+          日相对沪深300 的按方向超额为准，前
+          {{ config.review_rules.no_fail_days ?? 10 }} 个交易日只显示观察期、不判定失败。
         </p>
         <p class="hint">
           <template v-if="config.review_rules.auto_tune">

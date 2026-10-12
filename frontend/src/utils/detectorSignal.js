@@ -3,6 +3,8 @@
 // signal.annotations、signal.elapsed_days 与详情接口的 review_nodes，缺字段（旧信号行）
 // 一律返回空，不报错、不编造。
 
+import { STATUS_LABEL } from '../constants/labels.js'
+
 const isNum = (v) => typeof v === 'number' && Number.isFinite(v)
 
 /** 页面定位：第七轮验证信号出现在波段转向之后，是趋势延续而非转折预判 */
@@ -92,6 +94,53 @@ export function signalBadges(signal) {
     })
   }
   return out
+}
+
+/** 列表状态：5 日回看判「未兑现」但信号后不足 10 个交易日时，只显示「观察期」 */
+export const NO_FAIL_DAYS = 10
+
+export function statusText(row) {
+  const r = row || {}
+  if (r.status === 'missed' && isNum(r.elapsed_days) && r.elapsed_days < NO_FAIL_DAYS) {
+    return '观察期'
+  }
+  return STATUS_LABEL[r.status] || r.status || '-'
+}
+
+export function statusClass(row) {
+  return statusText(row) === '观察期' ? 'watching' : row?.status || ''
+}
+
+function fmtPp(v) {
+  if (!isNum(v)) return '-'
+  return `${v > 0 ? '+' : ''}${v.toFixed(2)}%`
+}
+
+/** 复盘节点 → 展示单元格：{label, state, value, cls} */
+export function nodeCells(reviewNodes) {
+  const nodes = reviewNodes?.nodes
+  if (!Array.isArray(nodes)) return []
+  const noFail = isNum(reviewNodes.no_fail_days) ? reviewNodes.no_fail_days : NO_FAIL_DAYS
+  return nodes.map((n) => {
+    let state
+    let cls = ''
+    if (n.state === 'done') {
+      if (n.verdict === 'pass') {
+        state = '方向正确'
+        cls = 'ok'
+      } else if (n.verdict === 'fail') {
+        state = '方向错误'
+        cls = 'bad'
+      } else {
+        state = '已到期（基准缺失）'
+      }
+    } else if (n.state === 'pending') {
+      state = `进行中（第 ${n.days} 日）`
+    } else {
+      state = `观察期（前 ${noFail} 日不判定）`
+    }
+    return { label: `${n.horizon} 日`, state, value: fmtPp(n.dir_excess), cls }
+  })
 }
 
 /** 否决记录一行文字 */
