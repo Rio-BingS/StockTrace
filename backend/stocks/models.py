@@ -457,6 +457,44 @@ class StockMarginDaily(models.Model):
         return f"{self.code} {self.trade_date} 融资余额 {self.rz}"
 
 
+class StockRestrictedRelease(models.Model):
+    """限售股解禁日程（东财数据中心 RPT_LIFT_STAGE）：一只股票一个解禁日一类限售股一行。
+
+    解禁日程在发行/定增时即已公开，所以未来日期的行是「已排期」而非预测。
+    - free_ratio：占解禁前流通股的比例（小数，0.0123 = 1.23%），探测器 lift_pressure
+      按 T 之后 20 个交易日内的合计比例判定；
+    - 同一（代码、解禁日、类型）上游偶有多批次，入库时合并（股数、市值、比例相加）；
+    - 日程会因追加承诺等推迟：每日任务按窗口整段覆盖，旧排期随之消失。
+    """
+    code = models.CharField('证券代码', max_length=6)
+    name = models.CharField('证券简称', max_length=32, blank=True, default='')
+    free_date = models.DateField('解禁日')
+    share_type = models.CharField('限售股类型', max_length=100, default='')
+    free_shares = models.FloatField('解禁数量(股)', null=True, blank=True)
+    able_free_shares = models.FloatField('实际可流通数量(股)', null=True, blank=True)
+    free_ratio = models.FloatField('占解禁前流通股比例', null=True, blank=True)
+    lift_market_cap = models.FloatField('解禁市值(元)', null=True, blank=True)
+    holder_num = models.IntegerField('解禁股东数', null=True, blank=True)
+    source = models.CharField('数据来源', max_length=32, blank=True, default='')
+    fetched_at = models.DateTimeField('拉取时间', auto_now=True)
+
+    class Meta:
+        verbose_name = '限售解禁日程'
+        verbose_name_plural = '限售解禁日程'
+        ordering = ['free_date', 'code']
+        constraints = [
+            models.UniqueConstraint(fields=['code', 'free_date', 'share_type'],
+                                    name='uniq_restricted_release'),
+        ]
+        indexes = [
+            models.Index(fields=['free_date'], name='restricted_date_idx'),
+            models.Index(fields=['code', 'free_date'], name='restricted_code_date_idx'),
+        ]
+
+    def __str__(self):
+        return f"{self.code} {self.free_date} {self.share_type}"
+
+
 class DetectorDimConfig(models.Model):
     """探测器微变维度的可调配置（权重 / 阈值 / 启停）。
 
