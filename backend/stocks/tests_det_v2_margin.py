@@ -122,3 +122,45 @@ class StockMarginJobTests(TestCase):
         with patch('stocks.market.margin_stock.sync_recent_stock_margin', return_value={}) as sync:
             sch._stock_margin_job()
         sync.assert_called_once_with()
+
+
+class BackfillStockMarginCommandTests(TestCase):
+    def _run(self, *args, saved=None):
+        from io import StringIO
+
+        from django.core.management import call_command
+
+        calls = []
+
+        def fake_save(kind, day, rows=None):
+            calls.append((kind, day))
+            return (saved or {}).get((kind, day), 3)
+
+        out = StringIO()
+        with patch('stocks.trading_calendar.is_trading_day',
+                   side_effect=lambda d: d.weekday() < 5), \
+                patch.object(margin_stock, 'save_stock_margin_day', side_effect=fake_save):
+            call_command('backfill_stock_margin', *args, '--sleep', '0', stdout=out)
+        return calls, out.getvalue()
+
+    def test_skips_complete_days_and_runs_ascending(self):
+        d1 = date(2026, 10, 8)
+        StockMarginDaily.objects.create(code='600000', trade_date=d1, exchange='sse', rz=1)
+        StockMarginDaily.objects.create(code='000001', trade_date=d1, exchange='szse', rz=1)
+        calls, out = self._run('--start', '2026-10-08', '--end', '2026-10-12')
+        self.assertEqual([d for _k, d in calls],
+                         [date(2026, 10, 9)] * 2 + [date(2026, 10, 12)] * 2)
+        self.assertIn('已有 1 个', out)
+
+    def test_missing_exchange_day_fails_with_nonzero_exit(self):
+        from django.core.management.base import CommandError
+
+        with self.assertRaises(CommandError):
+            self._run('--start', '2026-10-09', '--end', '2026-10-09',
+                      saved={('szse', date(2026, 10, 9)): 0})
+
+    def test_bad_range_rejected(self):
+        from django.core.management.base import CommandError
+
+        with self.assertRaises(CommandError):
+            self._run('--start', '2026-10-10', '--end', '2026-10-01')
