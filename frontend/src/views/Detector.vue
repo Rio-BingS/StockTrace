@@ -1,15 +1,16 @@
 <script setup>
-// 探测器一级页面：信号列表（可按严重程度筛选）+ 信号详情（维度曲线）+ 板块微变热力图。
-// 数据来自本站日度扫描（每交易日 17:15 自动执行），页面只读，不触发扫描。
+// 探测器一级页面：算法推送（沪深300+中证500 成分池）+ 信号列表（可按严重程度/来源筛选）
+// + 信号详情（维度曲线）+ 板块微变热力图。数据来自本站日度扫描（每交易日 17:15 自动执行，
+// 成分池日线未齐时晚些补跑），页面只读，不触发扫描；只有「加自选」会写自选列表。
 import { computed, reactive, ref, onMounted, onUnmounted } from 'vue'
 import MarketDataStatus from '../components/MarketDataStatus.vue'
 import DetectorSignalDetail from '../components/DetectorSignalDetail.vue'
 import DetectorHeatmap from '../components/DetectorHeatmap.vue'
-import { detectorApi } from '../api/stocks.js'
+import { detectorApi, stockApi } from '../api/stocks.js'
 import { errorMessage, isCanceled } from '../utils/errorMessage.js'
 import { createRequestGuard } from '../utils/requestGuard.js'
 import { onActivateKey } from '../utils/a11y.js'
-import { toastError } from '../stores/feedback.js'
+import { toast, toastError } from '../stores/feedback.js'
 import { SEVERITY_LABEL } from '../constants/labels.js'
 import {
   baseText,
@@ -37,6 +38,14 @@ import {
   UNVERIFIED_TITLE,
   vetoedText,
 } from '../utils/detectorSignal.js'
+import {
+  canAddToWatchlist,
+  kindText,
+  POOL_TITLE,
+  poolStatusText,
+  sortPoolSignals,
+  SOURCE_OPTIONS,
+} from '../utils/detectorPool.js'
 
 const loading = ref(false),
   error = ref('')
@@ -44,7 +53,7 @@ const data = ref(null)
 
 // ── 信号筛选 ────────────────────────────────
 // 筛选维度与后端 detector/signals 的查询参数一一对应；'' 表示不过滤
-const filters = reactive({ severity: '', direction: '', target_kind: '' })
+const filters = reactive({ severity: '', direction: '', target_kind: '', source: '' })
 const page = ref(1)
 const loadingSignals = ref(false),
   signalsError = ref('')
@@ -64,10 +73,20 @@ const DIRECTION_OPTIONS = [
 const KIND_OPTIONS = [
   ['', '全部对象'],
   ['index', '指数'],
-  ['stock', '自选股'],
+  ['stock', '个股'],
   ['industry', '行业'],
   ['concept', '概念'],
 ]
+
+// ── 算法推送（成分池） ────────────────────────
+// 单独请求 source=pool：每日推送有上限（后端按严重度截断），一页取完
+const POOL_PAGE_SIZE = 50
+const poolData = ref(null)
+const poolLoading = ref(false),
+  poolError = ref('')
+const poolItems = computed(() => sortPoolSignals(poolData.value?.items))
+const poolStatus = computed(() => poolStatusText(data.value?.latest_run?.pool))
+const adding = reactive({})
 
 // ── 热力图 ────────────────────────────────
 const board = ref('industry')
@@ -89,7 +108,7 @@ async function load() {
   loading.value = true
   error.value = ''
   try {
-    await Promise.all([loadSignals(), loadHeatmap()])
+    await Promise.all([loadSignals(), loadPool(), loadHeatmap()])
   } finally {
     loading.value = false
   }
@@ -97,7 +116,42 @@ async function load() {
 
 // 连续切换筛选/翻页/板块时取消旧请求、丢弃晚到的旧响应（FEF-06）
 const signalsGuard = createRequestGuard()
+const poolGuard = createRequestGuard()
 const heatmapGuard = createRequestGuard()
+
+async function loadPool() {
+  const req = poolGuard.next()
+  poolLoading.value = true
+  poolError.value = ''
+  try {
+    const res = await detectorApi.getSignals(
+      { source: 'pool', page_size: POOL_PAGE_SIZE },
+      { signal: req.signal },
+    )
+    if (req.isLatest()) poolData.value = res.data
+  } catch (e) {
+    if (req.isLatest() && !isCanceled(e)) poolError.value = errorMessage(e, '加载算法推送失败')
+  } finally {
+    if (req.isLatest()) poolLoading.value = false
+  }
+}
+
+// 一键加自选：复用自选添加接口（已存在的成分池股票行会被直接激活，已攒的日线可用）
+async function addToWatchlist(row) {
+  if (adding[row.target_code]) return
+  adding[row.target_code] = true
+  try {
+    await stockApi.add(row.target_code, row.target_name || '')
+    for (const list of [poolData.value?.items, data.value?.items]) {
+      for (const r of list || []) if (r.target_code === row.target_code) r.in_watchlist = true
+    }
+    toast(`已加入自选：${row.target_name || row.target_code}`, { type: 'success' })
+  } catch (e) {
+    toastError(errorMessage(e, '加入自选失败'))
+  } finally {
+    adding[row.target_code] = false
+  }
+}
 
 async function loadSignals() {
   const req = signalsGuard.next()
@@ -183,6 +237,7 @@ function dirText(direction) {
 onMounted(load)
 onUnmounted(() => {
   signalsGuard.abort()
+  poolGuard.abort()
   heatmapGuard.abort()
 })
 </script>
@@ -243,6 +298,82 @@ onUnmounted(() => {
       }}
     </div>
 
+    <!-- 算法推送：沪深300+中证500 成分池里由算法主动发现的信号，与自选信号分开展示 -->
+    <section class="card">
+      <div class="card-head">
+        <h2>{{ POOL_TITLE }}</h2>
+        <span v-if="poolData?.pagination" class="count-chip"
+          >{{ poolData.pagination.total }} 条</span
+        >
+      </div>
+      <p v-if="poolStatus" class="hint">{{ poolStatus }}</p>
+      <div v-if="poolError" class="error-box">{{ poolError }}</div>
+      <div v-if="poolLoading && !poolData" class="empty">加载中...</div>
+      <div v-else-if="poolItems.length" class="pool-grid">
+        <article
+          v-for="row in poolItems"
+          :key="row.id"
+          class="pool-card"
+          :class="{ selected: selectedSignalId === row.id, unverified: isUnverified(row) }"
+        >
+          <div
+            class="pool-main"
+            tabindex="0"
+            :aria-expanded="selectedSignalId === row.id ? 'true' : 'false'"
+            @click="toggleDetail(row.id)"
+            @keydown="onActivateKey($event, () => toggleDetail(row.id))"
+          >
+            <div class="pool-line">
+              <b :class="dirClass(row.direction)">{{ dirText(row.direction) }}</b>
+              <span v-if="isUnverified(row)" class="tag-unverified" :title="UNVERIFIED_TITLE">{{
+                UNVERIFIED_TEXT
+              }}</span>
+              <span class="sev" :class="row.severity">{{ SEVERITY_LABEL[row.severity] }}</span>
+            </div>
+            <div class="pool-name">
+              {{ row.target_name }} <small>{{ row.target_code }}</small>
+            </div>
+            <div class="pool-meta">
+              强度 {{ row.score?.toFixed?.(0) ?? row.score }} · 周期 {{ row.cycles }} ·
+              {{ statusText(row) }}
+            </div>
+            <div
+              v-if="trendStateText(row.annotations)"
+              class="pool-meta"
+              :title="trendStateTitle(row.annotations)"
+            >
+              {{ trendStateText(row.annotations) }}
+            </div>
+            <div class="pool-badges">
+              <span
+                v-for="b in signalBadges(row).filter((x) => x.key !== 'unverified')"
+                :key="b.key"
+                class="hint-badge"
+                :class="b.cls"
+                :title="b.title"
+                >{{ b.text }}</span
+              >
+            </div>
+          </div>
+          <button
+            v-if="canAddToWatchlist(row)"
+            class="ghost add-btn"
+            :disabled="adding[row.target_code]"
+            @click="addToWatchlist(row)"
+          >
+            {{ adding[row.target_code] ? '添加中...' : '+ 加自选' }}
+          </button>
+          <span v-else-if="row.in_watchlist" class="in-watch">已在自选</span>
+        </article>
+      </div>
+      <div v-else-if="!poolError" class="empty">
+        今日暂无算法推送：成分池个股须先通过平静判定、再满足同向投票才会出现，每日最多推送前若干条。
+      </div>
+      <p class="hint">
+        向下信号排在前面；向上信号未经验证，仅供参考。点击卡片查看维度明细，非买卖建议。
+      </p>
+    </section>
+
     <!-- 信号列表 -->
     <section class="card">
       <div class="card-head">
@@ -266,6 +397,17 @@ onUnmounted(() => {
               :class="{ on: filters.direction === value }"
               :aria-pressed="filters.direction === value ? 'true' : 'false'"
               @click="setFilter('direction', value)"
+            >
+              {{ label }}
+            </button>
+          </div>
+          <div class="chips">
+            <button
+              v-for="[value, label] in SOURCE_OPTIONS"
+              :key="'src' + value"
+              :class="{ on: filters.source === value }"
+              :aria-pressed="filters.source === value ? 'true' : 'false'"
+              @click="setFilter('source', value)"
             >
               {{ label }}
             </button>
@@ -316,7 +458,7 @@ onUnmounted(() => {
                   UNVERIFIED_TEXT
                 }}</span>
               </td>
-              <td>{{ row.target_kind_display }}</td>
+              <td>{{ kindText(row) }}</td>
               <td class="name">
                 {{ row.target_name }} <small>{{ row.target_code }}</small>
                 <span
@@ -544,6 +686,64 @@ onUnmounted(() => {
 </template>
 
 <style scoped>
+.pool-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(220px, 1fr));
+  gap: 9px;
+}
+.pool-card {
+  display: flex;
+  flex-direction: column;
+  justify-content: space-between;
+  gap: 7px;
+  border: 1px solid #22324d;
+  background: #0d1729;
+  border-radius: 7px;
+  padding: 9px 10px;
+}
+.pool-card.selected {
+  border-color: #3f78b0;
+}
+.pool-card.unverified {
+  opacity: 0.8;
+}
+.pool-main {
+  cursor: pointer;
+}
+.pool-line {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+.pool-name {
+  margin-top: 4px;
+  font-weight: 600;
+}
+.pool-name small,
+.pool-meta {
+  color: #8391a7;
+  font-size: 12px;
+}
+.pool-meta {
+  margin-top: 3px;
+}
+.pool-badges {
+  margin-top: 4px;
+}
+.add-btn {
+  align-self: flex-start;
+  padding: 4px 10px;
+  font-size: 12px;
+}
+.in-watch {
+  color: #8391a7;
+  font-size: 12px;
+}
+.count-chip {
+  color: #8fc6d6;
+  font-size: 12px;
+}
 .page {
   color: #dce4f2;
 }
