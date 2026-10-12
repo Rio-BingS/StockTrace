@@ -105,3 +105,35 @@ class RestrictedReleaseJobTests(TestCase):
         with patch.object(rr, 'refresh_restricted_releases', side_effect=rr.ReleaseFetchError('x')) as ref:
             sch._restricted_release_job()
         ref.assert_called_once_with()
+
+
+class BackfillRestrictedReleaseCommandTests(TestCase):
+    def test_quarter_slices_cover_range_without_gaps(self):
+        from .management.commands.backfill_restricted_release import quarter_slices
+
+        self.assertEqual(quarter_slices(date(2025, 2, 10), date(2025, 10, 5)), [
+            (date(2025, 2, 10), date(2025, 3, 31)),
+            (date(2025, 4, 1), date(2025, 6, 30)),
+            (date(2025, 7, 1), date(2025, 9, 30)),
+            (date(2025, 10, 1), date(2025, 10, 5)),
+        ])
+        self.assertEqual(quarter_slices(date(2025, 12, 1), date(2026, 1, 2))[-1],
+                         (date(2026, 1, 1), date(2026, 1, 2)))
+
+    def test_failed_slice_reported_and_others_written(self):
+        from io import StringIO
+
+        from django.core.management import call_command
+        from django.core.management.base import CommandError
+
+        def fake_fetch(a, b):
+            if a.month == 4:
+                raise rr.ReleaseFetchError('page 2')
+            return rr.parse_rows([dict(_ROW, FREE_DATE=f'{a.isoformat()} 00:00:00')])
+
+        with patch.object(rr, 'fetch_releases', side_effect=fake_fetch):
+            with self.assertRaises(CommandError):
+                call_command('backfill_restricted_release', '--start', '2025-01-01', '--end', '2025-09-30',
+                             '--sleep', '0', stdout=StringIO(), stderr=StringIO())
+        self.assertEqual(sorted(StockRestrictedRelease.objects.values_list('free_date', flat=True)),
+                         [date(2025, 1, 1), date(2025, 7, 1)])
