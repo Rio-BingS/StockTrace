@@ -24,7 +24,12 @@ import {
   disabledText,
   voteRuleText,
 } from '../utils/detectorDims.js'
-import { isUnverified, UNVERIFIED_TEXT, UNVERIFIED_TITLE } from '../utils/detectorSignal.js'
+import {
+  isUnverified,
+  POSITIONING_TEXT,
+  UNVERIFIED_TEXT,
+  UNVERIFIED_TITLE,
+} from '../utils/detectorSignal.js'
 
 const loading = ref(false),
   error = ref('')
@@ -183,10 +188,7 @@ onUnmounted(() => {
           <h1>探测器</h1>
           <span v-if="data?.trade_date" class="date-chip">扫描日 {{ data.trade_date }}</span>
         </div>
-        <p>
-          成交量平稳时监测量价、资金与结构的渐进微变，捕捉进入新阶段的早期迹象（每交易日 17:15
-          自动扫描）
-        </p>
+        <p>{{ POSITIONING_TEXT }}（每交易日 17:15 自动扫描）</p>
       </div>
       <button class="primary" @click="load" :disabled="loading">
         {{ loading ? '加载中...' : '刷新' }}
@@ -194,7 +196,10 @@ onUnmounted(() => {
     </div>
 
     <div v-if="error" class="error-box">{{ error }}</div>
-    <MarketDataStatus :meta="data?.meta" fallback="探测器信号为盘面形态识别，非买卖建议。" />
+    <MarketDataStatus
+      :meta="data?.meta"
+      fallback="探测器信号为趋势延续的盘面形态识别，不预判转折，非买卖建议。"
+    />
 
     <!-- 最近一次扫描摘要：让「信号有多少、回看表现如何」一眼可见 -->
     <div v-if="data?.latest_run" class="run-grid">

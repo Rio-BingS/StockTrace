@@ -3,6 +3,11 @@
 // signal.annotations、signal.elapsed_days 与详情接口的 review_nodes，缺字段（旧信号行）
 // 一律返回空，不报错、不编造。
 
+/** 页面定位：第七轮验证信号出现在波段转向之后，是趋势延续而非转折预判 */
+export const POSITIONING_TEXT =
+  '趋势延续信号：成交量平稳时监测量价、资金与结构的渐进微变，标出已在进行中的趋势；' +
+  '信号通常出现在波段转向之后，不是转折预判'
+
 /** 向上信号：多轮回测都未证明有效，标「未经验证」并降权显示 */
 export const UNVERIFIED_TEXT = '未经验证'
 export const UNVERIFIED_TITLE =
