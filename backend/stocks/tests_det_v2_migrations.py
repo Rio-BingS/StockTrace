@@ -44,3 +44,21 @@ class DetV2MigrationTests(TransactionTestCase):
             run_cols = {c.name for c in connection.introspection.get_table_description(cur, 'stocks_detectorrun')}
         self.assertIn('annotations', sig_cols)
         self.assertIn('vetoed', run_cols)
+
+    def test_0025_removes_vp_corr_config_with_audit_log(self):
+        latest = self._latest()
+        executor = self._migrate(('stocks', '0024_detector_annotations_vetoed'))
+        apps = executor.loader.project_state([('stocks', '0024_detector_annotations_vetoed')]).apps
+        cfg = apps.get_model('stocks', 'DetectorDimConfig')
+        cfg.objects.create(key='vp_corr', name='量价相关性', weight=1.2, params={'window': 20}, is_enabled=False)
+        cfg.objects.create(key='ma_relation', name='价格与均线关系')
+        executor = self._migrate(latest)
+        apps = executor.loader.project_state([latest]).apps
+        cfg = apps.get_model('stocks', 'DetectorDimConfig')
+        log = apps.get_model('stocks', 'DetectorTuneLog')
+        self.assertEqual(list(cfg.objects.values_list('key', flat=True)), ['ma_relation'])
+        entry = log.objects.get(dim_key='vp_corr')
+        self.assertEqual(entry.source, 'legacy')
+        self.assertEqual(entry.changes['removed'][0]['weight'], 1.2)
+        # 反向迁移可执行（不重建已删除维度的配置行）
+        self._migrate(('stocks', '0024_detector_annotations_vetoed'))
