@@ -10,7 +10,8 @@ acquire(timeout)/release 可以在不同线程调用：请求线程非阻塞取�
 由后台线程在任务结束时释放（threading.Lock 允许跨线程 release）。
 锁目录不可用（权限/不存在且无法创建）或平台无 fcntl 时退化为仅进程内锁，并记 WARNING。
 
-已用锁名：stock_quotes（自选行情写入）、detector_scan、market_snapshots、minute_bar_cleanup。
+已用锁名：stock_quotes（自选行情写入）、detector_scan、market_snapshots、minute_bar_cleanup、
+index_constituents、pool_quotes（成分池限速采集）。
 """
 
 import logging

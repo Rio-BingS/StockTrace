@@ -495,6 +495,33 @@ class StockRestrictedRelease(models.Model):
         return f"{self.code} {self.free_date} {self.share_type}"
 
 
+class IndexConstituent(models.Model):
+    """指数当前成分（沪深300、中证500）：探测器成分池与 DTC/ID20 截面参照池。
+
+    只存「当前」成分，不存历史：每周整表刷新一次（中证指数官网 csindex 优先，
+    新浪成分接口兜底），任一指数拉取失败或数量明显不对时保留旧值，不清空。
+    """
+    index_code = models.CharField('指数代码', max_length=6)
+    code = models.CharField('成分券代码', max_length=6)
+    name = models.CharField('成分券名称', max_length=32, blank=True, default='')
+    # 上游给出的成分日期（csindex 的「日期」列）；兜底源没有时为空
+    as_of = models.DateField('成分日期', null=True, blank=True)
+    source = models.CharField('数据来源', max_length=32, blank=True, default='')
+    fetched_at = models.DateTimeField('刷新时间', auto_now=True)
+
+    class Meta:
+        verbose_name = '指数成分'
+        verbose_name_plural = '指数成分'
+        ordering = ['index_code', 'code']
+        constraints = [
+            models.UniqueConstraint(fields=['index_code', 'code'], name='uniq_index_constituent'),
+        ]
+        indexes = [models.Index(fields=['code'], name='constituent_code_idx')]
+
+    def __str__(self):
+        return f"{self.index_code} {self.code} {self.name}"
+
+
 class DetectorDimConfig(models.Model):
     """探测器微变维度的可调配置（权重 / 阈值 / 启停）。
 

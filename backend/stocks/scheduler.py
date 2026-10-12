@@ -10,6 +10,7 @@ APScheduler 集成到 Django
 6. 每日 02:30 清理超出保留期的分钟 K 线
 7. 工作日 09:30 拉取上一交易日个股融资明细（交易所 T+1 早间披露，探测器融资拥挤度用）
 8. 每日 18:00 刷新限售解禁日程（解禁日 前 5 天 ~ 后 60 天整段覆盖，探测器解禁事件用）
+9. 每周一 08:30 刷新成分池（沪深300 + 中证500 当前成分，失败保留旧值）
 
 运行方式（REL-01）：
 - 生产：独立进程 `python manage.py run_scheduler`（systemd 单元 stocktrace-scheduler），
@@ -395,6 +396,14 @@ def _restricted_release_job():
         logger.warning('限售解禁日程刷新失败，保留旧排期', exc_info=True)
 
 
+def _index_constituents_job():
+    """成分池（沪深300 + 中证500）每周刷新：单个指数失败保留旧成分，只记日志。"""
+    from .pool.constituents import refresh_constituents
+
+    result = refresh_constituents()
+    logger.info("成分池刷新: %s", {k: v['status'] for k, v in result.items()})
+
+
 # 任务互斥（REL-04）：与手动拉取、管理命令共用 task_lock 的同名锁。
 # 盘中任务忙则直接跳过（下一轮 5 分钟后再来）；日度任务限时等待，等不到才跳过。
 _INTRADAY_SKIP = 0
@@ -472,6 +481,11 @@ def register_jobs(sched):
     add(_guarded(_restricted_release_job, 'restricted_release', _DAILY_WAIT_SECONDS),
         CronTrigger(hour=18, minute=0, timezone=SCHEDULER_TZ),
         'restricted_release', 3600)
+
+    # 成分池：每周一 08:30（北京时间，开盘前）刷新沪深300、中证500 当前成分
+    add(_guarded(_index_constituents_job, 'index_constituents', _DAILY_WAIT_SECONDS),
+        CronTrigger(day_of_week='mon', hour=8, minute=30, timezone=SCHEDULER_TZ),
+        'index_constituents', 3600)
 
     # 分钟 K 线保留期清理：每日 02:30 低峰执行（PERF-02）
     add(_guarded(_minute_bar_cleanup_job, 'minute_bar_cleanup', _DAILY_WAIT_SECONDS),
