@@ -73,6 +73,10 @@ npm run lint && npm run build   # eslint（vue essential 档）+ 产物到 dist/
 - **数据诚信**：维度只用真实上游/本站快照推导；`委比与挂单结构`（无盘口数据源）、`板块内分化`（快照缺成分股横截面）两维度在 `registry.py` 显式 `enabled=False` 并写明原因，**不得用代理值冒充**，接入数据源后再开启。
 - **换手率分位**：个股＝真实换手率（成交量 / 新浪 getAmountBySymbol 流通股本，`datasources/float_shares.py`）的 60 日分位；股本取不到时退回成交量分位，note 标「股本数据缺失」，量价断层时暂停（ALG-13）；指数为成交量分位的活跃度代理。
 - **融资余额**：交易所 T+1 披露，`MarketDailySnapshot` 新 kind `margin` 由探测器扫描落库（只写沪深同日齐全行）；北向自 2024-08 停止逐日披露，维度如实仅融资余额口径。
+- **定位：趋势延续信号**：第七轮验证信号出现在 ZigZag 波段转向之后，文案与 PR 一律称「趋势延续」，不写「早期迹象/预判转折」；`trend` 附注只用信号日及以前的日线。**向上信号未经验证**（20/60 日超额不显著）：标「未经验证」、排在向下信号之后，不得在文档或界面暗示其有效。
+- **维度角色（det-v2）**：`registry` 的 `role`/`vote_enabled` 区分投票维度与非投票维度——`margin_crowding`（leverage 组，modifier：MB5 分位 ≥0.70 否决向上、MB5 或 DTC 分位 ≥0.70 向下升一档，不加票）、`lift_pressure`（event，只提示）、`intraday_reversal`（ID20，display，只打标签）。`vp_corr` 已删除（迁移 0025 清配置行），不要恢复。
+- **截面分位的参照池**：MB5 在 `StockMarginDaily` T−5..T−1 的全市场 A 股两融标的里取分位（`xsection.load_mb5_universe`；两所当日都落齐才算一天），回测截面是沪深300+中证500，生产无成分表故放宽为全部两融标的；DTC/ID20 只有本地日线，样本 < `min_pool`（默认 200）时不给分位，DTC 缺席时向下升级只看 MB5。**不要退回在自选股池（~20 只）里取分位。**
+- **个股融资明细 / 解禁日程落库**：`StockMarginDaily`（交易所两融明细全量，元；深市偿还额由前日余额推导并标记）、`StockRestrictedRelease`（东财 RPT_LIFT_STAGE）；上线需 `backfill_stock_margin`、`backfill_restricted_release` 回补，日常由 09:30 / 18:00 任务维护。
 - **平静参数不参与自动迭代**：review 只调维度权重 [0.5, 2.0] 与投票门槛 min（[0.5×, 2×] 默认值）；调平静闸门会让扫描宇宙随命中率漂移（正反馈失控），只能人工改。
 - 信号 `trade_date` 跟随数据自身日期（`ctx.as_of`），上游晚到不冒充扫描当天；扫描幂等（信号/run 行按日期覆盖），回看只处理 `review_hit` 为 null 的行。
 

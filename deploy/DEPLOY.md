@@ -192,6 +192,43 @@ sudo journalctl -u stocktrace -n 200 --no-pager | grep -i APScheduler    # 应�
 - 发版尽量避开 15:00–17:30（收盘汇总与 17:15 探测器）。
 - `/etc/stocktrace/env` 里若还有 `STOCKTRACE_RUN_SCHEDULER_IN_WEB=1` 要删掉，否则 Web 会继续在进程内跑调度。
 
+### 2.1.1 探测器 det-v2 上线（融资拥挤度、限售解禁）
+
+本次带 4 个新迁移（`0022_stockmargindaily`、`0023_stockrestrictedrelease`、
+`0024_detector_annotations_vetoed`、`0025_remove_vp_corr_config`），没有新增环境变量。
+按 2.1 正常升级（`migrate --plan` 应列出这 4 个迁移）后，在 root shell 里加载环境变量再以 www 回补历史：
+
+```bash
+cd /opt/stocktrace/backend
+set -a; source /etc/stocktrace/env; set +a
+# 个股融资明细：融资拥挤度至少要最近 20 个交易日（DTC），MB5 要 5 个；
+# 按信用交易日逐日拉沪深两所全量明细，可续跑，失败日退出码非 0，重跑同一命令只补缺
+sudo -u www -E venv/bin/python manage.py backfill_stock_margin --start <约 40 个自然日前，YYYY-MM-DD>
+# 限售解禁日程：默认 2018-01-01 ~ 今天+60 天，按季度切片覆盖写，幂等
+sudo -u www -E venv/bin/python manage.py backfill_restricted_release
+```
+
+新增两个定时任务（随 `stocktrace-scheduler` 重启自动注册，无需改 systemd 单元）：
+
+| 任务 id | 时间（Asia/Shanghai） | 作用 |
+|---|---|---|
+| `stock_margin_daily` | 工作日 09:30 | 拉上一交易日沪深两融明细全量入 `StockMarginDaily`，顺带补前两日缺口 |
+| `restricted_release` | 每日 18:00 | 刷新限售解禁日程 `StockRestrictedRelease` |
+
+**需在 VPS 上验证**：深交所两融明细接口（akshare `stock_margin_detail_szse`，访问 szse.cn）只在开发环境测过，
+境外 VPS 能否稳定访问未确认。回补后核对：
+
+```bash
+sudo -u www -E venv/bin/python manage.py shell -c "
+from stocks.models import StockMarginDaily as M
+from django.db.models import Count
+print(list(M.objects.values('trade_date','exchange').annotate(n=Count('id')).order_by('-trade_date')[:6]))"
+```
+
+每个交易日沪（sse）、深（szse）都应有上千行；深市长期为 0 说明接口在 VPS 不可达，
+此时 MB5 截面窗口凑不齐，融资拥挤度维度会如实「不可用」（不否决、不升级），需另找深市来源。
+扫描日志里的「截面样本 mb5=…」即当日全市场两融截面只数（低于 200 不取分位）。
+
 ### 2.2 回滚
 
 `deploy-history.log` 最后一行是本次的 `PREV -> NEW`。
