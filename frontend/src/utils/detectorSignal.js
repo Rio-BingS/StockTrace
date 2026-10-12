@@ -47,7 +47,7 @@ export function crowdingInfo(annotations) {
   if (!m || !isNum(m.mb5_pct)) return null
   let text = `MB5 分位 ${pct(m.mb5_pct)}`
   if (isNum(m.dtc_pct)) text += ` · DTC 分位 ${pct(m.dtc_pct)}`
-  if (isNum(m.pool)) text += `（池内 ${m.pool} 只）`
+  if (isNum(m.pool)) text += `（全市场两融 ${m.pool} 只）`
   return {
     text,
     escalated: Boolean(m.escalated),
@@ -88,7 +88,7 @@ export function signalBadges(signal) {
       key: 'intraday',
       text: ann.intraday_reversal.tag,
       cls: 'warn',
-      title: `ID20 分位 ${pct(ann.intraday_reversal.id20_pct)}：近 20 日日内（开盘→收盘）累计涨幅居股票池前 20%，第八轮验证此类股票后续 20–60 日倾向跑输（只展示，不参与判定）`,
+      title: `ID20 分位 ${pct(ann.intraday_reversal.id20_pct)}：近 20 日日内（开盘→收盘）累计涨幅居截面前 20%，第八轮验证此类股票后续 20–60 日倾向跑输（只展示，不参与判定）`,
     })
   }
   const lift = ann.lift_pressure

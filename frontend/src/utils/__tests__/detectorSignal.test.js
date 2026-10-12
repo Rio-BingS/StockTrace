@@ -45,17 +45,17 @@ test('trendStateText：处于下跌/上涨波段第 X 天（自 日期）；旧�
   assert.doesNotMatch(trendStateTitle({ trend: { direction: 'up', days: 1, since: 'x' } }), /；/)
 })
 
-test('crowdingInfo：分位、池内样本与升级/否决原因', () => {
+test('crowdingInfo：分位、全市场截面样本与升级/否决原因', () => {
   const info = crowdingInfo({
     margin_crowding: {
       mb5_pct: 0.82,
       dtc_pct: 0.4,
-      pool: 18,
+      pool: 3600,
       escalated: true,
       escalate_reason: '融资拥挤，严重度升一档',
     },
   })
-  assert.equal(info.text, 'MB5 分位 0.82 · DTC 分位 0.40（池内 18 只）')
+  assert.equal(info.text, 'MB5 分位 0.82 · DTC 分位 0.40（全市场两融 3600 只）')
   assert.equal(info.escalated, true)
   assert.equal(info.vetoed, false)
   assert.equal(info.reason, '融资拥挤，严重度升一档')
