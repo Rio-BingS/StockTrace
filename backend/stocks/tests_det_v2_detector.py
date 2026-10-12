@@ -534,3 +534,118 @@ class IntradayReversalTests(TestCase):
         self.assertIsNone(rec)
         self.assertEqual((sd['direction'], sd['severity'], sd['score']), ('down', 'low', 50.0))
         self.assertEqual(sd['annotations']['intraday_reversal']['tag'], '日内追买过热')
+
+
+def _trend_ctx(closes):
+    n = len(closes)
+    return {'dates': [(date(2026, 1, 1) + timedelta(days=i)).isoformat() for i in range(n)],
+            'close': list(closes), 'high': [c + 0.5 for c in closes], 'low': [c - 0.5 for c in closes]}
+
+
+class TrendStateTests(TestCase):
+    """ZigZag 2×ATR20：只用 T 日及以前；波段第 X 天从极点日算起。"""
+
+    def test_down_swing_after_peak(self):
+        from .detector import trend
+
+        closes = [100 + i for i in range(30)] + [129 - 2 * i for i in range(1, 11)]
+        state = trend.trend_state(_trend_ctx(closes))
+        self.assertEqual(state['direction'], 'down')
+        self.assertEqual(state['since'], (date(2026, 1, 1) + timedelta(days=29)).isoformat())
+        self.assertEqual(state['days'], 10)
+        self.assertEqual(state['method'], 'ZigZag 2×ATR20')
+
+    def test_up_swing(self):
+        from .detector import trend
+
+        closes = [130 - i for i in range(30)] + [101 + 2 * i for i in range(1, 8)]
+        state = trend.trend_state(_trend_ctx(closes))
+        self.assertEqual(state['direction'], 'up')
+        self.assertEqual(state['days'], 7)
+
+    def test_no_lookahead_future_bars_do_not_change_past_state(self):
+        from .detector import trend
+
+        closes = [100 + i for i in range(30)] + [129 - 2 * i for i in range(1, 11)]
+        full = closes + [200, 250, 300]  # T 之后暴涨
+        ctx = _trend_ctx(full)
+        cut = signals.slice_ctx(dict(ctx, as_of=ctx['dates'][-1]), len(closes) - 1)
+        self.assertEqual(trend.trend_state(cut), trend.trend_state(_trend_ctx(closes)))
+
+    def test_insufficient_or_no_hl_returns_none(self):
+        from .detector import trend
+
+        self.assertIsNone(trend.trend_state(_trend_ctx([100] * 10)))
+        ctx = _trend_ctx([100 + i for i in range(40)])
+        ctx['high'] = [None] * 40
+        self.assertIsNone(trend.trend_state(ctx))
+
+    def test_matches_round7_reference_implementation(self):
+        """与 round7 prep7.zigzag 的逐点结果一致（随机游走 300 根）。"""
+        import random
+
+        from .detector import trend
+
+        rng = random.Random(7)
+        closes, c = [], 100.0
+        for _ in range(300):
+            c *= math.exp(rng.gauss(0, 0.02))
+            closes.append(c)
+        highs = [x * 1.01 for x in closes]
+        lows = [x * 0.99 for x in closes]
+        atr = trend._atr(highs, lows, closes)
+
+        def reference(cs, at, k):
+            st, hi_i, lo_i, ev = 0, 0, 0, []
+            for t in range(1, len(cs)):
+                a = at[t]
+                if a is None:
+                    continue
+                if st == 0:
+                    if cs[t] > cs[hi_i]:
+                        hi_i = t
+                    if cs[t] < cs[lo_i]:
+                        lo_i = t
+                    if cs[t] <= cs[hi_i] - k * a:
+                        st, lo_i = -1, t
+                    elif cs[t] >= cs[lo_i] + k * a:
+                        st, hi_i = 1, t
+                    continue
+                if st == 1:
+                    if cs[t] > cs[hi_i]:
+                        hi_i = t
+                    elif cs[t] <= cs[hi_i] - k * a:
+                        ev.append((t, -1, hi_i))
+                        st, lo_i = -1, t
+                else:
+                    if cs[t] < cs[lo_i]:
+                        lo_i = t
+                    elif cs[t] >= cs[lo_i] + k * a:
+                        ev.append((t, 1, lo_i))
+                        st, hi_i = 1, t
+            return st, ev
+
+        for end in range(60, 300, 37):
+            st_ref, ev = reference(closes[:end], atr[:end], 2.0)
+            st, pivot, conf = trend.zigzag_swings(closes[:end], atr[:end])
+            self.assertEqual(st, st_ref)
+            if ev:
+                self.assertEqual((conf, pivot), (ev[-1][0], ev[-1][2]))
+
+    def test_signal_carries_trend_annotation(self):
+        closes = [100 + i for i in range(30)] + [129 - 2 * i for i in range(1, 11)]
+        ctx = dict(_trend_ctx(closes), kind='stock', code='600000', name='x')
+        ctx['as_of'] = ctx['dates'][-1]
+
+        def fixed(c, p):
+            return {'available': True, 'direction': 'down', 'value': 60.0, 'note': '', 'series': []}
+
+        configs = [
+            {'key': 'ma_relation', 'name': 'a', 'weight': 1.0, 'params': {}, 'targets': ('stock',),
+             'evaluate': fixed, 'enabled': True, 'group': 'price', 'role': 'direction'},
+            {'key': 'big_order_net', 'name': 'b', 'weight': 1.0, 'params': {}, 'targets': ('stock',),
+             'evaluate': fixed, 'enabled': True, 'group': 'funds', 'role': 'direction'},
+        ]
+        sd, _ = signals.evaluate_target(ctx, configs, cycle_counter=lambda *a: 0, calendar=_AllDaysCalendar())
+        self.assertEqual(sd['annotations']['trend']['direction'], 'down')
+        self.assertEqual(sd['annotations']['trend']['days'], 10)

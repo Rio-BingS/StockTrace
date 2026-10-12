@@ -40,7 +40,7 @@ import logging
 from datetime import date as _date, timedelta
 
 from ..models import DetectorSignal
-from . import registry
+from . import registry, trend
 from .constants import (
     ACTIVE_MIN_CYCLES,
     CYCLE_LOOKBACK as _CYCLE_LOOKBACK,
@@ -461,6 +461,14 @@ def evaluate_target(ctx, configs, cycle_counter=None, calendar=None):
         'strength': round(score * result['support'], 2),
         'vote': result,
     }
+    # 趋势状态（det-v2，第七轮）：信号所处的 ZigZag 波段，只用 T 日及以前，只展示
+    try:
+        state = trend.trend_state(ctx)
+    except Exception:  # noqa: BLE001 边界：趋势状态只是展示，失败不影响信号
+        logger.warning("趋势状态计算失败 %s", ctx.get('code'), exc_info=True)
+        state = None
+    if state:
+        signal_data['annotations'] = {'trend': state}
     # 修饰维度（det-v2）：否决 → 当日不出信号，否决记录挂在 dim_results 上供 scan 留痕
     vetoed = apply_modifiers(signal_data, dim_results)
     if vetoed is not None:
