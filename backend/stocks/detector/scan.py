@@ -33,7 +33,7 @@ from ..market.indices import TREND_INDICES
 from ..market.snapshots import save_margin_snapshot
 from ..models import DetectorDimConfig, DetectorRun, DetectorSignal, Stock
 from . import calm as calm_mod
-from . import registry, review, signals
+from . import registry, review, signals, xsection
 from .constants import (
     MARGIN_VOTE_CODES,
     NOISE_DEFAULTS,
@@ -286,6 +286,23 @@ def truncate_by_strength(collected, cap):
     return kept, dropped
 
 
+def _attach_cross_section(stock_ctxs, configs):
+    """给当日个股 ctx 挂上截面分位（xsection.attach_cross_section）；失败只降级截面维度。"""
+    params = {c['key']: c['params'] for c in configs
+              if c.get('enabled', True) and c['key'] in _XSECTION_KEYS}
+    if not stock_ctxs or not params:
+        return {}
+    try:
+        return xsection.attach_cross_section(stock_ctxs, params)
+    except Exception:  # noqa: BLE001 边界：截面计算失败时截面维度如实不可用，扫描照常
+        logger.warning("截面特征计算失败，截面维度本轮不可用", exc_info=True)
+        return {}
+
+
+# 依赖扫描当日股票池截面的维度（det-v2）
+_XSECTION_KEYS = ('margin_crowding',)
+
+
 def _sort_matrix_key(row):
     values = [abs(v) for v in row['values'].values() if v is not None]
     return max(values) if values else 0.0
@@ -335,6 +352,9 @@ def run_scan(trade_date=None, calendar=None):
     calm_targets = []  # 参与投票的 (kind, code)，多重检验的分母（#11）
     vetoed = []  # 被修饰维度否决的信号（det-v2），写进 run.vetoed 供页面展示
 
+    # 第一遍：构建序列并过新鲜度闸门。截面维度（det-v2 融资拥挤度等）要先看到
+    # 当日全部个股，才能在股票池内取分位，所以评估放到第二遍
+    fresh = []  # [(target, target_key, ctx)]
     for target in targets:
         try:
             ctx, err = _build_context(target)
@@ -352,7 +372,14 @@ def run_scan(trade_date=None, calendar=None):
         if stale_reason:
             degraded.append({'target': target_key, 'reason': stale_reason})
             continue
+        fresh.append((target, target_key, ctx))
 
+    # 截面分位（det-v2）：股票池 = 当日数据新鲜的全部个股（不论是否平静）
+    pools = _attach_cross_section([ctx for t, _k, ctx in fresh if t['kind'] == 'stock'], configs)
+    if pools:
+        message_parts.append('截面样本 ' + '、'.join(f'{k}={v}' for k, v in sorted(pools.items())))
+
+    for target, target_key, ctx in fresh:
         scanned += 1
         # 平静判定与维度评估同样按单对象隔离：一个对象的脏序列不能让整轮扫描崩溃（P0 ALG-01）
         try:

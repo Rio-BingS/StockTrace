@@ -44,6 +44,7 @@ from __future__ import annotations
 
 from . import dimensions as _dims
 from . import dimensions_extra as _dims_extra
+from . import xsection as _xsection
 # 噪声闸门默认值（各价量维度共用，见模块 docstring），数值在 constants.py
 from .constants import (
     COMPRESS_PCT_DEFAULT,
@@ -144,6 +145,29 @@ DIMENSIONS = [
         ),
         'defaults': {'ma': 20, 'z_lo': 1.282, 'z_hi': 2.0, 'z_mild': 2.0, **_SIGMA},
         'evaluate': _dims.eval_ma_relation,
+    },
+    {
+        # det-v2（第八轮 §3、§5）：融资拥挤度。只作修饰，不投票——向上信号在 MB5
+        # 分位 ≥ veto_pct 时否决；向下信号在 MB5 或 DTC 分位 ≥ escalate_pct 时严重度
+        # 升一档。分位在扫描当日的股票池内取（scan → xsection.attach_cross_section），
+        # 不能用固定阈值：MB5 绝对水平 2019–2026 年在 0.18–0.39 之间漂移
+        'key': 'margin_crowding',
+        'group': 'leverage',
+        'role': 'modifier',
+        'vote_enabled': False,
+        'name': '融资拥挤度',
+        'targets': ('stock',),
+        'enabled': True,
+        'note': (
+            'MB5 = 近 5 个交易日（T−5..T−1）融资买入额合计 ÷ T−1 融资余额，'
+            'DTC = T−1 融资余额 ÷ T−20..T−1 日均成交额，均在扫描当日股票池内取分位。'
+            '向上信号 MB5 分位 ≥0.70 时否决（第八轮：60 日保留集 +3.99pp，6/6 段，q=0.021）；'
+            '向下信号 MB5 或 DTC 分位 ≥0.70 时严重度升一档、不加票（20 日 +2.20pp，6/6，q=0.007）。'
+            '非两融标的或融资余额 ≤0 时不否决、不升级。两融为交易所 T+1 披露，只用 T−1 及以前。'
+        ),
+        'defaults': {'mb5_days': 5, 'dtc_days': 20, 'dtc_min_days': 15,
+                     'veto_pct': 0.70, 'escalate_pct': 0.70, 'min_pool': 10},
+        'evaluate': _xsection.eval_margin_crowding,
     },
     {
         # 数据诚信说明：以下两个维度是任务要求中列出、但本站现有数据源
