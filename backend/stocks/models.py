@@ -598,7 +598,7 @@ class DetectorSignal(models.Model):
     TARGET_CONCEPT = 'concept'
     TARGET_KIND_CHOICES = [
         (TARGET_INDEX, '指数'),
-        (TARGET_STOCK, '自选股'),
+        (TARGET_STOCK, '个股'),
         (TARGET_INDUSTRY, '行业板块'),
         (TARGET_CONCEPT, '概念板块'),
     ]
@@ -629,7 +629,19 @@ class DetectorSignal(models.Model):
         (SEVERITY_LOW, '低'),
     ]
 
+    # 信号来源（成分池扩容）：自选股 / 成分池算法推送（沪深300+中证500）/ 指数与板块。
+    # 同一只股票既在自选又在成分池时记 watchlist（自选优先，一天只有一行）
+    SOURCE_WATCHLIST = 'watchlist'
+    SOURCE_POOL = 'pool'
+    SOURCE_MARKET = 'market'
+    SOURCE_CHOICES = [
+        (SOURCE_WATCHLIST, '自选'),
+        (SOURCE_POOL, '算法推送'),
+        (SOURCE_MARKET, '指数/板块'),
+    ]
+
     target_kind = models.CharField('对象类型', max_length=20, choices=TARGET_KIND_CHOICES)
+    source = models.CharField('信号来源', max_length=10, choices=SOURCE_CHOICES, default=SOURCE_MARKET)
     target_code = models.CharField('对象代码', max_length=30)
     target_name = models.CharField('对象名称', max_length=50, blank=True, default='')
     trade_date = models.DateField('信号交易日')
@@ -714,6 +726,7 @@ class DetectorSignal(models.Model):
         indexes = [
             models.Index(fields=['trade_date', 'severity']),
             models.Index(fields=['status', 'review_hit']),
+            models.Index(fields=['trade_date', 'source'], name='detsig_date_source_idx'),
         ]
 
     def __str__(self):
@@ -751,6 +764,13 @@ class DetectorRun(models.Model):
     # 但对象、分位与原因留在这里供页面展示「已否决」
     vetoed = models.JSONField('否决记录', default=list, blank=True)
     message = models.CharField('备注', max_length=300, blank=True, default='')
+    # 成分池（沪深300+中证500）扫描状态：pending=日线未齐、本轮未扫成分池，等后续
+    # 重试点；done=已扫；off=成分表为空或关闭。pool_coverage 记完整度与跳过的个股
+    POOL_PENDING = 'pending'
+    POOL_DONE = 'done'
+    POOL_OFF = 'off'
+    pool_status = models.CharField('成分池扫描状态', max_length=10, blank=True, default='')
+    pool_coverage = models.JSONField('成分池数据完整度', default=dict, blank=True)
     created_at = models.DateTimeField('创建时间', auto_now_add=True)
     updated_at = models.DateTimeField('更新时间', auto_now=True)
 

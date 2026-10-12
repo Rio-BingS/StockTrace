@@ -6,14 +6,14 @@
 
 参照截面（与回测尽量对齐，不在约 20 只自选股里取分位）：
 - MB5：StockMarginDaily 在 T−5..T−1 的全市场两融标的明细（交易所全量落库），
-  只取沪深 A 股代码（60/68/00/30 开头，剔除 ETF 等）。生产库没有沪深300/中证500
-  的历史成分表（只有离线回测缓存里的沪深300），所以截面是「全部 A 股两融标的」，
-  比回测宽——这是有意记录的偏离，见 PR 说明。
-- DTC：需要逐股 20 日成交额，全市场成交额没有可靠的本地来源，只能用本地有日线的
-  个股（即当日扫描的自选股）；有效样本达不到 min_pool 时 DTC 不参与，向下升级
-  只看 MB5——相对回测登记定义的偏离。
-- ID20：同理只有本地日线，样本达不到 min_pool 时不给分位、不打标签。
-min_pool 按全市场截面设定（默认 200），本地二三十只的池子不再取分位。
+  只取沪深 A 股代码（60/68/00/30 开头，剔除 ETF 等）。截面是「全部 A 股两融标的」，
+  比回测（沪深300+中证500）宽——这是有意记录的偏离，见 PR 说明。
+- DTC / ID20：在成分池（沪深300+中证500 当前成分，IndexConstituent）当日日线
+  新鲜的个股里取分位，与回测截面一致；成分池日线由 pool.collector 限速采集。
+  自选股不在成分池时，按「把它插进成分池分布」的平均秩取分位。
+  scan 没给成分池参照（成分表为空、离线调用）时退回在传入的 ctxs 里取，
+  样本达不到 min_pool 时不给分位。
+min_pool 默认 200：成分池约 800 只，日线齐全时可以满足。
 
 两步：
 1. scan 对当日全部数据新鲜的个股算出原始特征（只用 T 日及以前的行情、
@@ -214,14 +214,88 @@ def _attach_mb5(ctxs, xsecs, mc, universe, min_pool):
     return pool
 
 
-def attach_cross_section(ctxs, params_by_key, mb5_universe=None):
+def dtc_feature(ctx, params):
+    return days_to_cover(ctx, int(params.get('dtc_days', 20)), int(params.get('dtc_min_days', 15)))
+
+
+def id20_feature(ctx, params):
+    return intraday_sum(ctx, int(params.get('window', 20)), int(params.get('min_valid', 15)))
+
+
+def pool_features(ctx, params_by_key):
+    """单只成分股的 DTC/ID20 原始值 {'dtc': v|None, 'id20': v|None}（扫描分块第一遍用）。"""
+    out = {}
+    if params_by_key.get('margin_crowding') is not None:
+        out['dtc'] = dtc_feature(ctx, params_by_key['margin_crowding'])[0]
+    if params_by_key.get('intraday_reversal') is not None:
+        out['id20'] = id20_feature(ctx, params_by_key['intraday_reversal'])[0]
+    return out
+
+
+class PoolReference:
+    """成分池截面参照：{特征: {代码: 原始值}} → 分位查询。
+
+    池内代码直接取池内平均秩分位；池外代码（不在成分池的自选股）按插入池子
+    分布后的平均秩 / (n+1) 计——和「把它当作池子第 n+1 只」的口径一致。
+    """
+
+    def __init__(self, values_by_feature):
+        from bisect import bisect_left, bisect_right
+
+        self._bl, self._br = bisect_left, bisect_right
+        self.values = {k: dict(v) for k, v in (values_by_feature or {}).items()}
+        self._pct = {k: pct_rank(v) for k, v in self.values.items()}
+        self._sorted = {k: sorted(v.values()) for k, v in self.values.items()}
+
+    def size(self, feature):
+        return len(self.values.get(feature) or {})
+
+    def pct(self, feature, code, value):
+        if value is None:
+            return None
+        if code in self._pct.get(feature, {}):
+            return self._pct[feature][code]
+        arr = self._sorted.get(feature) or []
+        less = self._bl(arr, value)
+        eq = self._br(arr, value) - less
+        n = len(arr) + 1
+        return (less + (eq + 2) / 2) / n
+
+
+def _attach_pooled(xsecs, ctxs, raw, reasons, feature, min_pool, pool_ref, label):
+    """按成分池参照或 ctxs 自身给分位；返回有效样本数。label 用于说明文字。"""
+    if pool_ref is not None:
+        size = pool_ref.size(feature)
+        ok = size >= min_pool
+        for i, (ctx, xs) in enumerate(zip(ctxs, xsecs)):
+            xs[feature] = raw.get(i)
+            xs[f'{feature}_pool'] = size
+            xs[f'{feature}_pct'] = (pool_ref.pct(feature, ctx.get('code'), raw[i])
+                                    if ok and i in raw else None)
+            xs[f'{feature}_reason'] = reasons.get(i, '') or (
+                '' if ok else f'成分池有效样本 {size} 只 < {min_pool}，{label}')
+            xs[f'{feature}_basis'] = 'pool'
+        return size
+    size = len(raw)
+    pct = pct_rank(raw) if size >= min_pool else {}
+    for i, xs in enumerate(xsecs):
+        xs[feature] = raw.get(i)
+        xs[f'{feature}_pct'] = pct.get(i)
+        xs[f'{feature}_pool'] = size
+        xs[f'{feature}_reason'] = reasons.get(i, '') or (
+            '' if i in pct else f'本地日线有效样本 {size} 只 < {min_pool}，{label}')
+        xs[f'{feature}_basis'] = 'local'
+    return size
+
+
+def attach_cross_section(ctxs, params_by_key, mb5_universe=None, pool_ref=None):
     """对扫描当日的个股 ctx 列表算截面特征与分位，写进各自的 ctx['xsec']。
 
     params_by_key：{维度 key: params}，只为其中出现的维度计算对应特征
     （margin_crowding → MB5/DTC，intraday_reversal → ID20）。
     mb5_universe：load_mb5_universe 的结果（全市场 MB5 截面）；None 时 MB5 不给分位。
-    DTC/ID20 只有本地日线，在 ctxs 内取分位，样本不足 min_pool 时不给分位。
-    返回 {特征: 有效样本数}，供扫描留痕。
+    pool_ref：PoolReference（成分池 DTC/ID20 截面）；None 时在 ctxs 内取分位。
+    样本不足 min_pool 时不给分位。返回 {特征: 有效样本数}，供扫描留痕。
     """
     xsecs = [dict(ctx.get('xsec') or {}) for ctx in ctxs]
     pools = {}
@@ -229,28 +303,16 @@ def attach_cross_section(ctxs, params_by_key, mb5_universe=None):
     if mc is not None:
         min_pool = int(mc.get('min_pool', DEFAULT_MIN_POOL))
         pools['mb5'] = _attach_mb5(ctxs, xsecs, mc, mb5_universe, min_pool)
-        raw, reasons = _feature_table(
-            ctxs, lambda c: days_to_cover(c, int(mc.get('dtc_days', 20)), int(mc.get('dtc_min_days', 15))))
-        pct = pct_rank(raw) if len(raw) >= min_pool else {}
-        pools['dtc'] = len(raw)
-        for i, xs in enumerate(xsecs):
-            xs['dtc'] = raw.get(i)
-            xs['dtc_pct'] = pct.get(i)
-            xs['dtc_pool'] = len(raw)
-            xs['dtc_reason'] = reasons.get(i, '') or (
-                '' if i in pct else f'本地日线有效样本 {len(raw)} 只 < {min_pool}，DTC 不参与')
+        raw, reasons = _feature_table(ctxs, lambda c: dtc_feature(c, mc))
+        pools['dtc'] = _attach_pooled(xsecs, ctxs, raw, reasons, 'dtc', min_pool, pool_ref, 'DTC 不参与')
+        for xs in xsecs:
             xs['min_pool'] = min_pool
     ir = params_by_key.get('intraday_reversal')
     if ir is not None:
         min_pool = int(ir.get('min_pool', DEFAULT_MIN_POOL))
-        raw, reasons = _feature_table(
-            ctxs, lambda c: intraday_sum(c, int(ir.get('window', 20)), int(ir.get('min_valid', 15))))
-        pct = pct_rank(raw) if len(raw) >= min_pool else {}
-        pools['id20'] = len(raw)
+        raw, reasons = _feature_table(ctxs, lambda c: id20_feature(c, ir))
+        pools['id20'] = _attach_pooled(xsecs, ctxs, raw, reasons, 'id20', min_pool, pool_ref, '不取分位')
         for i, xs in enumerate(xsecs):
-            xs['id20'] = raw.get(i)
-            xs['id20_pct'] = pct.get(i)
-            xs['id20_pool'] = len(raw)
             xs['id20_reason'] = reasons.get(i, '')
             xs['id20_min_pool'] = min_pool
     for ctx, xs in zip(ctxs, xsecs):
@@ -267,7 +329,7 @@ def eval_margin_crowding(ctx, params):
     """融资拥挤度：MB5 分位否决向上信号；MB5 或 DTC 分位升级向下信号严重度。
 
     第八轮通过的定义（round8_veto §5，截面为沪深300+中证500；这里 MB5 用全市场
-    A 股两融标的、DTC 只在本地样本 ≥ min_pool 时参与，见模块说明）：
+    A 股两融标的、DTC 在成分池里取分位且样本 ≥ min_pool 时参与，见模块说明）：
     - 向上信号 ∧ pct_MB5 ≥ veto_pct → 否决（60 日保留集 +3.99pp vs 基准 +0.90，6/6，q=0.021）；
     - 向下信号 ∧ (pct_MB5 ≥ escalate_pct 或 pct_DTC ≥ escalate_pct) → 严重度升一档
       （20 日增强集 +2.20pp vs 未增强 +0.23，6/6，q=0.007），不加票；
@@ -300,7 +362,8 @@ def eval_margin_crowding(ctx, params):
         'value': round(mb5_pct * 100, 1),
         'direction': None,
         'note': f"MB5 分位 {mb5_pct:.2f}（全市场两融 {xs.get('mb5_pool')} 只）"
-                + (f"，DTC 分位 {dtc_pct:.2f}" if dtc_pct is not None
+                + (f"，DTC 分位 {dtc_pct:.2f}（{'成分池' if xs.get('dtc_basis') == 'pool' else '本地日线'}"
+                   f" {xs.get('dtc_pool')} 只）" if dtc_pct is not None
                    else f"，{xs.get('dtc_reason') or 'DTC 不可用'}，向下升级只看 MB5"),
         'series': [],
         'annotation': annotation,
@@ -337,16 +400,17 @@ def eval_intraday_reversal(ctx, params):
     if xs.get('id20') is None:
         return _unavailable(xs.get('id20_reason') or '日线不足')
     pct = xs.get('id20_pct')
+    pool_label = '成分池' if xs.get('id20_basis') == 'pool' else '本地日线'
     if pct is None:
         return _unavailable(
-            f"本地日线有效样本 {xs.get('id20_pool', 0)} 只 < {xs.get('id20_min_pool')}，不取分位")
+            f"{pool_label}有效样本 {xs.get('id20_pool', 0)} 只 < {xs.get('id20_min_pool')}，不取分位")
     tag_pct = float(params.get('tag_pct', 0.80))
     hot = pct >= tag_pct
     res = {
         'available': True,
         'value': round(pct * 100, 1),
         'direction': None,
-        'note': f"ID20 {xs['id20'] * 100:+.1f}%，分位 {pct:.2f}（本地日线 {xs.get('id20_pool')} 只）"
+        'note': f"ID20 {xs['id20'] * 100:+.1f}%，分位 {pct:.2f}（{pool_label} {xs.get('id20_pool')} 只）"
                 + ('，日内追买过热' if hot else ''),
         'series': [],
     }

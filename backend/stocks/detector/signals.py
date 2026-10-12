@@ -526,5 +526,9 @@ def upsert_signal(signal_data, dim_results):
             'status': signal_data['status'],
             'dimensions': dimensions_payload(dim_results),
             'annotations': signal_data.get('annotations') or {},
+            # 来源（成分池扩容）：scan 写入；缺省时个股按自选、其余按指数/板块
+            'source': signal_data.get('source') or (
+                DetectorSignal.SOURCE_WATCHLIST if signal_data['target_kind'] == DetectorSignal.TARGET_STOCK
+                else DetectorSignal.SOURCE_MARKET),
         },
     )

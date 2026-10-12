@@ -471,12 +471,17 @@ def build_index_context(code, name):
     return ctx, ''
 
 
-def build_stock_context(stock):
-    """自选股上下文：DailyQuote（本站已拉取的日线），零新增上游请求。
+_FLOAT_FROM_NETWORK = object()
+
+
+def build_stock_context(stock, float_history=_FLOAT_FROM_NETWORK):
+    """个股上下文：DailyQuote（本站已拉取的日线），零新增日线请求。
 
     只用已收盘的日线（DAT-13）：盘中拉到的当日 bar 量价不完整，混进序列会
     让振幅/量比/均线距离按半天数据投票。取最近 CONTEXT_BARS 根（#10），
     本地不足就用现有的，不为补历史额外联网。
+    float_history：成分池个股传入库里缓存的流通股本历史（[(date, 股数)] 或 None），
+    不触网；缺省（自选股）按原逻辑经 float_shares 取（进程内缓存 6 小时）。
     """
     rows = list(
         DailyQuote.objects.filter(stock=stock, is_final=True)
@@ -504,7 +509,8 @@ def build_stock_context(stock):
     # 成交额（元）只用于识别量价基准断层（ALG-13），不参与其他维度
     ctx['amount'] = [it['amount'] for it in items]
     # 逐日流通股本（股）：换手率维度用真实换手率；None 表示股本数据缺失（ALG-13）
-    history = _float_share_history(stock.code)
+    history = (_float_share_history(stock.code) if float_history is _FLOAT_FROM_NETWORK
+               else (float_history or None))
     ctx['float_shares'] = _shares_on(history, ctx['dates'])
     # 送转/新股校正后的量能序列（#15）：供平静闸门的 RVOL/量能 CV 与量比类维度接入
     ctx['volume_adj'], ctx['volume_basis'] = adjusted_volume_series(

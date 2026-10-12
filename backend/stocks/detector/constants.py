@@ -236,3 +236,10 @@ NULL_VOTE_RATE_FALLBACK = 0.2
 # 可覆盖，0 = 不截断）。只截板块：约 500 个板块同日检验、彼此相关，是多重
 # 检验假阳的主要来源；指数与自选股是用户明确关注的少量对象，不截。
 SECTOR_SIGNAL_CAP_DEFAULT = 10
+
+# 成分池（沪深300+中证500）扫描：每日推送上限（按严重度→向下优先→强度取前 N，
+# 0 = 不截断）、补跑阈值（当日日线入库比例达到才扫成分池）、分块大小（只
+# 影响峰值内存，不影响结果）。均可用同名 DETECTOR_POOL_* settings 覆盖
+POOL_SIGNAL_CAP_DEFAULT = 20
+POOL_READY_RATIO_DEFAULT = 0.95
+POOL_CHUNK_DEFAULT = 100
