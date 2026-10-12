@@ -224,6 +224,8 @@ class GuardedJobTests(_TmpRunDirMixin, SimpleTestCase):
         self.assertEqual(jobs['preopen_incremental'].func.lock_name, 'stock_quotes')
         self.assertEqual(jobs['detector_scan'].func.lock_name, 'detector_scan')
         self.assertEqual(jobs['post_close_lagging'].func.lock_name, 'market_snapshots')
+        self.assertEqual(jobs['stock_margin_daily'].func.lock_name, 'stock_margin')
+        self.assertEqual(jobs['restricted_release'].func.lock_name, 'restricted_release')
 
     def test_guarded_skips_when_busy_and_runs_when_free(self):
         from stocks import scheduler as sch

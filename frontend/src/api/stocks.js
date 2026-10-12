@@ -165,6 +165,10 @@ export const detectorApi = {
   getConfig({ signal } = {}) {
     return api.get('/detector/config/', { ...marketTimeout, signal })
   },
+  // 个股事件提示：限售解禁排期 + 解禁事件是否触发（只读本站日程表）
+  getStockEvents(code, { signal } = {}) {
+    return api.get(`/detector/stock-events/${code}/`, { ...marketTimeout, signal })
+  },
 }
 
 // 自选分组

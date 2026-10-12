@@ -183,6 +183,13 @@ SECTOR_CONTEXT_DAYS = 120
 # 融资余额上下文：日期轴长度（交易日数）；末点固定为指数数据日的前一交易日
 # （两融 T+1 披露，扫描日 T 最新只有 T−1 的数，#9）。
 MARGIN_CONTEXT_DAYS = 120
+# 个股融资明细上下文（det-v2）：取信号日 T 之前（不含 T）最近这么多个信用交易日
+# 的 StockMarginDaily 行；融资拥挤度只用 T−20..T−1，留余量覆盖个别缺日。
+STOCK_MARGIN_CONTEXT_DAYS = 40
+# 解禁事件上下文（det-v2）：查信号日 T 之后这么多个自然日内的解禁排期，再按交易日
+# 历截到 T 之后 LIFT_HORIZON_TRADING_DAYS 个交易日（45 自然日足以覆盖含长假的 20 个交易日）
+LIFT_LOOKAHEAD_CALENDAR_DAYS = 45
+LIFT_HORIZON_TRADING_DAYS = 20
 # 融资余额维度使用的快照字段（#9）：rz=融资余额（沪+深），不再用融资融券余额 total
 MARGIN_VALUE_KEY = 'rz'
 # 日期轴往回走的自然日上限 = 交易日数 × 倍数 + 缓冲（覆盖春节/国庆长假）
@@ -229,3 +236,10 @@ NULL_VOTE_RATE_FALLBACK = 0.2
 # 可覆盖，0 = 不截断）。只截板块：约 500 个板块同日检验、彼此相关，是多重
 # 检验假阳的主要来源；指数与自选股是用户明确关注的少量对象，不截。
 SECTOR_SIGNAL_CAP_DEFAULT = 10
+
+# 成分池（沪深300+中证500）扫描：每日推送上限（按严重度→向下优先→强度取前 N，
+# 0 = 不截断）、补跑阈值（当日日线入库比例达到才扫成分池）、分块大小（只
+# 影响峰值内存，不影响结果）。均可用同名 DETECTOR_POOL_* settings 覆盖
+POOL_SIGNAL_CAP_DEFAULT = 20
+POOL_READY_RATIO_DEFAULT = 0.95
+POOL_CHUNK_DEFAULT = 100

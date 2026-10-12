@@ -240,3 +240,11 @@ class RunDetectorScanCommandTests(TestCase):
             tl.return_value.__enter__.return_value = True
             out, _ = _run('run_detector_scan')
         self.assertIn('"date": "2026-10-09"', out)
+
+    def test_pool_option_passed_through(self):
+        with patch('stocks.task_lock.task_lock') as tl, \
+                patch('stocks.detector.scan.run_scan', return_value={}) as scan:
+            tl.return_value.__enter__.return_value = True
+            _run('run_detector_scan')
+            _run('run_detector_scan', '--pool', 'force')
+        self.assertEqual([c.kwargs['pool'] for c in scan.call_args_list], ['auto', 'force'])

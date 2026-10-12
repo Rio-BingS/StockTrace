@@ -6,8 +6,13 @@ APScheduler 集成到 Django
 2. 盘中每5分钟更新分钟数据（随后评估价格提醒）
 3. 收盘后 15:10 汇总当日日线+分钟（自选库最后一次自动写入；随后评估价格提醒、清理 AI 调用记录与后台任务）
 4. 收盘后 15:30–21:00 每30分钟预热晚到行情缓存并落日度快照（交易日）
-5. 每交易日 17:15 探测器扫描（行业/概念板块快照已在前两轮预热落库后）
+5. 每交易日 17:15 探测器扫描（行业/概念板块快照已在前两轮预热落库后）；成分池日线未齐时
+   17:45–23:45 每 30 分钟检查一次，齐了（或到 23:45 截止）再补跑一次带成分池的扫描
 6. 每日 02:30 清理超出保留期的分钟 K 线
+7. 工作日 09:30 拉取上一交易日个股融资明细（交易所 T+1 早间披露，探测器融资拥挤度用）
+8. 每日 18:00 刷新限售解禁日程（解禁日 前 5 天 ~ 后 60 天整段覆盖，探测器解禁事件用）
+9. 每周一 08:30 刷新成分池（沪深300 + 中证500 当前成分，失败保留旧值）
+10. 全天每 POOL_FETCH_INTERVAL_SECONDS 秒（默认 20）成分池限速采集一只（收盘后增量优先，其次回补）
 
 运行方式（REL-01）：
 - 生产：独立进程 `python manage.py run_scheduler`（systemd 单元 stocktrace-scheduler），
@@ -313,12 +318,53 @@ _DETECTOR_REQUIRED_SNAPSHOTS = ('industry_ff', 'concept_ff')
 _DETECTOR_LAST_ATTEMPT = dt_time(18, 45)
 
 
+def _pool_deadline():
+    """成分池补跑截止时刻（DETECTOR_POOL_DEADLINE，默认 23:45）：到点不再等，有多少扫多少。"""
+    raw = str(getattr(settings, 'DETECTOR_POOL_DEADLINE', '23:45'))
+    try:
+        hh, mm = raw.split(':')
+        return dt_time(int(hh), int(mm))
+    except (TypeError, ValueError):
+        logger.warning('DETECTOR_POOL_DEADLINE=%r 格式不对（应为 HH:MM），按 23:45', raw)
+        return dt_time(23, 45)
+
+
+def _pool_rescan_ready(trade_date):
+    """当日已扫过但成分池 pending：返回 (是否补跑, 原因)。
+
+    完整度达到 DETECTOR_POOL_READY_RATIO → 'pool_ready'（pool='auto'）；
+    到截止时刻 → 'pool_deadline'（pool='force'，缺数的成分股跳过并留痕）；否则等下一个重试点。
+    """
+    from .detector.scan import plan_pool
+    from .models import DetectorRun, Stock
+
+    watch = set(Stock.objects.filter(is_active=True).values_list('code', flat=True))
+    plan = plan_pool(trade_date, watch, mode='auto')
+    if plan['status'] == DetectorRun.POOL_DONE:
+        return True, 'pool_ready'
+    if plan['status'] == DetectorRun.POOL_OFF:
+        return False, 'already_done'
+    if timezone.localtime().time() >= _pool_deadline():
+        cov = plan['coverage']
+        logger.warning("成分池补跑截止：日线完整度 %s/%s，按现有数据扫描", cov.get('fresh'), cov.get('expected'))
+        return True, 'pool_deadline'
+    logger.info("成分池日线未齐（%s/%s），等待下一个重试点",
+                plan['coverage'].get('fresh'), plan['coverage'].get('expected'))
+    return False, 'pool_waiting'
+
+
 def _detector_dependencies_ready(trade_date):
-    """返回 (是否应现在扫描, 原因)。已扫过的当日不重复；快照未齐且非最后一次则延后。"""
+    """返回 (是否应现在扫描, 原因)。
+
+    当日未扫：快照未齐且非最后一次则延后。当日已扫：只有成分池还 pending 时才考虑补跑
+    （_pool_rescan_ready），否则不重复。
+    """
     from .models import DetectorRun, MarketDailySnapshot
 
-    done = DetectorRun.objects.filter(trade_date=trade_date).exclude(status='failed').exists()
-    if done:
+    run = DetectorRun.objects.filter(trade_date=trade_date).exclude(status='failed').first()
+    if run is not None:
+        if run.pool_status == DetectorRun.POOL_PENDING:
+            return _pool_rescan_ready(trade_date)
         return False, 'already_done'
     have = set(MarketDailySnapshot.objects.filter(
         trade_date=trade_date, kind__in=_DETECTOR_REQUIRED_SNAPSHOTS,
@@ -354,16 +400,72 @@ def _detector_scan_job():
         logger.debug('未到 15:30 收盘，跳过探测器扫描')
         return
 
-    ready, _reason = _detector_dependencies_ready(now.date())
+    ready, reason = _detector_dependencies_ready(now.date())
     if not ready:
         return
 
     from .detector.scan import run_scan
 
     try:
-        run_scan()
+        # 成分池补跑到截止点：不再等完整度，有多少扫多少（缺数的跳过并留痕）
+        run_scan(pool='force' if reason == 'pool_deadline' else 'auto')
     except Exception:  # 边界：扫描失败只记日志，不影响调度器
         logger.exception('探测器扫描失败')
+
+
+def _stock_margin_job():
+    """个股融资明细（StockMarginDaily）：工作日 09:30 拉上一交易日，顺带补前两日缺口。
+
+    交易所在 T 日早间披露 T−1 的两融明细；探测器 17:15 扫描读的就是这一天。
+    节假日照跑无妨：补拉只处理今天之前、库里缺的信用交易日，已有即跳过。
+    """
+    from .market.margin_stock import sync_recent_stock_margin
+
+    result = sync_recent_stock_margin()
+    if result:
+        logger.info("个股融资明细补拉: %s", result)
+
+
+def _restricted_release_job():
+    """限售解禁日程：每日 18:00 覆盖解禁日在 [今天−5, 今天+60] 的排期。
+
+    日程在发行时即公开、偶有推迟；每天整段覆盖让推迟的旧排期及时消失。
+    拉取不完整时保留旧排期，只记日志（宁可旧也不可缺）。
+    """
+    from .market.restricted_release import ReleaseFetchError, refresh_restricted_releases
+
+    try:
+        refresh_restricted_releases()
+    except ReleaseFetchError:
+        logger.warning('限售解禁日程刷新失败，保留旧排期', exc_info=True)
+
+
+def _index_constituents_job():
+    """成分池（沪深300 + 中证500）每周刷新：单个指数失败保留旧成分，只记日志。"""
+    from .pool.constituents import refresh_constituents
+
+    result = refresh_constituents()
+    logger.info("成分池刷新: %s", {k: v['status'] for k, v in result.items()})
+
+
+def _pool_quotes_job():
+    """成分池限速采集：每次最多处理一只股票（一个上游请求），单线程。
+
+    与回补命令共用 pool_quotes 任务锁：命令在跑时本任务直接跳过（只记 debug，
+    命令可能连跑数小时，每 20 秒一条 WARNING 会刷屏）。
+    """
+    from .pool.collector import tick
+    from .task_lock import task_lock
+
+    with task_lock('pool_quotes', timeout=0) as ok:
+        if not ok:
+            logger.debug('成分池采集跳过：pool_quotes 锁被占用（回补命令运行中）')
+            return None
+        try:
+            return tick()
+        except Exception:  # 边界：单次 tick 异常只记日志，下一个间隔照常
+            logger.exception('成分池采集异常')
+            return None
 
 
 # 任务互斥（REL-04）：与手动拉取、管理命令共用 task_lock 的同名锁。
@@ -429,10 +531,32 @@ def register_jobs(sched):
         'post_close_lagging', 900)
 
     # 探测器：交易日 17:15（行业/概念板块快照已在前两轮预热落库）；
-    # 17:45/18:15/18:45 为依赖未齐时的重试点，当日已扫过则直接跳过（REL-08）
+    # 17:45/18:15/18:45 为依赖未齐时的重试点，当日已扫过则直接跳过（REL-08）；
+    # 19:15–23:45 只在成分池 pending 时补跑（日线齐了或到截止点），否则同样直接跳过
     add(_guarded(_detector_scan_job, 'detector_scan', _DAILY_WAIT_SECONDS),
-        CronTrigger(day_of_week='mon-fri', hour='17-18', minute='15,45', timezone=SCHEDULER_TZ),
+        CronTrigger(day_of_week='mon-fri', hour='17-23', minute='15,45', timezone=SCHEDULER_TZ),
         'detector_scan', 1500)
+
+    # 个股融资明细：工作日 09:30（T+1 早间披露后），补拉今天之前缺的信用交易日
+    add(_guarded(_stock_margin_job, 'stock_margin', _DAILY_WAIT_SECONDS),
+        CronTrigger(day_of_week='mon-fri', hour=9, minute=30, timezone=SCHEDULER_TZ),
+        'stock_margin_daily', 3600)
+
+    # 限售解禁日程：每日 18:00（北京时间）整段覆盖前 5 天 ~ 后 60 天
+    add(_guarded(_restricted_release_job, 'restricted_release', _DAILY_WAIT_SECONDS),
+        CronTrigger(hour=18, minute=0, timezone=SCHEDULER_TZ),
+        'restricted_release', 3600)
+
+    # 成分池：每周一 08:30（北京时间，开盘前）刷新沪深300、中证500 当前成分
+    add(_guarded(_index_constituents_job, 'index_constituents', _DAILY_WAIT_SECONDS),
+        CronTrigger(day_of_week='mon', hour=8, minute=30, timezone=SCHEDULER_TZ),
+        'index_constituents', 3600)
+
+    # 成分池限速采集：全天每 N 秒最多一只（默认 20s；max_instances=1 保证不并发）
+    from .pool.collector import interval_seconds
+    add(_pool_quotes_job,
+        IntervalTrigger(seconds=interval_seconds(), timezone=SCHEDULER_TZ),
+        'pool_quotes', 60)
 
     # 分钟 K 线保留期清理：每日 02:30 低峰执行（PERF-02）
     add(_guarded(_minute_bar_cleanup_job, 'minute_bar_cleanup', _DAILY_WAIT_SECONDS),

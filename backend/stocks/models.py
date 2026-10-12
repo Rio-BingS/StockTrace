@@ -417,6 +417,146 @@ class MinuteBar(models.Model):
         return f"{self.stock.code} {self.datetime}"
 
 
+class StockMarginDaily(models.Model):
+    """个股融资明细日表（沪深交易所官方披露，T+1）：每只两融标的每个信用交易日一行。
+
+    为什么落库：探测器融资拥挤度（MB5/DTC）要在扫描当日的股票池内取截面分位，
+    需要逐股 T−5..T−1 的融资买入额与 T−1 融资余额；接口按日返回全市场明细，
+    逐股现拉既慢又不可回放。金额一律为元（整数），与交易所口径一致。
+    - 沪市明细自带融资偿还额；深市只有余额与买入额，偿还额由
+      前一交易日余额 + 当日买入 − 当日余额 推出，rz_repay_derived=True；
+      前一日余额缺失时推不出，留空（不补 0）。
+    """
+    EXCHANGE_SSE = 'sse'
+    EXCHANGE_SZSE = 'szse'
+    EXCHANGE_CHOICES = [
+        (EXCHANGE_SSE, '上交所'),
+        (EXCHANGE_SZSE, '深交所'),
+    ]
+
+    code = models.CharField('证券代码', max_length=6)
+    trade_date = models.DateField('信用交易日')
+    exchange = models.CharField('交易所', max_length=4, choices=EXCHANGE_CHOICES)
+    rz = models.BigIntegerField('融资余额(元)')
+    rz_buy = models.BigIntegerField('融资买入额(元)', null=True, blank=True)
+    rz_repay = models.BigIntegerField('融资偿还额(元)', null=True, blank=True)
+    rz_repay_derived = models.BooleanField('偿还额为推导值', default=False)
+    source = models.CharField('数据来源', max_length=32, blank=True, default='')
+    fetched_at = models.DateTimeField('拉取时间', auto_now=True)
+
+    class Meta:
+        verbose_name = '个股融资明细'
+        verbose_name_plural = '个股融资明细'
+        ordering = ['-trade_date', 'code']
+        constraints = [
+            models.UniqueConstraint(fields=['code', 'trade_date'], name='uniq_stock_margin_day'),
+        ]
+        indexes = [models.Index(fields=['trade_date'], name='stockmargin_date_idx')]
+
+    def __str__(self):
+        return f"{self.code} {self.trade_date} 融资余额 {self.rz}"
+
+
+class StockRestrictedRelease(models.Model):
+    """限售股解禁日程（东财数据中心 RPT_LIFT_STAGE）：一只股票一个解禁日一类限售股一行。
+
+    解禁日程在发行/定增时即已公开，所以未来日期的行是「已排期」而非预测。
+    - free_ratio：占解禁前流通股的比例（小数，0.0123 = 1.23%），探测器 lift_pressure
+      按 T 之后 20 个交易日内的合计比例判定；
+    - 同一（代码、解禁日、类型）上游偶有多批次，入库时合并（股数、市值、比例相加）；
+    - 日程会因追加承诺等推迟：每日任务按窗口整段覆盖，旧排期随之消失。
+    """
+    code = models.CharField('证券代码', max_length=6)
+    name = models.CharField('证券简称', max_length=32, blank=True, default='')
+    free_date = models.DateField('解禁日')
+    share_type = models.CharField('限售股类型', max_length=100, default='')
+    free_shares = models.FloatField('解禁数量(股)', null=True, blank=True)
+    able_free_shares = models.FloatField('实际可流通数量(股)', null=True, blank=True)
+    free_ratio = models.FloatField('占解禁前流通股比例', null=True, blank=True)
+    lift_market_cap = models.FloatField('解禁市值(元)', null=True, blank=True)
+    holder_num = models.IntegerField('解禁股东数', null=True, blank=True)
+    source = models.CharField('数据来源', max_length=32, blank=True, default='')
+    fetched_at = models.DateTimeField('拉取时间', auto_now=True)
+
+    class Meta:
+        verbose_name = '限售解禁日程'
+        verbose_name_plural = '限售解禁日程'
+        ordering = ['free_date', 'code']
+        constraints = [
+            models.UniqueConstraint(fields=['code', 'free_date', 'share_type'],
+                                    name='uniq_restricted_release'),
+        ]
+        indexes = [
+            models.Index(fields=['free_date'], name='restricted_date_idx'),
+            models.Index(fields=['code', 'free_date'], name='restricted_code_date_idx'),
+        ]
+
+    def __str__(self):
+        return f"{self.code} {self.free_date} {self.share_type}"
+
+
+class IndexConstituent(models.Model):
+    """指数当前成分（沪深300、中证500）：探测器成分池与 DTC/ID20 截面参照池。
+
+    只存「当前」成分，不存历史：每周整表刷新一次（中证指数官网 csindex 优先，
+    新浪成分接口兜底），任一指数拉取失败或数量明显不对时保留旧值，不清空。
+    """
+    index_code = models.CharField('指数代码', max_length=6)
+    code = models.CharField('成分券代码', max_length=6)
+    name = models.CharField('成分券名称', max_length=32, blank=True, default='')
+    # 上游给出的成分日期（csindex 的「日期」列）；兜底源没有时为空
+    as_of = models.DateField('成分日期', null=True, blank=True)
+    source = models.CharField('数据来源', max_length=32, blank=True, default='')
+    fetched_at = models.DateTimeField('刷新时间', auto_now=True)
+
+    class Meta:
+        verbose_name = '指数成分'
+        verbose_name_plural = '指数成分'
+        ordering = ['index_code', 'code']
+        constraints = [
+            models.UniqueConstraint(fields=['index_code', 'code'], name='uniq_index_constituent'),
+        ]
+        indexes = [models.Index(fields=['code'], name='constituent_code_idx')]
+
+    def __str__(self):
+        return f"{self.index_code} {self.code} {self.name}"
+
+
+class PoolStockState(models.Model):
+    """成分池个股的采集游标（限速队列断点续跑）与流通股本缓存。
+
+    每只成分股一行，由 pool.collector 维护：队列每次只处理一只，按本表决定
+    下一只是谁（收盘后增量优先，其次历史回补、股本刷新）；进程重启或命令中断后
+    从本表接着跑。日线本身写 DailyQuote（外键指向 is_active=False 的 Stock 行）。
+    """
+    code = models.CharField('证券代码', max_length=6, unique=True)
+    # 库内已收盘日线的根数与最新日期（每次拉取后从 DailyQuote 回读）
+    bar_count = models.PositiveIntegerField('已收盘日线根数', default=0)
+    last_bar_date = models.DateField('最新已收盘日线', null=True, blank=True)
+    # 历史回补完成时刻：拉过完整回补窗口（或本地已够根数）就不再回补
+    backfilled_at = models.DateTimeField('回补完成时间', null=True, blank=True)
+    # 已处理过的「期望交易日」：停牌等拉不到当日 bar 的，复查 3 次后不再为这一天反复请求
+    checked_date = models.DateField('已处理期望交易日', null=True, blank=True)
+    stale_checks = models.PositiveSmallIntegerField('当日 bar 未出复查次数', default=0)
+    fail_count = models.PositiveSmallIntegerField('连续失败次数', default=0)
+    next_attempt_at = models.DateTimeField('最早下次尝试', null=True, blank=True)
+    last_attempt_at = models.DateTimeField('最近尝试', null=True, blank=True)
+    last_error = models.CharField('最近错误', max_length=200, blank=True, default='')
+    # 流通股本变动历史 [[ISO 日期, 股数]]（新浪 getAmountBySymbol，与自选同源）：
+    # 扫描时成分池个股只读这里，不在 17:15 对上游突发 800 次请求；None = 未取到
+    float_shares = models.JSONField('流通股本历史', null=True, blank=True)
+    float_shares_at = models.DateTimeField('股本刷新时间', null=True, blank=True)
+    updated_at = models.DateTimeField('更新时间', auto_now=True)
+
+    class Meta:
+        verbose_name = '成分池采集状态'
+        verbose_name_plural = '成分池采集状态'
+        ordering = ['code']
+
+    def __str__(self):
+        return f"{self.code} bars={self.bar_count} last={self.last_bar_date}"
+
+
 class DetectorDimConfig(models.Model):
     """探测器微变维度的可调配置（权重 / 阈值 / 启停）。
 
@@ -458,7 +598,7 @@ class DetectorSignal(models.Model):
     TARGET_CONCEPT = 'concept'
     TARGET_KIND_CHOICES = [
         (TARGET_INDEX, '指数'),
-        (TARGET_STOCK, '自选股'),
+        (TARGET_STOCK, '个股'),
         (TARGET_INDUSTRY, '行业板块'),
         (TARGET_CONCEPT, '概念板块'),
     ]
@@ -489,7 +629,19 @@ class DetectorSignal(models.Model):
         (SEVERITY_LOW, '低'),
     ]
 
+    # 信号来源（成分池扩容）：自选股 / 成分池算法推送（沪深300+中证500）/ 指数与板块。
+    # 同一只股票既在自选又在成分池时记 watchlist（自选优先，一天只有一行）
+    SOURCE_WATCHLIST = 'watchlist'
+    SOURCE_POOL = 'pool'
+    SOURCE_MARKET = 'market'
+    SOURCE_CHOICES = [
+        (SOURCE_WATCHLIST, '自选'),
+        (SOURCE_POOL, '算法推送'),
+        (SOURCE_MARKET, '指数/板块'),
+    ]
+
     target_kind = models.CharField('对象类型', max_length=20, choices=TARGET_KIND_CHOICES)
+    source = models.CharField('信号来源', max_length=10, choices=SOURCE_CHOICES, default=SOURCE_MARKET)
     target_code = models.CharField('对象代码', max_length=30)
     target_name = models.CharField('对象名称', max_length=50, blank=True, default='')
     trade_date = models.DateField('信号交易日')
@@ -501,6 +653,9 @@ class DetectorSignal(models.Model):
     # 每个维度的评估明细：{key: {name, value, direction, weight, available, note}}；
     # 用 JSON 而非关联表：单日单对象的维度快照是只读整体，无需单独查询/索引
     dimensions = models.JSONField('维度明细', default=dict, blank=True)
+    # 信号附注（det-v2）：不参与投票的提示与修饰——趋势状态、融资拥挤（分位、
+    # 严重度升级原因）、解禁事件、日内追买过热等。只展示，不影响判定与复盘统计
+    annotations = models.JSONField('信号附注', default=dict, blank=True)
     review_hit = models.BooleanField('回看是否兑现', null=True, blank=True)
     hit_date = models.DateField('兑现日期', null=True, blank=True)
     reviewed_at = models.DateTimeField('回看时间', null=True, blank=True)
@@ -571,6 +726,7 @@ class DetectorSignal(models.Model):
         indexes = [
             models.Index(fields=['trade_date', 'severity']),
             models.Index(fields=['status', 'review_hit']),
+            models.Index(fields=['trade_date', 'source'], name='detsig_date_source_idx'),
         ]
 
     def __str__(self):
@@ -604,7 +760,17 @@ class DetectorRun(models.Model):
     # 本表按 DETECTOR_RUN_RETENTION_DAYS 清理
     adjustments = models.JSONField('权重/阈值调整流水', default=list, blank=True)
     matrix = models.JSONField('板块微变矩阵', default=dict, blank=True)
+    # 当日被否决的信号（det-v2）：如向上信号因融资拥挤被否决，不落 DetectorSignal，
+    # 但对象、分位与原因留在这里供页面展示「已否决」
+    vetoed = models.JSONField('否决记录', default=list, blank=True)
     message = models.CharField('备注', max_length=300, blank=True, default='')
+    # 成分池（沪深300+中证500）扫描状态：pending=日线未齐、本轮未扫成分池，等后续
+    # 重试点；done=已扫；off=成分表为空或关闭。pool_coverage 记完整度与跳过的个股
+    POOL_PENDING = 'pending'
+    POOL_DONE = 'done'
+    POOL_OFF = 'off'
+    pool_status = models.CharField('成分池扫描状态', max_length=10, blank=True, default='')
+    pool_coverage = models.JSONField('成分池数据完整度', default=dict, blank=True)
     created_at = models.DateTimeField('创建时间', auto_now_add=True)
     updated_at = models.DateTimeField('更新时间', auto_now=True)
 

@@ -9,10 +9,21 @@ import { GridComponent, TooltipComponent, MarkLineComponent } from 'echarts/comp
 import { CanvasRenderer } from 'echarts/renderers'
 import { detectorApi } from '../api/stocks.js'
 import { errorMessage } from '../utils/errorMessage.js'
-import { SEVERITY_LABEL, STATUS_LABEL, dirText } from '../constants/labels.js'
+import { SEVERITY_LABEL, dirText } from '../constants/labels.js'
 import { axisLabel, tooltip } from '../charts/theme.js'
 import { fmtFixed } from '../utils/number.js'
 import { directionalExcess, fmtRate, fmtReturn, signClass } from '../utils/detectorReview.js'
+import {
+  crowdingInfo,
+  dimRoleText,
+  liftText,
+  nodeCells,
+  signalBadges,
+  statusClass,
+  statusText,
+  trendStateText,
+  trendStateTitle,
+} from '../utils/detectorSignal.js'
 
 use([LineChart, GridComponent, TooltipComponent, MarkLineComponent, CanvasRenderer])
 
@@ -25,6 +36,11 @@ const error = ref('')
 const detail = ref(null)
 
 const signal = computed(() => detail.value?.signal || {})
+const annotations = computed(() => signal.value.annotations || {})
+const badges = computed(() => signalBadges(signal.value))
+const crowding = computed(() => crowdingInfo(annotations.value))
+const lift = computed(() => liftText(annotations.value.lift_pressure))
+const nodes = computed(() => nodeCells(detail.value?.review_nodes))
 const dims = computed(() => {
   const dimensions = signal.value.dimensions || {}
   const series = detail.value?.dimension_series || {}
@@ -121,17 +137,45 @@ onMounted(load)
           <span class="badge sev" :class="signal.severity">{{
             SEVERITY_LABEL[signal.severity]
           }}</span>
-          <span class="badge status" :class="signal.status">{{
-            STATUS_LABEL[signal.status] || signal.status
-          }}</span>
+          <span class="badge status" :class="statusClass(signal)">{{ statusText(signal) }}</span>
+          <span
+            v-for="b in badges"
+            :key="b.key"
+            class="badge hint"
+            :class="b.cls"
+            :title="b.title"
+            >{{ b.text }}</span
+          >
         </div>
       </div>
+
+      <!-- 趋势状态与事件提示（det-v2）：只展示，不参与判定 -->
+      <div
+        v-if="trendStateText(annotations)"
+        class="trend-line"
+        :title="trendStateTitle(annotations)"
+      >
+        {{ trendStateText(annotations) }}
+      </div>
+      <ul v-if="crowding || lift || annotations.intraday_reversal" class="notes">
+        <li v-if="crowding">
+          融资拥挤度：{{ crowding.text }}
+          <b v-if="crowding.reason" class="warn">{{ crowding.reason }}</b>
+        </li>
+        <li v-if="lift">
+          限售解禁：{{ lift }}（解禁前 20 日历史上平均跑输同行业约 2pp，只作提示）
+        </li>
+        <li v-if="annotations.intraday_reversal?.tag">
+          {{ annotations.intraday_reversal.tag }}：ID20 分位
+          {{ annotations.intraday_reversal.id20_pct }}（只展示，不参与判定）
+        </li>
+      </ul>
 
       <div class="dims">
         <div v-for="dim in dims" :key="dim.key" class="dim-chip" :class="{ off: !dim.available }">
           <b>{{ dim.name }}</b>
           <span :class="dim.direction">{{
-            dim.available ? dirText(dim.direction) : '不可用'
+            !dim.available ? '不可用' : dimRoleText(dim) || dirText(dim.direction)
           }}</span>
           <small v-if="dim.available && dim.note">{{ dim.note }}</small>
           <small v-else-if="!dim.available">{{ dim.note }}</small>
@@ -147,8 +191,27 @@ onMounted(load)
         </div>
       </div>
 
+      <!-- 复盘节点（det-v2）：以 20/60 日相对沪深300 的按方向超额为准，前 10 日不判定失败 -->
+      <div v-if="nodes.length" class="nodes">
+        <div v-for="n in nodes" :key="n.label" class="node" :class="n.cls">
+          <label>{{ n.label }}节点</label>
+          <b :class="n.cls">{{ n.value }}</b>
+          <small>{{ n.state }}</small>
+        </div>
+        <p class="hint">
+          相对沪深300、按信号方向取号（向下信号跑输为正），基期为次日开盘（板块为次日收盘）； 已过
+          {{ detail.review_nodes.elapsed }} 个交易日。
+        </p>
+      </div>
+
       <div v-if="signal.review_hit != null" class="review-line">
-        回看结果：{{ signal.review_hit ? '已兑现' : '未兑现' }}
+        5 日障碍判定（辅助）：{{
+          statusText(signal) === '观察期'
+            ? '观察期，不判定'
+            : signal.review_hit
+              ? '已兑现'
+              : '未兑现'
+        }}
         <template v-if="signal.hit_date">（{{ signal.hit_date }} 达成）</template>
         <!-- v2 口径的明细（#12）；旧口径信号没有这些字段，整段不显示 -->
         <template v-if="signal.review_version">
@@ -252,6 +315,35 @@ onMounted(load)
   background: var(--danger-bg);
 }
 
+.badge.hint.muted {
+  border: 1px dashed #4a5a78;
+}
+.badge.hint.warn {
+  color: #ffbd6b;
+  background: #382711;
+}
+.badge.hint.event {
+  color: #79c7ff;
+  background: #122736;
+}
+.trend-line {
+  color: #c9d4e6;
+  font-size: 13px;
+  margin-bottom: 8px;
+}
+.notes {
+  margin: 0 0 10px;
+  padding-left: 18px;
+  color: #9eabc1;
+  font-size: 12px;
+  line-height: 1.7;
+}
+.notes b.warn {
+  color: #ffbd6b;
+  font-weight: 500;
+  margin-left: 6px;
+}
+
 .dims {
   display: flex;
   flex-wrap: wrap;
@@ -295,6 +387,42 @@ onMounted(load)
   border-style: dashed;
 }
 
+.nodes {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 8px;
+  margin-bottom: 10px;
+}
+.nodes .hint {
+  grid-column: 1 / -1;
+  margin: 0;
+}
+.node {
+  background: #0d1729;
+  border: 1px solid #213251;
+  border-radius: 7px;
+  padding: 8px 10px;
+}
+.node label {
+  display: block;
+  color: #8691a4;
+  font-size: 11px;
+}
+.node b {
+  display: block;
+  font-size: 16px;
+  margin: 3px 0;
+}
+.node b.ok {
+  color: var(--ok);
+}
+.node b.bad {
+  color: var(--danger);
+}
+.node small {
+  color: #8f9bb2;
+  font-size: 11px;
+}
 .review-line {
   background: #122736;
   border: 1px solid #2e4a5e;

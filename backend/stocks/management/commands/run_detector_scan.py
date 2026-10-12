@@ -9,6 +9,11 @@ run 行的调参流水与回看计数按当日累加而不是被覆盖；落库�
 
 用法：
     DJANGO_DEBUG=true python manage.py run_detector_scan
+    DJANGO_DEBUG=true python manage.py run_detector_scan --pool force   # 成分池日线不齐也照扫
+    DJANGO_DEBUG=true python manage.py run_detector_scan --pool skip    # 只扫指数/自选/板块
+
+--pool：auto（默认，成分池日线完整度达到 DETECTOR_POOL_READY_RATIO 才扫成分池）、
+force（有多少扫多少，缺数的跳过并留痕）、skip（不扫成分池）。
 """
 
 import json
@@ -19,6 +24,10 @@ from django.core.management.base import BaseCommand
 class Command(BaseCommand):
     help = '手动触发探测器日度扫描（同日重跑幂等；非交易日/收盘前如实跳过）'
 
+    def add_arguments(self, parser):
+        parser.add_argument('--pool', choices=('auto', 'force', 'skip'), default='auto',
+                            help='成分池扫描方式：auto 完整度达标才扫（默认）/ force 有多少扫多少 / skip 不扫')
+
     def handle(self, *args, **options):
         from stocks.detector.scan import run_scan
         from stocks.task_lock import task_lock
@@ -28,5 +37,5 @@ class Command(BaseCommand):
             if not ok:
                 self.stderr.write('探测器扫描任务锁被占用（已等待 600s），请稍后再试')
                 return
-            summary = run_scan()
+            summary = run_scan(pool=options['pool'])
         self.stdout.write(json.dumps(summary, ensure_ascii=False, indent=2, default=str))

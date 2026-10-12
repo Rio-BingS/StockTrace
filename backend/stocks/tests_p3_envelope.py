@@ -350,5 +350,5 @@ class DetectorSignalsEnvelopeTests(SnapshotMixin, TestCase):
                 r = self.client.get('/api/detector/signals/', params)
                 self.assertEqual(r.status_code, 200)
                 self.assertEqual(list(r.json()),
-                                 ['meta', 'trade_date', 'latest_run', 'summary', 'pagination', 'items'])
+                                 ['meta', 'trade_date', 'latest_run', 'summary', 'pagination', 'items', 'vetoed'])
                 self.assertSnapshot(key, r.content.decode())

@@ -1,7 +1,7 @@
 <script setup>
 import { ref, onMounted, computed, watch } from 'vue'
 import { useRoute } from 'vue-router'
-import { stockApi, marketApi } from '../api/stocks.js'
+import { stockApi, marketApi, detectorApi } from '../api/stocks.js'
 import {
   formatPct,
   formatNum,
@@ -13,6 +13,7 @@ import {
 import { formatAmount } from '../utils/marketFormat.js'
 import { quoteForDate } from '../utils/intraday.js'
 import { pageTitle } from '../utils/routerHelpers.js'
+import { liftText, releaseRowText } from '../utils/detectorSignal.js'
 import KlineChart from '../components/KlineChart.vue'
 import IntradayChart from '../components/IntradayChart.vue'
 import AiAnalysisPanel from '../components/AiAnalysisPanel.vue'
@@ -27,6 +28,7 @@ const latestQuote = ref(null)
 const minuteData = ref([])
 const loading = ref(false)
 const margin = ref(null)
+const events = ref(null)
 const days = ref(30)
 
 // 当前走势图显示的日期和对应日K数据
@@ -41,6 +43,19 @@ async function loadMargin() {
     const data = (await marketApi.getStockMargin(c)).data
     // 切换股票后旧请求晚到时丢弃
     if (code.value === c) margin.value = data
+  } catch (e) {
+    console.error(e)
+  }
+}
+
+// 事件提示（det-v2）：限售解禁排期，只读本站日程表；失败不影响页面其他部分
+async function loadEvents() {
+  events.value = null
+  const c = code.value
+  if (!c) return
+  try {
+    const data = (await detectorApi.getStockEvents(c)).data
+    if (code.value === c) events.value = data
   } catch (e) {
     console.error(e)
   }
@@ -157,8 +172,13 @@ watch(stockId, () => {
 // 两融依赖 code：code 在 loadData 拉到股票信息后才赋值，
 // 因此监听 code 变化再加载（首次进入和切换股票都会触发）
 watch(code, (c) => {
-  if (c) loadMargin()
-  else margin.value = null
+  if (c) {
+    loadMargin()
+    loadEvents()
+  } else {
+    margin.value = null
+    events.value = null
+  }
 })
 
 // 标题带上股票代码与名称，多标签页时便于区分（FEF-16）
@@ -289,6 +309,24 @@ watch(latestQuote, (q) => {
         </div>
       </template>
       <div v-else class="margin-note">{{ margin.message || '暂不可用' }}</div>
+    </div>
+
+    <!-- 事件提示：限售解禁（只作提示，不参与探测器判定） -->
+    <div
+      class="chart-section margin-section"
+      v-if="events?.available && (events.lift?.triggered || events.upcoming?.length)"
+    >
+      <h2>事件提示 · 限售解禁</h2>
+      <div v-if="events.lift?.triggered" class="event-alert">
+        {{ liftText(events.lift) }}。历史上解禁前 20 日平均跑输同行业约 2pp，解禁日当天起不再提示。
+      </div>
+      <ul class="event-list">
+        <li v-for="u in events.upcoming" :key="u.date + u.share_type">{{ releaseRowText(u) }}</li>
+      </ul>
+      <div class="margin-note">
+        截至 {{ events.as_of }} · 未来 60 天内已公开的解禁排期（东财），比例为占解禁前流通股；
+        排期可能推迟。
+      </div>
     </div>
 
     <!-- AI 分析 -->
@@ -440,6 +478,20 @@ watch(latestQuote, (q) => {
   font-size: 16px;
   font-weight: bold;
   color: #eee;
+}
+.event-alert {
+  color: #ffbd6b;
+  background: #382711;
+  border-radius: 6px;
+  padding: 8px 10px;
+  margin-bottom: 8px;
+  font-size: 13px;
+}
+.event-list {
+  margin: 0;
+  padding-left: 18px;
+  font-size: 13px;
+  line-height: 1.8;
 }
 .margin-note {
   margin-top: 8px;

@@ -10,6 +10,7 @@
 from __future__ import annotations
 
 import logging
+from bisect import bisect_right
 from datetime import timedelta
 
 from django.conf import settings
@@ -23,14 +24,14 @@ from ..common.pagination import paginate
 from ..common.params import parse_bool, parse_date, positive_int
 from ..trading_calendar import expected_latest_date
 from ..models import DetectorDimConfig, DetectorRun, DetectorSignal, DetectorTuneLog
-from . import constants, registry
+from . import constants, nodes, registry
 from .dimensions import (
     build_index_context,
     build_sector_context,
     build_stock_context,
 )
 from .scan import _sector_signal_cap
-from .signals import dim_group
+from .signals import dim_group, dim_votes
 
 logger = logging.getLogger(__name__)
 
@@ -48,10 +49,10 @@ def _meta_disclaimer():
 
 
 # 信号列表已上线的 JSON 键顺序，接入 common.envelope 时保持不变（ARC-04）
-_SIGNALS_KEY_ORDER = ('meta', 'trade_date', 'latest_run', 'summary', 'pagination', 'items')
+_SIGNALS_KEY_ORDER = ('meta', 'trade_date', 'latest_run', 'summary', 'pagination', 'items', 'vetoed')
 
 # DetectorRun 里的大 JSON 字段：列表/元信息只用标量，读这些字段纯属浪费（PERF-09）
-_HEAVY_RUN_FIELDS = ('matrix', 'degraded', 'adjustments')
+_HEAVY_RUN_FIELDS = ('matrix', 'degraded', 'adjustments', 'vetoed', 'pool_coverage')
 
 
 def _runs_brief():
@@ -86,11 +87,35 @@ def _meta(latest_run, message=''):
     }
 
 
-def _signal_row(sig):
+def _scan_dates():
+    """已有扫描记录的交易日（升序）：列表行据此估算信号已过交易日数（det-v2）。"""
+    return sorted(DetectorRun.objects.values_list('trade_date', flat=True))
+
+
+def _elapsed_days(trade_date, scan_dates):
+    """信号日之后已扫描的交易日数；扫描缺日只会少算（多给观察期，不会提前判失败）。"""
+    if scan_dates is None:
+        return None
+    return len(scan_dates) - bisect_right(scan_dates, trade_date)
+
+
+def _watchlist_codes():
+    from ..models import Stock
+
+    return set(Stock.objects.filter(is_active=True).values_list('code', flat=True))
+
+
+def _signal_row(sig, scan_dates=None, watch_codes=None):
     return {
         'id': sig.id,
         'target_kind': sig.target_kind,
         'target_kind_display': sig.get_target_kind_display(),
+        # 信号来源（成分池扩容）：watchlist 自选 / pool 算法推送（沪深300+中证500）/ market 指数板块
+        'source': sig.source,
+        'source_display': sig.get_source_display(),
+        # 个股是否已在自选（前端据此显示「加自选」）；指数/板块为 None
+        'in_watchlist': (sig.target_code in watch_codes
+                         if watch_codes is not None and sig.target_kind == DetectorSignal.TARGET_STOCK else None),
         'target_code': sig.target_code,
         'target_name': sig.target_name,
         'trade_date': sig.trade_date,
@@ -101,6 +126,8 @@ def _signal_row(sig):
         'status': sig.status,
         'status_display': sig.get_status_display(),
         'dimensions': sig.dimensions,
+        # 信号附注（det-v2）：趋势状态、融资拥挤、解禁事件、日内追买等只展示的信息
+        'annotations': sig.annotations or {},
         'review_hit': sig.review_hit,
         'hit_date': sig.hit_date,
         'reviewed_at': sig.reviewed_at,
@@ -112,6 +139,8 @@ def _signal_row(sig):
         'bench_return': sig.bench_return,
         'excess_return': sig.excess_return,
         'benchmark_code': sig.benchmark_code,
+        # 信号后已过的交易日（det-v2）：前 nodes.NO_FAIL_DAYS 日页面不显示「失败」
+        'elapsed_days': _elapsed_days(sig.trade_date, scan_dates),
         'created_at': sig.created_at,
     }
 
@@ -122,6 +151,7 @@ def detector_signals(request):
 
     筛选：severity(high/medium/low)、direction(up/down)、
     target_kind(index/stock/industry/concept)、status、date=YYYY-MM-DD、
+    source(watchlist/pool/market：自选 / 成分池算法推送 / 指数板块)、
     all_dates=1（近 30 天历史，默认只看最新扫描日）。
     """
     latest_run = _runs_brief().first()
@@ -157,6 +187,7 @@ def detector_signals(request):
         ('direction', dict(DetectorSignal.DIRECTION_CHOICES)),
         ('target_kind', dict(DetectorSignal.TARGET_KIND_CHOICES)),
         ('status', dict(DetectorSignal.STATUS_CHOICES)),
+        ('source', dict(DetectorSignal.SOURCE_CHOICES)),
     ):
         value = request.query_params.get(field)
         if value:
@@ -169,9 +200,12 @@ def detector_signals(request):
 
     if all_dates and trade_date is None:
         qs = qs.order_by('-trade_date')[:300]
-    rows = [_signal_row(s) for s in qs]
+    scan_dates = _scan_dates()
+    watch_codes = _watchlist_codes()
+    rows = [_signal_row(s, scan_dates, watch_codes) for s in qs]
     if not all_dates and trade_date is None and latest_run is not None:
-        rows.sort(key=lambda r: r['score'], reverse=True)
+        # 向上信号未经验证（多轮前推验证 20/60 日超额均不显著）：降权排在向下信号之后
+        rows.sort(key=lambda r: (r['direction'] == DetectorSignal.DIRECTION_UP, -r['score']))
     items, pagination = paginate(
         rows,
         positive_int(request.query_params, 'page', 1),
@@ -184,23 +218,61 @@ def detector_signals(request):
         'by_severity': {},
         'by_direction': {},
         'by_status': {},
+        'by_source': {},
     }
     for row in rows:
+        summary['by_source'][row['source']] = summary['by_source'].get(row['source'], 0) + 1
         summary['by_severity'][row['severity']] = summary['by_severity'].get(row['severity'], 0) + 1
         summary['by_direction'][row['direction']] = summary['by_direction'].get(row['direction'], 0) + 1
         summary['by_status'][row['status']] = summary['by_status'].get(row['status'], 0) + 1
 
+    # 当日被否决的信号（det-v2）：只在看最新扫描日时附带，按方向筛选同样生效
+    vetoed = []
+    if not all_dates and latest_run is not None and (trade_date is None or trade_date == latest_run.trade_date):
+        vetoed = _run_vetoed(latest_run.trade_date, request.query_params)
+
     return Response(envelope(
         items, pagination, _meta(latest_run),
         key_order=_SIGNALS_KEY_ORDER,
+        vetoed=vetoed,
         trade_date=trade_date.isoformat() if trade_date else (latest_run.trade_date.isoformat() if latest_run else None),
-        latest_run=_run_brief(latest_run) if latest_run else None,
+        latest_run=_run_brief(latest_run, pool=True) if latest_run else None,
         summary=summary,
     ))
 
 
-def _run_brief(run):
-    return {
+def _run_vetoed(trade_date, params):
+    """某扫描日的否决记录；方向/对象类型筛选与信号列表一致。"""
+    rows = DetectorRun.objects.filter(trade_date=trade_date).values_list('vetoed', flat=True).first() or []
+    for field in ('direction', 'target_kind', 'source'):
+        value = params.get(field)
+        if value:
+            # 旧否决记录没有 source：个股按自选、其余按指数/板块
+            rows = [r for r in rows if (r.get(field) if field != 'source' or 'source' in r
+                                        else _legacy_source(r)) == value]
+    return rows
+
+
+def _legacy_source(record):
+    return (DetectorSignal.SOURCE_WATCHLIST if record.get('target_kind') == DetectorSignal.TARGET_STOCK
+            else DetectorSignal.SOURCE_MARKET)
+
+
+# 成分池完整度里给页面的标量（代码明细列表留在库里，不随信号列表下发）
+_POOL_BRIEF_KEYS = ('members', 'expected', 'fresh', 'ratio', 'threshold', 'missing_count',
+                    'not_ready_count', 'scanned', 'skipped_count', 'signals_raw', 'signals_pushed',
+                    'cap', 'mode', 'reason')
+
+
+def _pool_brief(run):
+    cov = DetectorRun.objects.filter(pk=run.pk).values_list('pool_coverage', flat=True).first() or {}
+    out = {'status': run.pool_status or None}
+    out.update({k: cov[k] for k in _POOL_BRIEF_KEYS if k in cov})
+    return out
+
+
+def _run_brief(run, pool=False):
+    brief = {
         'trade_date': run.trade_date,
         'status': run.status,
         'targets_scanned': run.targets_scanned,
@@ -216,7 +288,11 @@ def _run_brief(run):
         'independent_samples': run.independent_samples,
         'avg_excess_return': run.avg_excess_return,
         'message': run.message,
+        'pool_status': run.pool_status or None,
     }
+    if pool:
+        brief['pool'] = _pool_brief(run)
+    return brief
 
 
 def _context_for_signal(sig):
@@ -229,6 +305,11 @@ def _context_for_signal(sig):
         stock = Stock.objects.filter(code=sig.target_code).first()
         if stock is None:
             return None, '该股票已不在自选库，无法重建序列'
+        if not stock.is_active:
+            # 成分池个股：股本读采集队列的缓存，详情页不额外触网
+            from .scan import _load_float_histories
+
+            return build_stock_context(stock, float_history=_load_float_histories([stock.code]).get(stock.code))
         return build_stock_context(stock)
     return build_sector_context(sig.target_kind, sig.target_code)
 
@@ -275,7 +356,9 @@ def detector_signal_detail(request, pk):
     return Response({
         'meta': _meta(_runs_brief().first(),
                       message=(err or '') if ctx is None else ''),
-        'signal': _signal_row(sig),
+        'signal': _signal_row(sig, _scan_dates(), _watchlist_codes()),
+        # 复盘节点（det-v2）：20/60 日相对沪深300 超额，前 10 日不判定失败
+        'review_nodes': nodes.review_nodes(sig),
         'dimension_series': dimension_series,
         'params_source': params_source,
         'disabled_dims': [
@@ -315,8 +398,10 @@ def detector_heatmap(request):
             'rows': [],
         })
 
+    # 热力图只列投票维度：只展示/只作否决的维度（det-v2）不评估板块
+    keys = [k for k in registry.ENABLED_KEYS if dim_votes(k)]
     dim_names = {d['key']: d['name'] for d in registry.DIMENSIONS if d['enabled']}
-    dims = [{'key': k, 'name': dim_names[k]} for k in registry.ENABLED_KEYS]
+    dims = [{'key': k, 'name': dim_names[k]} for k in keys]
     shown = [
         {
             'code': r.get('code'),
@@ -324,7 +409,7 @@ def detector_heatmap(request):
             'as_of': r.get('as_of'),
             'direction': r.get('direction'),
             'score': r.get('score'),
-            'values': {k: r.get('values', {}).get(k) for k in registry.ENABLED_KEYS},
+            'values': {k: r.get('values', {}).get(k) for k in keys},
         }
         for r in rows[:40]
     ]
@@ -348,7 +433,7 @@ def _vote_groups():
     """投票信息组（#4）：{group: {'role', 'dims': [启用维度 key...]}}，与 signals.vote 同源。"""
     groups = {}
     for spec in registry.DIMENSIONS:
-        if not spec['enabled']:
+        if not spec['enabled'] or not dim_votes(spec['key']):
             continue
         group, role = dim_group(spec['key'])
         entry = groups.setdefault(group, {'role': role, 'dims': []})
@@ -376,6 +461,8 @@ def detector_config(request):
             'vote_codes': list(constants.MARGIN_VOTE_CODES) if spec['key'] == 'margin_north' else None,
             'group': group,
             'role': role,
+            # False = 只展示/只作否决，不参加投票（det-v2）
+            'vote_enabled': dim_votes(spec['key']),
             'note': spec['note'],
             'weight': cfg.weight if cfg else 1.0,
             'params': {**spec['defaults'], **((cfg.params or {}) if cfg else {})},
@@ -391,6 +478,9 @@ def detector_config(request):
         # 共用一份，旧实现在这里手写了一份副本，改阈值后配置页会与实际不一致
         'review_rules': {
             'version': constants.REVIEW_VERSION,
+            # 复盘节点（det-v2）：页面以 20/60 日为准，前 10 日不判定失败
+            'node_horizons': list(nodes.NODE_HORIZONS),
+            'no_fail_days': nodes.NO_FAIL_DAYS,
             'lookback_days': constants.REVIEW_LOOKBACK,
             'hit_sigma_k': getattr(settings, 'DETECTOR_REVIEW_SIGMA_K', constants.HIT_SIGMA_K),
             'sigma_window': constants.SIGMA_WINDOW,
@@ -434,4 +524,61 @@ def detector_config(request):
             # 多重检验（#11）：每日板块信号按强度截断的上限，0 = 不截断
             'sector_signal_cap': _sector_signal_cap(),
         },
+    })
+
+
+# 个股页展示的解禁排期：往后看这么多自然日（与每日刷新窗口一致）
+_STOCK_EVENTS_AHEAD_DAYS = 60
+
+
+@api_view(['GET'])
+def detector_stock_events(request, code):
+    """个股事件提示（det-v2）：限售解禁排期 + 探测器 lift_pressure 是否触发。
+
+    只读本站日程表（StockRestrictedRelease，每日 18:00 刷新），不触发上游请求。
+    触发口径与扫描相同：以最近已完成交易日为 T，T 之后 20 个交易日内解禁合计
+    ≥1% 流通股；解禁日当天起失效。只作提示，不参与任何信号判定。
+    """
+    from ..models import StockRestrictedRelease
+    from ..serializers import normalize_stock_code
+    from .dimensions import load_upcoming_releases
+    from .events import eval_lift_pressure
+
+    norm = normalize_stock_code(code)
+    if norm is None:
+        return Response({'detail': '股票代码须为 6 位数字'}, status=status.HTTP_400_BAD_REQUEST)
+    as_of = expected_latest_date() or timezone.localdate()
+    meta = {
+        'source': '东方财富数据中心 限售股解禁（RPT_LIFT_STAGE），本站每日 18:00 刷新',
+        'data_as_of': as_of.isoformat(),
+        'disclaimer': '解禁日程为已公开排期，可能因追加承诺等推迟；事件提示不构成买卖建议。',
+    }
+    releases, calendar = load_upcoming_releases(norm, as_of)
+    if releases is None:
+        return Response({'available': False, 'code': norm, 'as_of': as_of.isoformat(),
+                         'message': '解禁日程尚未接入', 'upcoming': [], 'lift': None, 'meta': meta})
+    spec = registry.DIMENSION_MAP['lift_pressure']
+    cfg = DetectorDimConfig.objects.filter(key='lift_pressure').first()
+    params = {**spec['defaults'], **((cfg.params or {}) if cfg else {})}
+    res = eval_lift_pressure({'as_of': as_of.isoformat(), 'lift_as_of': as_of.isoformat(),
+                              'restricted_releases': releases, 'lift_calendar': calendar}, params)
+    upcoming = [
+        {'date': r.free_date.isoformat(), 'share_type': r.share_type, 'ratio': r.free_ratio,
+         'free_shares': r.free_shares, 'lift_market_cap': r.lift_market_cap}
+        for r in StockRestrictedRelease.objects.filter(
+            code=norm, free_date__gt=as_of,
+            free_date__lte=as_of + timedelta(days=_STOCK_EVENTS_AHEAD_DAYS),
+        ).order_by('free_date', 'share_type')
+    ]
+    return Response({
+        'available': True,
+        'code': norm,
+        'as_of': as_of.isoformat(),
+        'lift': {
+            'triggered': res.get('direction') == 'down',
+            'note': res.get('note', ''),
+            **(res.get('annotation') or {}),
+        },
+        'upcoming': upcoming,
+        'meta': meta,
     })

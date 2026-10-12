@@ -109,8 +109,9 @@ class ConfigApiTests(TestCase):
         self.assertEqual(rules['groups']['price'], {'role': 'direction',
                                                     'dims': ['vol_compress', 'ma_relation']})
         self.assertEqual(rules['groups']['volume']['role'], 'strength')
-        # 停用维度不进计票分组
-        self.assertNotIn('vp_corr', rules['groups']['volume']['dims'])
+        # 只展示/只作否决的维度（det-v2）不进计票分组
+        self.assertNotIn('margin_crowding', rules['groups']['leverage']['dims'])
+        self.assertNotIn('event', rules['groups'])
 
     @override_settings(DETECTOR_SECTOR_SIGNAL_CAP=0)
     def test_cap_follows_settings(self):
@@ -121,8 +122,10 @@ class ConfigApiTests(TestCase):
         dims = {d['key']: d for d in self.client.get(reverse('detector-config')).json()['dims']}
         self.assertEqual(dims['big_order_net']['targets'], ['industry', 'concept'])
         self.assertEqual(dims['margin_north']['vote_codes'], ['sh000300'])
-        self.assertEqual((dims['vp_corr']['group'], dims['vp_corr']['role']), ('volume', 'strength'))
-        self.assertEqual(dims['vp_corr']['disabled_kind'], 'candidate')
+        self.assertNotIn('vp_corr', dims)
+        self.assertEqual((dims['margin_crowding']['group'], dims['margin_crowding']['vote_enabled']),
+                         ('leverage', False))
+        self.assertEqual(dims['margin_crowding']['disabled_kind'], '')
         self.assertEqual(dims['order_imbalance']['disabled_kind'], 'no_source')
         self.assertEqual(dims['ma_relation']['disabled_kind'], '')
         self.assertEqual(dims['ma_relation']['params']['z_lo'], 1.282)

@@ -433,7 +433,7 @@ class SchedulerStepIsolationTests(TestCase):
         from stocks.scheduler import register_jobs
         sched = register_jobs(BackgroundScheduler())
         trigger = str(sched.get_job('detector_scan').trigger)
-        self.assertIn("hour='17-18'", trigger)
+        self.assertIn("hour='17-23'", trigger)
         self.assertIn("minute='15,45'", trigger)
 
 

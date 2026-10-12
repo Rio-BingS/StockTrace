@@ -28,6 +28,9 @@ params 约定（阈值一律用「自身分布单位」表达，#1）：
 - （条目级字段，不在 params 里）group / role：投票信息组与角色（#4）。方向组
   （price/funds/leverage）决定 up/down，量能强度组（volume）只在活跃度抬升时
   确认、不定方向不否决；未声明的维度自成方向组（signals.dim_group）；
+- （条目级字段）vote_enabled：缺省 True。False 表示维度照常评估、结果写进信号
+  明细与附注，但不参加投票、不计入可用信息组（det-v2：融资拥挤度只作否决/升级，
+  解禁事件与日内追买只作提示）；
 - compress_pct  波动率压缩专用：当前宽度 ≤ 自身历史 compress_pct 分位才算压缩。
   （旧参数 drift_z=2.13 的注释称「≈自由度 4 的双侧 10%」，但 t 的分母取自按
   「标准差小」筛出的同一窗口，压缩条件下实际假阳约 28%，已改为 σ60 的 z，#3/#17。）
@@ -40,7 +43,8 @@ params 约定（阈值一律用「自身分布单位」表达，#1）：
 from __future__ import annotations
 
 from . import dimensions as _dims
-from . import dimensions_extra as _dims_extra
+from . import events as _events
+from . import xsection as _xsection
 # 噪声闸门默认值（各价量维度共用，见模块 docstring），数值在 constants.py
 from .constants import (
     COMPRESS_PCT_DEFAULT,
@@ -143,6 +147,71 @@ DIMENSIONS = [
         'evaluate': _dims.eval_ma_relation,
     },
     {
+        # det-v2（第八轮 §3、§5）：融资拥挤度。只作修饰，不投票——向上信号在 MB5
+        # 分位 ≥ veto_pct 时否决；向下信号在 MB5 或 DTC 分位 ≥ escalate_pct 时严重度
+        # 升一档。MB5 分位在 T−1 全市场 A 股两融标的截面里取（回测是沪深300+中证500，
+        # 两融明细是全市场落库，截面放宽为全部两融标的）；DTC 在成分池（沪深300+
+        # 中证500）当日日线里取分位，样本 ≥ min_pool 时参与（scan → xsection）。不能用固定阈值：MB5 绝对
+        # 水平 2019–2026 年在 0.18–0.39 之间漂移
+        'key': 'margin_crowding',
+        'group': 'leverage',
+        'role': 'modifier',
+        'vote_enabled': False,
+        'name': '融资拥挤度',
+        'targets': ('stock',),
+        'enabled': True,
+        'note': (
+            'MB5 = 近 5 个交易日（T−5..T−1）融资买入额合计 ÷ T−1 融资余额，'
+            'DTC = T−1 融资余额 ÷ T−20..T−1 日均成交额。MB5 在 T−1 全市场 A 股两融标的截面'
+            '（交易所明细全量）里取分位；DTC 在成分池（沪深300+中证500）里取分位，有效样本 ≥200 只时参与，'
+            '否则向下升级只看 MB5。'
+            '向上信号 MB5 分位 ≥0.70 时否决（第八轮：60 日保留集 +3.99pp，6/6 段，q=0.021）；'
+            '向下信号 MB5 或 DTC 分位 ≥0.70 时严重度升一档、不加票（20 日 +2.20pp，6/6，q=0.007）。'
+            '非两融标的或融资余额 ≤0 时不否决、不升级。两融为交易所 T+1 披露，只用 T−1 及以前。'
+        ),
+        'defaults': {'mb5_days': 5, 'dtc_days': 20, 'dtc_min_days': 15,
+                     'veto_pct': 0.70, 'escalate_pct': 0.70, 'min_pool': 200},
+        'evaluate': _xsection.eval_margin_crowding,
+    },
+    {
+        # det-v2（第九轮 E2）：限售解禁事件。事件组、方向向下，只作提示不投票
+        'key': 'lift_pressure',
+        'group': 'event',
+        'role': 'event',
+        'vote_enabled': False,
+        'name': '限售解禁',
+        'targets': ('stock',),
+        'enabled': True,
+        'note': (
+            '扫描日 T 之后 20 个交易日内有限售股解禁、且合计占解禁前流通股 ≥1% 时提示（东财解禁日程）；'
+            '分值 = −clip(25+25·log2(R/1%), 25, 100)，解禁日当天起失效。'
+            '第九轮：解禁前 20 日跑输同行业随机股 2.03pp（6/6 检验期，BH q=0.0065），解禁后不再跑输。'
+            '只在信号卡片与个股页提示，不参与投票。'
+        ),
+        'defaults': {'horizon_days': 20, 'min_ratio': 0.01},
+        'evaluate': _events.eval_lift_pressure,
+    },
+    {
+        # det-v2（第八轮 §4）：日内追买过热。截面反转因子，对现有信号无增量 →
+        # 只展示标签，不投票、不改信号
+        'key': 'intraday_reversal',
+        'group': 'price',
+        'role': 'display',
+        'vote_enabled': False,
+        'name': '日内追买过热',
+        'targets': ('stock',),
+        'enabled': True,
+        'note': (
+            'ID20 = 近 20 个交易日（T−19..T）每日 ln(收盘/开盘) 之和（至少 15 个有效日），'
+            '在成分池（沪深300+中证500）当日日线里取分位（有效样本 <200 只时不取分位、不打标签），'
+            '≥0.80 时标「日内追买过热」。'
+            '第八轮：截面 rank IC −0.043/−0.049（20/60 日，6/6 段，q=0.009），'
+            '但对现有向下信号无增量，所以只展示、不投票。'
+        ),
+        'defaults': {'window': 20, 'min_valid': 15, 'tag_pct': 0.80, 'min_pool': 200},
+        'evaluate': _xsection.eval_intraday_reversal,
+    },
+    {
         # 数据诚信说明：以下两个维度是任务要求中列出、但本站现有数据源
         # 无法真实计算的，v1 显式停用并在 /detector/config 与前端展示原因。
         # 绝不用代理值或合成数值冒充（CLAUDE.md 红线 #1）。
@@ -167,27 +236,6 @@ DIMENSIONS = [
         ),
         'defaults': {},
         'evaluate': None,
-    },
-    {
-        # 候选维度（00_plan 阶段 4）：回测证明相对随机基线有超额前不启用。
-        'key': 'vp_corr',
-        # 投票分组（#4）：判 up/down 依据的是「放量领先涨跌」，方向信息其实来自价格，
-        # 量能本身不定方向；按量能强度组处理更保守（只在 up=领先放量时确认，不定
-        # 方向、不否决）。默认停用，启用前须先用回测确认
-        'group': 'volume',
-        'role': 'strength',
-        'name': '量价相关性（量能领先）',
-        'targets': ('index', 'stock'),
-        'enabled': False,
-        'disabled_reason': '候选维度：离线回测未证明相对随机基线有稳定超额，默认停用（见 DET_NOTES_new-dims）',
-        'note': (
-            '昨日异常量能与今日涨跌幅的20日秩相关（z 值）：放量后次日倾向上涨=量先于价。'
-            '量价同步不弱于领先、或近10日价格已走出 1.5σ 时不投票。'
-        ),
-        'defaults': {'window': 20, 'vol_base': 10, 'price_days': 10, 'price_z_max': 1.5,
-                     'sigma_window': 40, 'sync_margin': 0.0,
-                     'mild': 2.0, 'min': 1.64, 'max': 6.0, **_NOISE},
-        'evaluate': _dims_extra.eval_vp_corr,
     },
 ]
 

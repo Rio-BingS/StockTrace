@@ -14,10 +14,11 @@
 
 from __future__ import annotations
 
+import logging
 import math
 from datetime import date as _date, timedelta
 
-from ..models import DailyQuote, MarketDailySnapshot
+from ..models import DailyQuote, MarketDailySnapshot, StockMarginDaily, StockRestrictedRelease
 # 阈值数值集中在 constants.py（ARC-06），这里保留同名引用，dimensions.X 旧路径照常可用
 from .constants import (
     AXIS_CALENDAR_BUFFER,
@@ -26,6 +27,8 @@ from .constants import (
     CONTEXT_BARS,
     FLOW_RESID_MIN_OBS,
     FLOW_RESID_WINDOW,
+    LIFT_HORIZON_TRADING_DAYS,
+    LIFT_LOOKAHEAD_CALENDAR_DAYS,
     MARGIN_CONTEXT_DAYS,
     MARGIN_VALUE_KEY,
     MARGIN_VOTE_CODES,
@@ -37,7 +40,10 @@ from .constants import (
     SECTOR_LOOKBACK_DAYS,  # noqa: F401  旧路径 dimensions.SECTOR_LOOKBACK_DAYS 保留
     SIGMA_DEFAULTS,
     SPLIT_RATIO_DEFAULT,
+    STOCK_MARGIN_CONTEXT_DAYS,
 )
+
+logger = logging.getLogger(__name__)
 
 # ============================================================
 # 数学小工具（只依赖纯 Python，方便离线单测）
@@ -465,12 +471,17 @@ def build_index_context(code, name):
     return ctx, ''
 
 
-def build_stock_context(stock):
-    """自选股上下文：DailyQuote（本站已拉取的日线），零新增上游请求。
+_FLOAT_FROM_NETWORK = object()
+
+
+def build_stock_context(stock, float_history=_FLOAT_FROM_NETWORK):
+    """个股上下文：DailyQuote（本站已拉取的日线），零新增日线请求。
 
     只用已收盘的日线（DAT-13）：盘中拉到的当日 bar 量价不完整，混进序列会
     让振幅/量比/均线距离按半天数据投票。取最近 CONTEXT_BARS 根（#10），
     本地不足就用现有的，不为补历史额外联网。
+    float_history：成分池个股传入库里缓存的流通股本历史（[(date, 股数)] 或 None），
+    不触网；缺省（自选股）按原逻辑经 float_shares 取（进程内缓存 6 小时）。
     """
     rows = list(
         DailyQuote.objects.filter(stock=stock, is_final=True)
@@ -498,13 +509,83 @@ def build_stock_context(stock):
     # 成交额（元）只用于识别量价基准断层（ALG-13），不参与其他维度
     ctx['amount'] = [it['amount'] for it in items]
     # 逐日流通股本（股）：换手率维度用真实换手率；None 表示股本数据缺失（ALG-13）
-    history = _float_share_history(stock.code)
+    history = (_float_share_history(stock.code) if float_history is _FLOAT_FROM_NETWORK
+               else (float_history or None))
     ctx['float_shares'] = _shares_on(history, ctx['dates'])
     # 送转/新股校正后的量能序列（#15）：供平静闸门的 RVOL/量能 CV 与量比类维度接入
     ctx['volume_adj'], ctx['volume_basis'] = adjusted_volume_series(
         ctx, listing_date=_listing_date(history),
     )
+    # 个股融资明细（det-v2）：只取 T 之前的信用交易日（两融 T+1 披露，扫描日 T 最新是 T−1）
+    ctx['stock_margin'] = load_stock_margin_rows(stock.code, ctx['as_of'])
+    # 限售解禁排期（det-v2）：T 之后已公开的日程；日程表为空（未回补）时为 None
+    ctx['restricted_releases'], ctx['lift_calendar'] = load_upcoming_releases(stock.code, ctx['as_of'])
+    ctx['lift_as_of'] = ctx['as_of']
     return ctx, ''
+
+
+def _trading_days_after(day, n):
+    """day 之后（不含）的 n 个交易日 ISO 串；日历未知的工作日按交易日计（只用于提示窗口）。"""
+    from ..trading_calendar import is_trading_day
+
+    out, cur = [], day
+    for _ in range(n * 3 + 30):
+        cur += timedelta(days=1)
+        try:
+            flag = is_trading_day(cur)
+        except Exception:  # noqa: BLE001 边界：日历异常按工作日近似，只影响提示窗口边界
+            logger.warning("解禁窗口交易日判定失败，按工作日近似", exc_info=True)
+            flag = None
+        if flag is None:
+            flag = cur.weekday() < 5
+        if flag:
+            out.append(cur.isoformat())
+            if len(out) == n:
+                break
+    return out
+
+
+def load_upcoming_releases(code, as_of, horizon=LIFT_HORIZON_TRADING_DAYS):
+    """T（as_of）之后的解禁排期：返回 (按日合并的行, T 之后 horizon 个交易日)。
+
+    行：[{'date', 'ratio', 'types'}]，ratio 为同日各类解禁占解禁前流通股比例之和。
+    只查解禁日 > T 的排期：解禁日当天起事件失效。日程表整体为空（尚未回补）时
+    返回 (None, [])，维度如实不可用；该股窗口内无排期时返回 ([], [])，不查日历。
+    """
+    if isinstance(as_of, str):
+        as_of = _date.fromisoformat(as_of)
+    if not StockRestrictedRelease.objects.exists():
+        return None, []
+    rows = list(
+        StockRestrictedRelease.objects.filter(
+            code=code, free_date__gt=as_of,
+            free_date__lte=as_of + timedelta(days=LIFT_LOOKAHEAD_CALENDAR_DAYS),
+        ).order_by('free_date').values_list('free_date', 'free_ratio', 'share_type')
+    )
+    if not rows:
+        return [], []
+    by_day = {}
+    for day, ratio, share_type in rows:
+        item = by_day.setdefault(day.isoformat(), {'date': day.isoformat(), 'ratio': 0.0, 'types': []})
+        item['ratio'] += ratio or 0.0
+        if share_type and share_type not in item['types']:
+            item['types'].append(share_type)
+    return list(by_day.values()), _trading_days_after(as_of, horizon)
+
+
+def load_stock_margin_rows(code, as_of, n=STOCK_MARGIN_CONTEXT_DAYS):
+    """个股融资明细序列：信用交易日 < as_of 的最近 n 行，升序。
+
+    返回 [{'date', 'rz', 'rz_buy'}]（元）；非两融标的或尚未回补时为空列表。
+    只读 as_of 之前（不含）的行：事后重算（信号详情页）也不会混入 T 及以后的数。
+    """
+    if isinstance(as_of, str):
+        as_of = _date.fromisoformat(as_of)
+    rows = list(
+        StockMarginDaily.objects.filter(code=code, trade_date__lt=as_of)
+        .order_by('-trade_date').values_list('trade_date', 'rz', 'rz_buy')[:n]
+    )[::-1]
+    return [{'date': d.isoformat(), 'rz': rz, 'rz_buy': buy} for d, rz, buy in rows]
 
 
 def _float_share_history(code):

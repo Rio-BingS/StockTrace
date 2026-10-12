@@ -30,7 +30,9 @@ DJANGO_DEBUG=true python manage.py test stocks     # 全部测试（调度器自
 DJANGO_DEBUG=true python manage.py validate_market_sources  # 只读上游字段/数据源审计，不写库
 python -m ruff check .                  # lint（ruff.toml：仅 E4/E7/E9/F）
 DJANGO_DEBUG=true python manage.py fetch_stock_data --all # 手动拉自选行情（默认轻量；--days N 分钟线回溯 N 个交易日，上限 5；失败时非零退出）
-DJANGO_DEBUG=true python manage.py run_detector_scan     # 手动触发探测器扫描（幂等；非交易日/收盘前如实跳过）
+DJANGO_DEBUG=true python manage.py run_detector_scan     # 手动触发探测器扫描（幂等；非交易日/收盘前如实跳过；--pool auto|force|skip）
+DJANGO_DEBUG=true python manage.py refresh_index_constituents  # 刷新成分池（沪深300+中证500，失败保留旧值）
+DJANGO_DEBUG=true python manage.py backfill_pool_quotes --status  # 成分池日线回补进度；去掉 --status 即限速回补（可续跑）
 
 cd frontend
 npm run dev        # 5173，/api 代理到 localhost:8000（VITE_API_TARGET 可覆盖）
@@ -45,6 +47,7 @@ npm run lint && npm run build   # eslint（vue essential 档）+ 产物到 dist/
 | 自选行情抓取（多源降级） | `backend/stocks/datasources/` 包（四个上游适配器 + `chain` 优先级/failover：EastMoney→Sina→BaoStock→Tencent）；`ingest.py`（日 K/分钟 bar 入库、复权检测、高低点时间）；`jobs.py`（单股/批量拉取与定时入口）；`search.py`（代码/名称搜索）；`trading_calendar.py`（全项目唯一交易日历）。原 `services.py` 兼容外观已删除，按定义模块导入与 patch |
 | 后台拉取线程 | `backend/stocks/tasks.py`（异步 + fetch-status 轮询） |
 | 行情中心 | `backend/stocks/market/` 包：`_cache`（TTL+交易日历保鲜）/`_sources`（冷却+failover）/`_query`/`periods`（**统一区间解析**）+ `indices`/`flows`/`sectors`/`etf`/`etf_flow`/`institutions`/`sentiment`（涨停池情绪/沪深两融汇总）/`margin_stock`（个股两融明细）/`snapshots`（日度快照+自检）/`holders`（定报持有人结构）/`overview` |
+| 成分池（沪深300+中证500） | `backend/stocks/pool/` 包：`constituents`（`IndexConstituent` 当前成分，每周一刷新，失败保留旧值）/`collector`（单线程限速队列 + `PoolStockState` 游标：收盘后增量优先、其次回补与股本缓存；日线写 `DailyQuote`，外键指向 `is_active=False` 的 Stock 行） |
 | 探测器（一级模块） | `backend/stocks/detector/` 包：`registry`（维度注册表，单一事实来源）/`dimensions`（维度计算+序列构建）/`calm`（平静判定闸门）/`signals`（同向投票+周期+分级）/`review`（5日回看→权重/阈值有界迭代）/`scan`（编排+降级留痕）/`views`；平静盘面监测渐进微变，17:15 日度扫描 |
 | 调度器 | `backend/stocks/scheduler.py`（APScheduler + 文件锁单实例） |
 | REST + 页面 | `backend/stocks/views/` 包（`watchlist`/`market`/`alerts`/`presets`/`groups`）、`urls.py`；共用工具 `stocks/common/`；前端 `frontend/src/views/` `components/` |
@@ -73,6 +76,11 @@ npm run lint && npm run build   # eslint（vue essential 档）+ 产物到 dist/
 - **数据诚信**：维度只用真实上游/本站快照推导；`委比与挂单结构`（无盘口数据源）、`板块内分化`（快照缺成分股横截面）两维度在 `registry.py` 显式 `enabled=False` 并写明原因，**不得用代理值冒充**，接入数据源后再开启。
 - **换手率分位**：个股＝真实换手率（成交量 / 新浪 getAmountBySymbol 流通股本，`datasources/float_shares.py`）的 60 日分位；股本取不到时退回成交量分位，note 标「股本数据缺失」，量价断层时暂停（ALG-13）；指数为成交量分位的活跃度代理。
 - **融资余额**：交易所 T+1 披露，`MarketDailySnapshot` 新 kind `margin` 由探测器扫描落库（只写沪深同日齐全行）；北向自 2024-08 停止逐日披露，维度如实仅融资余额口径。
+- **定位：趋势延续信号**：第七轮验证信号出现在 ZigZag 波段转向之后，文案与 PR 一律称「趋势延续」，不写「早期迹象/预判转折」；`trend` 附注只用信号日及以前的日线。**向上信号未经验证**（20/60 日超额不显著）：标「未经验证」、排在向下信号之后，不得在文档或界面暗示其有效。
+- **维度角色（det-v2）**：`registry` 的 `role`/`vote_enabled` 区分投票维度与非投票维度——`margin_crowding`（leverage 组，modifier：MB5 分位 ≥0.70 否决向上、MB5 或 DTC 分位 ≥0.70 向下升一档，不加票）、`lift_pressure`（event，只提示）、`intraday_reversal`（ID20，display，只打标签）。`vp_corr` 已删除（迁移 0025 清配置行），不要恢复。
+- **截面分位的参照池**：MB5 在 `StockMarginDaily` T−5..T−1 的全市场 A 股两融标的里取分位（`xsection.load_mb5_universe`；两所当日都落齐才算一天），比回测（沪深300+中证500）宽，是有意记录的偏离；DTC/ID20 在**成分池**（`IndexConstituent` 沪深300+中证500，当日日线已入库的个股）里取分位（`xsection.PoolReference`，池外自选股按插入池子分布的平均秩），样本 < `min_pool`（默认 200）时不给分位，成分池未扫（pending/off）时 DTC 缺席、向下升级只看 MB5。**不要退回在自选股池（~20 只）里取分位。**
+- **成分池扫描（source=pool）**：扫描宇宙 = 5 个指数 + 自选 + 板块 + 成分池（自选以外的成分股）。只扫当日日线已入库的成分股，其余跳过并记 `DetectorRun.pool_coverage`（不逐只写 degraded）；分块两遍（`DETECTOR_POOL_CHUNK`），第一遍只算 DTC/ID20 原始值、第二遍逐块重建评估，峰值内存与池子大小无关。完整度 < `DETECTOR_POOL_READY_RATIO`（0.95）时 17:15 不扫成分池（`pool_status=pending`），调度器 19:15–23:45 按完整度补跑、23:45 强制；pending 不覆盖同日 done。成分池信号每日按 严重度→向下优先→强度 只推前 `DETECTOR_POOL_SIGNAL_CAP`（20）条，截掉的按「本轮无信号」处理。同一只股票既在自选又在成分池时记 `watchlist`。成分池个股的流通股本只读 `PoolStockState` 缓存，扫描时不触网。
+- **个股融资明细 / 解禁日程落库**：`StockMarginDaily`（交易所两融明细全量，元；深市偿还额由前日余额推导并标记）、`StockRestrictedRelease`（东财 RPT_LIFT_STAGE）；上线需 `backfill_stock_margin`、`backfill_restricted_release` 回补，日常由 09:30 / 18:00 任务维护。
 - **平静参数不参与自动迭代**：review 只调维度权重 [0.5, 2.0] 与投票门槛 min（[0.5×, 2×] 默认值）；调平静闸门会让扫描宇宙随命中率漂移（正反馈失控），只能人工改。
 - 信号 `trade_date` 跟随数据自身日期（`ctx.as_of`），上游晚到不冒充扫描当天；扫描幂等（信号/run 行按日期覆盖），回看只处理 `review_hit` 为 null 的行。
 
@@ -80,7 +88,7 @@ npm run lint && npm run build   # eslint（vue essential 档）+ 产物到 dist/
 
 1. **数据诚信**：外部源失败→报 unavailable/stale 并降级下一源，**绝不合成数值；未知= `null`，不是 0**；没有历史数据的功能明确标"待积累"，不做伪造。
 2. **安全模型**：DRF AllowAny + 无 CSRF，访问控制全靠 Nginx Basic Auth（settings.py 有红线注释）。8000/8001 绝不对公网暴露；systemd `User=www` 下 **Gunicorn 禁止设 user=**。
-3. **1H2G 红线**：Gunicorn 1 worker 2 线程；不要加 worker；自选 ≤ ~20 只；前端 60s 轮询。
+3. **1H2G 红线**：Gunicorn 1 worker 2 线程；不要加 worker；自选 ≤ ~20 只（仍然成立：自选有盘中分钟线与 5 分钟轮询，按股串行）；前端 60s 轮询。成分池（约 800 只）不占自选名额，只拉收盘日 K、只走 `pool_quotes` 单线程慢速队列（默认 20 秒一只，全天慢慢拉，回补命令与调度任务共用锁，绝不并发）——**不要为了「快点扫完」改成并发/批量突发请求**，也不要把成分池并进自选的盘中抓取。
 4. **发版 = git 标签**：验证通过后 `git tag -a vX.Y.Z`（SemVer；当前版本以 `git describe --tags` 为准，文档不写死版本号）+ `git push --follow-tags`；不再维护目录快照。
 5. **密钥绝不入库**：`.env`、`地址.md`、db、scheduler.lock 已 gitignore；推送前扫描。
 6. **本地环境坑**：本机代理对 `push2his.eastmoney.com` 的 TLS 间歇性干扰——资金流抓取已内置 https 退避重试 + http 兜底（故意不走 akshare 的同源封装）；2026-09-07 诊断确认 VPS（境外）对该域名同样整体不可达，fflow 已加 push2delay 镜像兜底（仅当日一根）。akshare 版本已在 requirements.txt 钉死，勿随手升级；8000 端口被用户其他服务占用，后端用 8001。
