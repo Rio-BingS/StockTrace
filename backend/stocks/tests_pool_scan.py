@@ -207,3 +207,48 @@ class TruncatePoolSignalsTests(TestCase):
         kept, _ = scan.truncate_pool_signals(collected, 1)
         self.assertIn('stock:c', [k for k, _s, _d in kept])  # 同为 high：向下优先
         self.assertEqual(scan.truncate_pool_signals(collected, 0)[1], [])
+
+
+class PoolRescanSchedulerTests(TestCase):
+    """17:15 成分池日线未齐 → 后续重试点按完整度补跑，截止点强制按现有数据扫。"""
+
+    def _at(self, hh, mm):
+        from datetime import datetime
+        from zoneinfo import ZoneInfo
+        return datetime(_TODAY.year, _TODAY.month, _TODAY.day, hh, mm, tzinfo=ZoneInfo('Asia/Shanghai'))
+
+    def _job(self, hh, mm, plan_status):
+        from stocks import scheduler
+
+        plan = {'status': plan_status, 'codes': [], 'names': {},
+                'coverage': {'fresh': 400, 'expected': 780}}
+        with patch('stocks.trading_calendar.is_trading_day', return_value=True), \
+                patch('stocks.scheduler.timezone.localtime', return_value=self._at(hh, mm)), \
+                patch('stocks.detector.scan.plan_pool', return_value=plan), \
+                patch('stocks.detector.scan.run_scan') as run_scan:
+            scheduler._detector_scan_job()
+        return run_scan
+
+    def test_done_run_is_not_rescanned(self):
+        DetectorRun.objects.create(trade_date=_TODAY, status='ok', pool_status='done')
+        self.assertFalse(self._job(20, 15, 'done').called)
+
+    def test_pending_waits_then_rescans_when_ready(self):
+        DetectorRun.objects.create(trade_date=_TODAY, status='ok', pool_status='pending')
+        self.assertFalse(self._job(19, 15, 'pending').called)
+        run_scan = self._job(20, 15, 'done')
+        run_scan.assert_called_once_with(pool='auto')
+
+    @override_settings(DETECTOR_POOL_DEADLINE='23:45')
+    def test_deadline_forces_scan(self):
+        DetectorRun.objects.create(trade_date=_TODAY, status='ok', pool_status='pending')
+        with self.assertLogs('stocks.scheduler', level='WARNING'):
+            run_scan = self._job(23, 45, 'pending')
+        run_scan.assert_called_once_with(pool='force')
+
+    def test_bad_deadline_falls_back(self):
+        from stocks import scheduler
+        from datetime import time as dt_time
+
+        with override_settings(DETECTOR_POOL_DEADLINE='late'), self.assertLogs('stocks.scheduler', 'WARNING'):
+            self.assertEqual(scheduler._pool_deadline(), dt_time(23, 45))

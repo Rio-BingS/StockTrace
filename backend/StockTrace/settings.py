@@ -120,6 +120,8 @@ DETECTOR_POOL_ENABLED = os.environ.get('DETECTOR_POOL_ENABLED', '1').strip().low
 DETECTOR_POOL_SIGNAL_CAP = int(os.environ.get('DETECTOR_POOL_SIGNAL_CAP', '20'))
 DETECTOR_POOL_READY_RATIO = float(os.environ.get('DETECTOR_POOL_READY_RATIO', '0.95'))
 DETECTOR_POOL_CHUNK = int(os.environ.get('DETECTOR_POOL_CHUNK', '100'))
+# 成分池补跑截止（北京时间 HH:MM）：17:15 时成分池日线未齐的，此后每 30 分钟检查，到点按现有数据扫
+DETECTOR_POOL_DEADLINE = os.environ.get('DETECTOR_POOL_DEADLINE', '23:45')
 # 成分池（沪深300+中证500）限速日线采集（pool/collector.py）：单线程队列，
 # 每 POOL_FETCH_INTERVAL_SECONDS 秒最多拉一只，全天慢慢拉，绝不并发（1H2G 红线）
 POOL_FETCH_ENABLED = os.environ.get('POOL_FETCH_ENABLED', '1').strip().lower() not in ('0', 'false', 'no', 'off')
