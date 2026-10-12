@@ -25,6 +25,13 @@
   表示该维度是本次信号中计票的组代表。归因请只算 counted 的维度，强度组的
   'up' 是「活跃度抬升」不是价格方向，不能按 direction==信号方向 归因；
 - vote(dim_results) 是纯函数，回测/离线校准可直接调用。
+
+修饰维度（det-v2，vote_enabled=False 的维度在评估结果里可带）：
+- 'veto': {'direction', 'reason'}——投票出了同向信号时否决它（不落库，scan 记进
+  DetectorRun.vetoed）；
+- 'escalate': {'direction', 'reason'}——同向信号严重度升一档（高为顶），不加票；
+- 'annotation': {...}——原样写进信号附注 annotations[维度 key]，只展示。
+修饰只作用于已经出了的信号，不会凭空产生信号，也不改变方向与周期。
 """
 
 from __future__ import annotations
@@ -134,6 +141,60 @@ def _severity(score, cycles, vote_count, groups_available=None):
     if cycles >= ACTIVE_MIN_CYCLES or score >= SEVERITY_RULES['medium_score']:
         return DetectorSignal.SEVERITY_MEDIUM
     return DetectorSignal.SEVERITY_LOW
+
+
+_SEVERITY_ORDER = (DetectorSignal.SEVERITY_LOW, DetectorSignal.SEVERITY_MEDIUM, DetectorSignal.SEVERITY_HIGH)
+
+
+def escalate_severity(severity):
+    """严重度升一档：低→中→高，高保持不变。"""
+    i = _SEVERITY_ORDER.index(severity) if severity in _SEVERITY_ORDER else 0
+    return _SEVERITY_ORDER[min(i + 1, len(_SEVERITY_ORDER) - 1)]
+
+
+def apply_modifiers(signal_data, dim_results):
+    """把修饰维度的否决/升级/附注作用到已出的信号上（纯函数，原地改 signal_data）。
+
+    返回否决记录 dict（信号被否决）或 None。附注无论是否命中都写进
+    signal_data['annotations']，让信号详情能看到分位等依据。
+    """
+    direction = signal_data['direction']
+    annotations = dict(signal_data.get('annotations') or {})
+    vetoed = None
+    for key, res in dim_results.items():
+        if not res.get('available'):
+            continue
+        note = dict(res.get('annotation') or {})
+        veto = res.get('veto') or {}
+        esc = res.get('escalate') or {}
+        if veto.get('direction') == direction and vetoed is None:
+            vetoed = {'dim': key, 'reason': veto.get('reason', '')}
+            note['vetoed'] = True
+            note['veto_reason'] = veto.get('reason', '')
+        if esc.get('direction') == direction:
+            before = signal_data['severity']
+            signal_data['severity'] = escalate_severity(before)
+            note['escalated'] = True
+            note['escalate_reason'] = esc.get('reason', '')
+            note['severity_before'] = before
+        if note:
+            annotations[key] = note
+    signal_data['annotations'] = annotations
+    if vetoed is None:
+        return None
+    return {
+        'target_kind': signal_data['target_kind'],
+        'target_code': signal_data['target_code'],
+        'target_name': signal_data['target_name'],
+        'trade_date': str(signal_data['trade_date']),
+        'direction': direction,
+        'score': signal_data['score'],
+        'cycles': signal_data['cycles'],
+        'severity': signal_data['severity'],
+        'dim': vetoed['dim'],
+        'reason': vetoed['reason'],
+        'annotations': annotations,
+    }
 
 
 def dim_group(key, cfg=None):
@@ -400,7 +461,20 @@ def evaluate_target(ctx, configs, cycle_counter=None, calendar=None):
         'strength': round(score * result['support'], 2),
         'vote': result,
     }
+    # 修饰维度（det-v2）：否决 → 当日不出信号，否决记录挂在 dim_results 上供 scan 留痕
+    vetoed = apply_modifiers(signal_data, dim_results)
+    if vetoed is not None:
+        dim_results[vetoed['dim']]['vetoed_signal'] = vetoed
+        return None, dim_results
     return signal_data, dim_results
+
+
+def vetoed_record(dim_results):
+    """evaluate_target 否决了信号时返回否决记录，否则 None（scan 写 DetectorRun.vetoed 用）。"""
+    for res in dim_results.values():
+        if res.get('vetoed_signal'):
+            return res['vetoed_signal']
+    return None
 
 
 def dimensions_payload(dim_results):
@@ -443,5 +517,6 @@ def upsert_signal(signal_data, dim_results):
             'severity': signal_data['severity'],
             'status': signal_data['status'],
             'dimensions': dimensions_payload(dim_results),
+            'annotations': signal_data.get('annotations') or {},
         },
     )

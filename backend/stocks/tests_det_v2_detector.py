@@ -97,3 +97,67 @@ class NonVotingDimTests(TestCase):
         extra = configs + [{'key': 'x_display', 'targets': ('stock',), 'evaluate': lambda c, p: None,
                             'weight': 1.0, 'params': {}, 'enabled': True, 'vote_enabled': False}]
         self.assertEqual(scan.null_fire_probability(extra, 'stock'), base)
+
+
+def _signal_data(direction='up', severity='low'):
+    return {'target_kind': 'stock', 'target_code': '600000', 'target_name': '浦发银行',
+            'trade_date': '2026-10-09', 'direction': direction, 'cycles': 2, 'score': 50.0,
+            'severity': severity}
+
+
+class ModifierTests(TestCase):
+    """修饰维度：否决只作用于同向已出信号；升级只升一档、不加票；附注照写。"""
+
+    def test_veto_matching_direction(self):
+        sd = _signal_data('up')
+        dims = {'margin_crowding': {'available': True, 'veto': {'direction': 'up', 'reason': '融资拥挤'},
+                                    'annotation': {'mb5_pct': 0.9}}}
+        rec = signals.apply_modifiers(sd, dims)
+        self.assertEqual((rec['dim'], rec['reason'], rec['direction']), ('margin_crowding', '融资拥挤', 'up'))
+        self.assertTrue(sd['annotations']['margin_crowding']['vetoed'])
+
+    def test_veto_other_direction_only_annotates(self):
+        sd = _signal_data('down')
+        dims = {'margin_crowding': {'available': True, 'veto': {'direction': 'up', 'reason': 'x'},
+                                    'annotation': {'mb5_pct': 0.9}}}
+        self.assertIsNone(signals.apply_modifiers(sd, dims))
+        self.assertEqual(sd['annotations'], {'margin_crowding': {'mb5_pct': 0.9}})
+        self.assertEqual(sd['severity'], 'low')
+
+    def test_escalate_one_level_and_caps_at_high(self):
+        for before, after in (('low', 'medium'), ('medium', 'high'), ('high', 'high')):
+            sd = _signal_data('down', before)
+            signals.apply_modifiers(sd, {'margin_crowding': {
+                'available': True, 'escalate': {'direction': 'down', 'reason': 'MB5 高'}}})
+            self.assertEqual(sd['severity'], after)
+            self.assertEqual(sd['annotations']['margin_crowding']['severity_before'], before)
+
+    def test_unavailable_modifier_ignored(self):
+        sd = _signal_data('up')
+        self.assertIsNone(signals.apply_modifiers(sd, {'m': {'available': False,
+                                                            'veto': {'direction': 'up'}}}))
+        self.assertEqual(sd['annotations'], {})
+
+
+class VetoedRunRecordTests(TestCase):
+    def setUp(self):
+        from unittest.mock import patch
+
+        p = patch('stocks.detector.views.expected_latest_date', return_value=date(2026, 10, 9))
+        p.start()
+        self.addCleanup(p.stop)
+
+    def test_vetoed_signals_listed_with_filters(self):
+        from .models import DetectorRun
+
+        DetectorRun.objects.create(trade_date=date(2026, 10, 9), vetoed=[
+            {'target_kind': 'stock', 'target_code': '600000', 'direction': 'up', 'reason': '融资拥挤'},
+            {'target_kind': 'index', 'target_code': 'sh000300', 'direction': 'up', 'reason': 'x'},
+        ])
+        r = self.client.get('/api/detector/signals/', {'target_kind': 'stock'})
+        self.assertEqual(r.status_code, 200)
+        self.assertEqual([v['target_code'] for v in r.json()['vetoed']], ['600000'])
+        r = self.client.get('/api/detector/signals/', {'direction': 'down'})
+        self.assertEqual(r.json()['vetoed'], [])
+        # 历史视图不附带否决记录
+        self.assertEqual(self.client.get('/api/detector/signals/', {'all_dates': '1'}).json()['vetoed'], [])

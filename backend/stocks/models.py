@@ -579,6 +579,9 @@ class DetectorSignal(models.Model):
     # 每个维度的评估明细：{key: {name, value, direction, weight, available, note}}；
     # 用 JSON 而非关联表：单日单对象的维度快照是只读整体，无需单独查询/索引
     dimensions = models.JSONField('维度明细', default=dict, blank=True)
+    # 信号附注（det-v2）：不参与投票的提示与修饰——趋势状态、融资拥挤（分位、
+    # 严重度升级原因）、解禁事件、日内追买过热等。只展示，不影响判定与复盘统计
+    annotations = models.JSONField('信号附注', default=dict, blank=True)
     review_hit = models.BooleanField('回看是否兑现', null=True, blank=True)
     hit_date = models.DateField('兑现日期', null=True, blank=True)
     reviewed_at = models.DateTimeField('回看时间', null=True, blank=True)
@@ -682,6 +685,9 @@ class DetectorRun(models.Model):
     # 本表按 DETECTOR_RUN_RETENTION_DAYS 清理
     adjustments = models.JSONField('权重/阈值调整流水', default=list, blank=True)
     matrix = models.JSONField('板块微变矩阵', default=dict, blank=True)
+    # 当日被否决的信号（det-v2）：如向上信号因融资拥挤被否决，不落 DetectorSignal，
+    # 但对象、分位与原因留在这里供页面展示「已否决」
+    vetoed = models.JSONField('否决记录', default=list, blank=True)
     message = models.CharField('备注', max_length=300, blank=True, default='')
     created_at = models.DateTimeField('创建时间', auto_now_add=True)
     updated_at = models.DateTimeField('更新时间', auto_now=True)

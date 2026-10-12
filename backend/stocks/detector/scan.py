@@ -333,6 +333,7 @@ def run_scan(trade_date=None, calendar=None):
     collected = []  # [(target_key, signal_data, dim_results)]
     cleared = []  # 本轮确定无信号的 (kind, code)；降级对象不在其中
     calm_targets = []  # 参与投票的 (kind, code)，多重检验的分母（#11）
+    vetoed = []  # 被修饰维度否决的信号（det-v2），写进 run.vetoed 供页面展示
 
     for target in targets:
         try:
@@ -388,6 +389,9 @@ def run_scan(trade_date=None, calendar=None):
 
         calm_targets.append((target['kind'], target['code']))
         if signal_data is None:
+            record = signals.vetoed_record(dim_results)
+            if record is not None:
+                vetoed.append(record)
             cleared.append((target['kind'], target['code']))
             continue
         if signal_data.get('cycles_unknown'):
@@ -474,6 +478,7 @@ def run_scan(trade_date=None, calendar=None):
         run.signals_sustained = sustained_count
         run.degraded = degraded[:200]  # 上限防异常日把 run 行撑爆
         run.matrix = matrix
+        run.vetoed = vetoed[:200]
         run.message = '；'.join(message_parts)[:300]
         run.save()
     _cleanup(trade_date)
@@ -494,6 +499,7 @@ def run_scan(trade_date=None, calendar=None):
         'independent_samples': run.independent_samples,
         'degraded_count': len(degraded),
         'adjustments': len(adjustments),
+        'vetoed': len(vetoed),
         # 多重检验报告（#11）：DetectorRun 暂无专门字段，摘要见 run.message
         'multiple_testing': {**mt_stats, 'truncated': len(dropped)},
     }

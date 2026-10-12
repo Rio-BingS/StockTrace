@@ -48,10 +48,10 @@ def _meta_disclaimer():
 
 
 # 信号列表已上线的 JSON 键顺序，接入 common.envelope 时保持不变（ARC-04）
-_SIGNALS_KEY_ORDER = ('meta', 'trade_date', 'latest_run', 'summary', 'pagination', 'items')
+_SIGNALS_KEY_ORDER = ('meta', 'trade_date', 'latest_run', 'summary', 'pagination', 'items', 'vetoed')
 
 # DetectorRun 里的大 JSON 字段：列表/元信息只用标量，读这些字段纯属浪费（PERF-09）
-_HEAVY_RUN_FIELDS = ('matrix', 'degraded', 'adjustments')
+_HEAVY_RUN_FIELDS = ('matrix', 'degraded', 'adjustments', 'vetoed')
 
 
 def _runs_brief():
@@ -101,6 +101,8 @@ def _signal_row(sig):
         'status': sig.status,
         'status_display': sig.get_status_display(),
         'dimensions': sig.dimensions,
+        # 信号附注（det-v2）：趋势状态、融资拥挤、解禁事件、日内追买等只展示的信息
+        'annotations': sig.annotations or {},
         'review_hit': sig.review_hit,
         'hit_date': sig.hit_date,
         'reviewed_at': sig.reviewed_at,
@@ -190,13 +192,29 @@ def detector_signals(request):
         summary['by_direction'][row['direction']] = summary['by_direction'].get(row['direction'], 0) + 1
         summary['by_status'][row['status']] = summary['by_status'].get(row['status'], 0) + 1
 
+    # 当日被否决的信号（det-v2）：只在看最新扫描日时附带，按方向筛选同样生效
+    vetoed = []
+    if not all_dates and latest_run is not None and (trade_date is None or trade_date == latest_run.trade_date):
+        vetoed = _run_vetoed(latest_run.trade_date, request.query_params)
+
     return Response(envelope(
         items, pagination, _meta(latest_run),
         key_order=_SIGNALS_KEY_ORDER,
+        vetoed=vetoed,
         trade_date=trade_date.isoformat() if trade_date else (latest_run.trade_date.isoformat() if latest_run else None),
         latest_run=_run_brief(latest_run) if latest_run else None,
         summary=summary,
     ))
+
+
+def _run_vetoed(trade_date, params):
+    """某扫描日的否决记录；方向/对象类型筛选与信号列表一致。"""
+    rows = DetectorRun.objects.filter(trade_date=trade_date).values_list('vetoed', flat=True).first() or []
+    for field in ('direction', 'target_kind'):
+        value = params.get(field)
+        if value:
+            rows = [r for r in rows if r.get(field) == value]
+    return rows
 
 
 def _run_brief(run):
