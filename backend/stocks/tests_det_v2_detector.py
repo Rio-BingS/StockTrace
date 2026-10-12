@@ -233,12 +233,31 @@ def _pool(n=10, crowded_code='c9', crowded_buy=50):
     return ctxs
 
 
+def _univ(ctxs, days=5):
+    """由合成 ctx 拼出全市场 MB5 截面（load_mb5_universe 的返回形状）。"""
+    from .detector import xsection
+
+    values = {}
+    for c in ctxs:
+        v, _ = xsection.margin_buy_ratio(c, days)
+        if v is not None:
+            values[c['code']] = v
+    return {'dates': [str(d) for d in ctxs[0]['dates'][-(days + 1):-1]], 'values': values}
+
+
+def _attach_mc(ctxs, params=None):
+    from .detector import xsection
+
+    return xsection.attach_cross_section(
+        ctxs, {'margin_crowding': params or _MC_PARAMS}, mb5_universe=_univ(ctxs))
+
+
 class MarginCrowdingDimTests(TestCase):
     def test_pool_percentile_veto_and_escalate(self):
         from .detector import xsection
 
         ctxs = _pool()
-        pools = xsection.attach_cross_section(ctxs, {'margin_crowding': _MC_PARAMS})
+        pools = _attach_mc(ctxs)
         self.assertEqual(pools['mb5'], 10)
         top = xsection.eval_margin_crowding(ctxs[9], _MC_PARAMS)
         self.assertEqual(top['annotation']['mb5_pct'], 1.0)
@@ -255,7 +274,7 @@ class MarginCrowdingDimTests(TestCase):
         from .detector import xsection
 
         ctxs = _pool()
-        xsection.attach_cross_section(ctxs, {'margin_crowding': _MC_PARAMS})
+        _attach_mc(ctxs)
         # c7：MB5 分位 0.8 → 否决；挑 c5（MB5 0.6）但 DTC 分位 0.6 → 不升级；c8 DTC 分位 0.9
         mid = ctxs[5]
         mid['xsec']['dtc_pct'] = 0.75
@@ -264,22 +283,21 @@ class MarginCrowdingDimTests(TestCase):
         self.assertIn('DTC 分位 0.75', res['escalate']['reason'])
 
     def test_percentile_is_pool_relative_not_fixed(self):
-        from .detector import xsection
 
         # 整个股票池同比例放大 MB5：分位不变，否决对象不变
         a, b = _pool(), _pool()
         for c in b:
             for r in c['stock_margin']:
                 r['rz_buy'] *= 10
-        xsection.attach_cross_section(a, {'margin_crowding': _MC_PARAMS})
-        xsection.attach_cross_section(b, {'margin_crowding': _MC_PARAMS})
+        _attach_mc(a)
+        _attach_mc(b)
         self.assertEqual([c['xsec']['mb5_pct'] for c in a], [c['xsec']['mb5_pct'] for c in b])
 
     def test_small_pool_or_no_xsec_is_unavailable(self):
         from .detector import xsection
 
         ctxs = _pool(n=5)
-        xsection.attach_cross_section(ctxs, {'margin_crowding': _MC_PARAMS})
+        _attach_mc(ctxs)
         res = xsection.eval_margin_crowding(ctxs[4], _MC_PARAMS)
         self.assertFalse(res['available'])
         self.assertFalse(xsection.eval_margin_crowding(_mctx('x', [1] * 5, 10), _MC_PARAMS)['available'])
@@ -288,11 +306,127 @@ class MarginCrowdingDimTests(TestCase):
         from .detector import xsection
 
         ctxs = _pool() + [_mctx('nm', [], balance=0)]
-        pools = xsection.attach_cross_section(ctxs, {'margin_crowding': _MC_PARAMS})
+        pools = _attach_mc(ctxs)
         self.assertEqual(pools['mb5'], 10)
         res = xsection.eval_margin_crowding(ctxs[-1], _MC_PARAMS)
         self.assertFalse(res['available'])
         self.assertNotIn('veto', res)
+
+
+class MarginCrowdingMarketUniverseTests(TestCase):
+    """MB5 分位在全市场两融截面里取，而不是在当日扫描的二十来只自选股里取。"""
+
+    _DEFAULT = {'mb5_days': 5, 'dtc_days': 20, 'dtc_min_days': 15,
+                'veto_pct': 0.70, 'escalate_pct': 0.70, 'min_pool': 200}
+
+    def _market(self, n=300):
+        # 全市场 n 只，MB5 = (k+1)/1000，k=0..n−1
+        dates = _mctx('x', [1] * 5, 1000)['dates']
+        return {'dates': dates[-6:-1], 'values': {f'm{k}': (k + 1) / 1000 for k in range(n)}}
+
+    def test_percentile_from_market_not_local_pool(self):
+        from .detector import xsection
+
+        # 本地只有 1 只自选股：池子里它是唯一样本，旧口径分位恒为 1.0
+        ctx = _mctx('m59', [12] * 5, balance=1000)       # MB5 = 0.06，与全市场 m59 一致
+        universe = self._market()
+        pools = xsection.attach_cross_section([ctx], {'margin_crowding': self._DEFAULT},
+                                              mb5_universe=universe)
+        self.assertEqual(pools, {'mb5': 300, 'dtc': 1})
+        self.assertAlmostEqual(ctx['xsec']['mb5_pct'], 60 / 300)
+        res = xsection.eval_margin_crowding(ctx, self._DEFAULT)
+        self.assertTrue(res['available'])
+        self.assertNotIn('veto', res)
+        self.assertEqual(res['annotation']['pool'], 300)
+
+    def test_dtc_skipped_below_min_pool_escalation_uses_mb5_only(self):
+        from .detector import xsection
+
+        ctx = _mctx('m279', [56] * 5, balance=1000)      # MB5 分位 280/300 ≈ 0.93
+        xsection.attach_cross_section([ctx], {'margin_crowding': self._DEFAULT},
+                                      mb5_universe=self._market())
+        self.assertIsNone(ctx['xsec']['dtc_pct'])
+        self.assertIn('DTC 不参与', ctx['xsec']['dtc_reason'])
+        res = xsection.eval_margin_crowding(ctx, self._DEFAULT)
+        self.assertEqual(res['veto']['direction'], 'up')
+        self.assertIn('MB5', res['escalate']['reason'])
+        self.assertNotIn('DTC 分位', res['escalate']['reason'])
+        self.assertIn('向下升级只看 MB5', res['note'])
+
+    def test_market_below_min_pool_unavailable(self):
+        from .detector import xsection
+
+        ctx = _mctx('m5', [1] * 5, balance=1000)
+        xsection.attach_cross_section([ctx], {'margin_crowding': self._DEFAULT},
+                                      mb5_universe=self._market(n=150))
+        res = xsection.eval_margin_crowding(ctx, self._DEFAULT)
+        self.assertFalse(res['available'])
+        self.assertIn('150 只 < 200', res['note'])
+
+    def test_missing_universe_or_window_mismatch_unavailable(self):
+        from .detector import xsection
+
+        ctx = _mctx('m5', [1] * 5, balance=1000)
+        xsection.attach_cross_section([ctx], {'margin_crowding': self._DEFAULT}, mb5_universe=None)
+        self.assertFalse(xsection.eval_margin_crowding(ctx, self._DEFAULT)['available'])
+        stale = self._market()
+        stale['dates'] = ctx['dates'][-7:-2]          # 截面停在 T−2：T−1 明细尚未落齐
+        ctx = _mctx('m5', [1] * 5, balance=1000)
+        xsection.attach_cross_section([ctx], {'margin_crowding': self._DEFAULT}, mb5_universe=stale)
+        res = xsection.eval_margin_crowding(ctx, self._DEFAULT)
+        self.assertFalse(res['available'])
+        self.assertIn('不一致', res['note'])
+
+    def test_stock_outside_market_universe_unavailable(self):
+        from .detector import xsection
+
+        ctx = _mctx('510300', [1] * 5, balance=1000)  # ETF 不在 A 股截面里
+        xsection.attach_cross_section([ctx], {'margin_crowding': self._DEFAULT},
+                                      mb5_universe=self._market())
+        res = xsection.eval_margin_crowding(ctx, self._DEFAULT)
+        self.assertFalse(res['available'])
+        self.assertIn('不在全市场', res['note'])
+
+    def test_registry_min_pool_is_market_sized(self):
+        from .detector import registry
+
+        self.assertGreaterEqual(registry.DIMENSION_MAP['margin_crowding']['defaults']['min_pool'], 200)
+        self.assertGreaterEqual(registry.DIMENSION_MAP['intraday_reversal']['defaults']['min_pool'], 200)
+
+
+class LoadMb5UniverseTests(TestCase):
+    def _rows(self, code, exchange, days, buy=10, rz=1000):
+        StockMarginDaily.objects.bulk_create([
+            StockMarginDaily(code=code, trade_date=d, exchange=exchange, rz=rz, rz_buy=buy)
+            for d in days
+        ])
+
+    def test_window_codes_and_lookahead(self):
+        from .detector import xsection
+
+        base = date(2026, 3, 2)
+        days = [base + timedelta(days=i) for i in range(7)]   # d0..d6；T = d6
+        self._rows('600000', 'sse', days, buy=10)              # d6（T 日）的行不能用
+        self._rows('000001', 'szse', days[:6], buy=20)
+        self._rows('688001', 'sse', days[1:6], buy=30)
+        self._rows('510300', 'sse', days[:6])                  # ETF：剔除
+        self._rows('300001', 'szse', days[2:6])                # 窗口缺一天：剔除
+        self._rows('600001', 'sse', days[:6], rz=0)            # 余额 0：剔除
+        uni = xsection.load_mb5_universe(days[6], 5)
+        self.assertEqual(uni['dates'], [d.isoformat() for d in days[1:6]])
+        self.assertEqual(uni['values'], {'600000': 0.05, '000001': 0.1, '688001': 0.15})
+
+    def test_day_with_one_exchange_missing_not_in_window(self):
+        from .detector import xsection
+
+        base = date(2026, 3, 2)
+        days = [base + timedelta(days=i) for i in range(7)]
+        self._rows('600000', 'sse', days[:6])
+        self._rows('000001', 'szse', days[:5])                 # d5 深市未落库
+        uni = xsection.load_mb5_universe(days[6], 5)
+        # d5 不是完整截面：窗口回退到 d0..d4，与个股 T−5..T−1 对不上，维度会如实不可用
+        self.assertEqual(uni['dates'], [d.isoformat() for d in days[:5]])
+        self.assertIsNone(xsection.load_mb5_universe(days[3], 5))
 
 
 class _AllDaysCalendar:
@@ -323,10 +457,9 @@ class MarginCrowdingSignalTests(TestCase):
         ]
 
     def _ctx(self, pct_code):
-        from .detector import xsection
 
         ctxs = _pool()
-        xsection.attach_cross_section(ctxs, {'margin_crowding': _MC_PARAMS})
+        _attach_mc(ctxs)
         ctx = next(c for c in ctxs if c['code'] == pct_code)
         ctx['name'] = ctx['code']
         return ctx
@@ -363,9 +496,16 @@ class ScanCrossSectionTests(TestCase):
     def test_scan_attaches_xsection_only_when_dim_enabled(self):
         from .detector import scan
 
+        from unittest.mock import patch
+
+        from .detector import xsection
+
         ctxs = _pool()
         cfg = {'key': 'margin_crowding', 'params': dict(_MC_PARAMS), 'enabled': True}
-        self.assertEqual(scan._attach_cross_section(ctxs, [cfg]), {'mb5': 10, 'dtc': 10})
+        with patch.object(xsection, 'load_mb5_universe', return_value=_univ(ctxs)) as load:
+            self.assertEqual(scan._attach_cross_section(ctxs, [cfg]), {'mb5': 10, 'dtc': 10})
+        # 全市场截面按扫描日 T（ctx 的 as_of）从库里读
+        load.assert_called_once_with(ctxs[0]['as_of'], 5)
         self.assertEqual(ctxs[9]['xsec']['mb5_pct'], 1.0)
         fresh = _pool()
         self.assertEqual(scan._attach_cross_section(fresh, [dict(cfg, enabled=False)]), {})

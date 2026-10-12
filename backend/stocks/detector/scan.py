@@ -293,7 +293,13 @@ def _attach_cross_section(stock_ctxs, configs):
     if not stock_ctxs or not params:
         return {}
     try:
-        return xsection.attach_cross_section(stock_ctxs, params)
+        universe = None
+        if 'margin_crowding' in params:
+            # 全市场两融截面：T = 当日扫描日（新鲜度闸门保证各 ctx 的 as_of 都是 T）
+            trade_date = max(str(c['as_of']) for c in stock_ctxs)
+            universe = xsection.load_mb5_universe(
+                trade_date, int(params['margin_crowding'].get('mb5_days', 5)))
+        return xsection.attach_cross_section(stock_ctxs, params, mb5_universe=universe)
     except Exception:  # noqa: BLE001 边界：截面计算失败时截面维度如实不可用，扫描照常
         logger.warning("截面特征计算失败，截面维度本轮不可用", exc_info=True)
         return {}
@@ -353,7 +359,7 @@ def run_scan(trade_date=None, calendar=None):
     vetoed = []  # 被修饰维度否决的信号（det-v2），写进 run.vetoed 供页面展示
 
     # 第一遍：构建序列并过新鲜度闸门。截面维度（det-v2 融资拥挤度等）要先看到
-    # 当日全部个股，才能在股票池内取分位，所以评估放到第二遍
+    # 当日全部个股，才能取截面分位，所以评估放到第二遍
     fresh = []  # [(target, target_key, ctx)]
     for target in targets:
         try:
@@ -374,7 +380,8 @@ def run_scan(trade_date=None, calendar=None):
             continue
         fresh.append((target, target_key, ctx))
 
-    # 截面分位（det-v2）：股票池 = 当日数据新鲜的全部个股（不论是否平静）
+    # 截面分位（det-v2）：MB5 在全市场两融标的里取；DTC/ID20 只有本地日线，
+    # 在当日数据新鲜的全部个股（不论是否平静）里取，样本不足 min_pool 不给分位
     pools = _attach_cross_section([ctx for t, _k, ctx in fresh if t['kind'] == 'stock'], configs)
     if pools:
         message_parts.append('截面样本 ' + '、'.join(f'{k}={v}' for k, v in sorted(pools.items())))

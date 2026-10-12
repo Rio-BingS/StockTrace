@@ -149,8 +149,10 @@ DIMENSIONS = [
     {
         # det-v2（第八轮 §3、§5）：融资拥挤度。只作修饰，不投票——向上信号在 MB5
         # 分位 ≥ veto_pct 时否决；向下信号在 MB5 或 DTC 分位 ≥ escalate_pct 时严重度
-        # 升一档。分位在扫描当日的股票池内取（scan → xsection.attach_cross_section），
-        # 不能用固定阈值：MB5 绝对水平 2019–2026 年在 0.18–0.39 之间漂移
+        # 升一档。MB5 分位在 T−1 全市场 A 股两融标的截面里取（回测是沪深300+中证500，
+        # 生产库无成分表，截面放宽为全部两融标的）；DTC 无全市场成交额，只在本地
+        # 日线样本 ≥ min_pool 时参与（scan → xsection）。不能用固定阈值：MB5 绝对
+        # 水平 2019–2026 年在 0.18–0.39 之间漂移
         'key': 'margin_crowding',
         'group': 'leverage',
         'role': 'modifier',
@@ -160,13 +162,15 @@ DIMENSIONS = [
         'enabled': True,
         'note': (
             'MB5 = 近 5 个交易日（T−5..T−1）融资买入额合计 ÷ T−1 融资余额，'
-            'DTC = T−1 融资余额 ÷ T−20..T−1 日均成交额，均在扫描当日股票池内取分位。'
+            'DTC = T−1 融资余额 ÷ T−20..T−1 日均成交额。MB5 在 T−1 全市场 A 股两融标的截面'
+            '（交易所明细全量）里取分位；DTC 缺全市场成交额，只在本地日线样本 ≥200 只时参与，'
+            '否则向下升级只看 MB5。'
             '向上信号 MB5 分位 ≥0.70 时否决（第八轮：60 日保留集 +3.99pp，6/6 段，q=0.021）；'
             '向下信号 MB5 或 DTC 分位 ≥0.70 时严重度升一档、不加票（20 日 +2.20pp，6/6，q=0.007）。'
             '非两融标的或融资余额 ≤0 时不否决、不升级。两融为交易所 T+1 披露，只用 T−1 及以前。'
         ),
         'defaults': {'mb5_days': 5, 'dtc_days': 20, 'dtc_min_days': 15,
-                     'veto_pct': 0.70, 'escalate_pct': 0.70, 'min_pool': 10},
+                     'veto_pct': 0.70, 'escalate_pct': 0.70, 'min_pool': 200},
         'evaluate': _xsection.eval_margin_crowding,
     },
     {
@@ -199,11 +203,12 @@ DIMENSIONS = [
         'enabled': True,
         'note': (
             'ID20 = 近 20 个交易日（T−19..T）每日 ln(收盘/开盘) 之和（至少 15 个有效日），'
-            '在扫描当日股票池内取分位，≥0.80 时标「日内追买过热」。'
+            '在本地日线个股里取分位（无全市场日线，样本 <200 只时不取分位、不打标签），'
+            '≥0.80 时标「日内追买过热」。'
             '第八轮：截面 rank IC −0.043/−0.049（20/60 日，6/6 段，q=0.009），'
             '但对现有向下信号无增量，所以只展示、不投票。'
         ),
-        'defaults': {'window': 20, 'min_valid': 15, 'tag_pct': 0.80, 'min_pool': 10},
+        'defaults': {'window': 20, 'min_valid': 15, 'tag_pct': 0.80, 'min_pool': 200},
         'evaluate': _xsection.eval_intraday_reversal,
     },
     {
