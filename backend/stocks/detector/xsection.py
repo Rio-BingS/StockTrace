@@ -14,6 +14,8 @@ ctx 没有 'xsec'（离线回测、详情页重算）时维度如实不可用。
 
 from __future__ import annotations
 
+import math
+
 from .dimensions import _unavailable
 
 # ============================================================
@@ -73,6 +75,20 @@ def days_to_cover(ctx, days=20, min_days=15):
     return balance / (sum(valid) / len(valid)), ''
 
 
+def intraday_sum(ctx, window=20, min_valid=15):
+    """ID20 = Σ ln(收盘/开盘)，t ∈ [T−window+1, T]；有效日少于 min_valid 不可用。
+
+    日内收益与复权无关（同一天开收盘同比例调整），直接用本地日线。
+    """
+    opens = (ctx.get('open') or [])[-window:]
+    closes = (ctx.get('close') or [])[-window:]
+    terms = [math.log(c / o) for o, c in zip(opens, closes)
+             if o is not None and c is not None and o > 0 and c > 0]
+    if len(terms) < min_valid:
+        return None, f'近 {window} 日有效日线仅 {len(terms)} 根'
+    return sum(terms), ''
+
+
 # ============================================================
 # 截面分位
 # ============================================================
@@ -110,7 +126,7 @@ def attach_cross_section(ctxs, params_by_key):
     """对扫描当日的个股 ctx 列表算截面特征与分位，写进各自的 ctx['xsec']。
 
     params_by_key：{维度 key: params}，只为其中出现的维度计算对应特征
-    （margin_crowding → MB5/DTC）。返回 {特征: 有效样本数}，供扫描留痕。
+    （margin_crowding → MB5/DTC，intraday_reversal → ID20）。返回 {特征: 有效样本数}，供扫描留痕。
     """
     xsecs = [dict(ctx.get('xsec') or {}) for ctx in ctxs]
     pools = {}
@@ -131,6 +147,19 @@ def attach_cross_section(ctxs, params_by_key):
                 xs[f'{name}_reason'] = reasons.get(i, '')
         for xs in xsecs:
             xs['min_pool'] = min_pool
+    ir = params_by_key.get('intraday_reversal')
+    if ir is not None:
+        min_pool = int(ir.get('min_pool', 10))
+        raw, reasons = _feature_table(
+            ctxs, lambda c: intraday_sum(c, int(ir.get('window', 20)), int(ir.get('min_valid', 15))))
+        pct = pct_rank(raw) if len(raw) >= min_pool else {}
+        pools['id20'] = len(raw)
+        for i, xs in enumerate(xsecs):
+            xs['id20'] = raw.get(i)
+            xs['id20_pct'] = pct.get(i)
+            xs['id20_pool'] = len(raw)
+            xs['id20_reason'] = reasons.get(i, '')
+            xs['id20_min_pool'] = min_pool
     for ctx, xs in zip(ctxs, xsecs):
         ctx['xsec'] = xs
     return pools
@@ -193,4 +222,45 @@ def eval_margin_crowding(ctx, params):
     if hits:
         res['escalate'] = {'direction': 'down',
                            'reason': f"融资拥挤，严重度升一档：{'、'.join(hits)} ≥ {esc_pct:.2f}"}
+    return res
+
+
+# ============================================================
+# 维度：日内追买过热（price 组，只展示，不投票）
+# ============================================================
+
+
+def eval_intraday_reversal(ctx, params):
+    """ID20 截面分位 ≥ tag_pct 时标「日内追买过热」，只展示。
+
+    第八轮 §4A：ID20 是稳定的截面反转因子（rank IC −0.043 / −0.049，20/60 日，
+    6/6 段，BH q=0.009；Q5 作向下 60 日 +1.30pp，q=0.014），但对现有向下信号
+    没有增量（§4B 全部未通过），所以不投票、不改信号，只在卡片上标出来。
+    """
+    xs = ctx.get('xsec')
+    if not xs or 'id20' not in xs:
+        return _unavailable('缺少扫描当日股票池截面（仅在日度扫描中计算）')
+    if xs.get('id20') is None:
+        return _unavailable(xs.get('id20_reason') or '日线不足')
+    pct = xs.get('id20_pct')
+    if pct is None:
+        return _unavailable(f"股票池内有效样本 {xs.get('id20_pool', 0)} 只 < {xs.get('id20_min_pool')}，不取分位")
+    tag_pct = float(params.get('tag_pct', 0.80))
+    hot = pct >= tag_pct
+    res = {
+        'available': True,
+        'value': round(pct * 100, 1),
+        'direction': None,
+        'note': f"ID20 {xs['id20'] * 100:+.1f}%，分位 {pct:.2f}（池内 {xs.get('id20_pool')} 只）"
+                + ('，日内追买过热' if hot else ''),
+        'series': [],
+    }
+    if hot:
+        res['annotation'] = {
+            'tag': '日内追买过热',
+            'id20': round(xs['id20'], 4),
+            'id20_pct': round(pct, 3),
+            'tag_pct': tag_pct,
+            'pool': xs.get('id20_pool'),
+        }
     return res

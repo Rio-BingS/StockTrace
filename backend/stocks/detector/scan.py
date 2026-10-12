@@ -300,7 +300,7 @@ def _attach_cross_section(stock_ctxs, configs):
 
 
 # 依赖扫描当日股票池截面的维度（det-v2）
-_XSECTION_KEYS = ('margin_crowding',)
+_XSECTION_KEYS = ('margin_crowding', 'intraday_reversal')
 
 
 def _sort_matrix_key(row):

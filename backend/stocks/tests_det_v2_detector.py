@@ -474,3 +474,63 @@ class LiftPressureTests(TestCase):
         self.assertFalse(spec['vote_enabled'])
         self.assertEqual(spec['group'], 'event')
         self.assertFalse(signals.dim_votes('lift_pressure'))
+
+
+_IR_PARAMS = {'window': 20, 'min_valid': 15, 'tag_pct': 0.80, 'min_pool': 10}
+
+
+def _id_ctx(code, daily, n=30):
+    """每日 open=10、close=10·e^daily 的合成 ctx（日内收益恒为 daily）。"""
+    return {'kind': 'stock', 'code': code, 'dates': [str(i) for i in range(n)], 'as_of': str(n - 1),
+            'open': [10.0] * n, 'close': [10.0 * math.exp(daily)] * n}
+
+
+class IntradayReversalTests(TestCase):
+    def test_id20_sums_last_20_bars_including_t(self):
+        from .detector import xsection
+
+        ctx = _id_ctx('a', 0.0)
+        ctx['close'][-1] = 10.0 * math.exp(0.05)    # T 日计入
+        ctx['close'][-21] = 10.0 * math.exp(0.5)    # T−20 不计入
+        value, _ = xsection.intraday_sum(ctx, 20, 15)
+        self.assertAlmostEqual(value, 0.05)
+
+    def test_id20_needs_15_valid_days(self):
+        from .detector import xsection
+
+        ctx = _id_ctx('a', 0.01)
+        for i in range(-6, 0):
+            ctx['open'][i] = None
+        value, reason = xsection.intraday_sum(ctx, 20, 15)
+        self.assertIsNone(value)
+        self.assertIn('14', reason)
+
+    def test_id20_does_not_look_past_t(self):
+        from .detector import xsection
+
+        ctx = _id_ctx('a', 0.01)
+        cut = signals.slice_ctx(dict(ctx, dates=ctx['dates']), len(ctx['dates']) - 2)
+        self.assertAlmostEqual(xsection.intraday_sum(cut, 20, 15)[0], 0.2)
+
+    def test_tag_at_top_quintile_only_display(self):
+        from .detector import registry, xsection
+
+        ctxs = [_id_ctx(f'c{i}', 0.001 * i) for i in range(10)]
+        pools = xsection.attach_cross_section(ctxs, {'intraday_reversal': _IR_PARAMS})
+        self.assertEqual(pools, {'id20': 10})
+        hot = xsection.eval_intraday_reversal(ctxs[8], _IR_PARAMS)   # 分位 0.9
+        self.assertEqual(hot['annotation']['tag'], '日内追买过热')
+        self.assertIsNone(hot['direction'])
+        self.assertNotIn('veto', hot)
+        self.assertNotIn('escalate', hot)
+        cold = xsection.eval_intraday_reversal(ctxs[6], _IR_PARAMS)  # 分位 0.7
+        self.assertNotIn('annotation', cold)
+        self.assertFalse(registry.DIMENSION_MAP['intraday_reversal']['vote_enabled'])
+
+    def test_tag_does_not_change_signal(self):
+        sd = _signal_data('down', 'low')
+        rec = signals.apply_modifiers(sd, {'intraday_reversal': {
+            'available': True, 'annotation': {'tag': '日内追买过热', 'id20_pct': 0.9}}})
+        self.assertIsNone(rec)
+        self.assertEqual((sd['direction'], sd['severity'], sd['score']), ('down', 'low', 50.0))
+        self.assertEqual(sd['annotations']['intraday_reversal']['tag'], '日内追买过热')

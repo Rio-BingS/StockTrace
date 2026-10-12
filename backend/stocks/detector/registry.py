@@ -189,6 +189,25 @@ DIMENSIONS = [
         'evaluate': _events.eval_lift_pressure,
     },
     {
+        # det-v2（第八轮 §4）：日内追买过热。截面反转因子，对现有信号无增量 →
+        # 只展示标签，不投票、不改信号
+        'key': 'intraday_reversal',
+        'group': 'price',
+        'role': 'display',
+        'vote_enabled': False,
+        'name': '日内追买过热',
+        'targets': ('stock',),
+        'enabled': True,
+        'note': (
+            'ID20 = 近 20 个交易日（T−19..T）每日 ln(收盘/开盘) 之和（至少 15 个有效日），'
+            '在扫描当日股票池内取分位，≥0.80 时标「日内追买过热」。'
+            '第八轮：截面 rank IC −0.043/−0.049（20/60 日，6/6 段，q=0.009），'
+            '但对现有向下信号无增量，所以只展示、不投票。'
+        ),
+        'defaults': {'window': 20, 'min_valid': 15, 'tag_pct': 0.80, 'min_pool': 10},
+        'evaluate': _xsection.eval_intraday_reversal,
+    },
+    {
         # 数据诚信说明：以下两个维度是任务要求中列出、但本站现有数据源
         # 无法真实计算的，v1 显式停用并在 /detector/config 与前端展示原因。
         # 绝不用代理值或合成数值冒充（CLAUDE.md 红线 #1）。
