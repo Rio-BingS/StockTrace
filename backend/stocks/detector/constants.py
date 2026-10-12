@@ -183,6 +183,9 @@ SECTOR_CONTEXT_DAYS = 120
 # 融资余额上下文：日期轴长度（交易日数）；末点固定为指数数据日的前一交易日
 # （两融 T+1 披露，扫描日 T 最新只有 T−1 的数，#9）。
 MARGIN_CONTEXT_DAYS = 120
+# 个股融资明细上下文（det-v2）：取信号日 T 之前（不含 T）最近这么多个信用交易日
+# 的 StockMarginDaily 行；融资拥挤度只用 T−20..T−1，留余量覆盖个别缺日。
+STOCK_MARGIN_CONTEXT_DAYS = 40
 # 融资余额维度使用的快照字段（#9）：rz=融资余额（沪+深），不再用融资融券余额 total
 MARGIN_VALUE_KEY = 'rz'
 # 日期轴往回走的自然日上限 = 交易日数 × 倍数 + 缓冲（覆盖春节/国庆长假）

@@ -272,24 +272,29 @@ def _evaluate_dims(ctx, configs):
     return dim_results
 
 
+# ctx 里按数据日存放、长度与 dates 无关的行序列：截断时按「数据日 < 截断日」过滤
+_DATED_ROW_KEYS = ('margin', 'stock_margin')
+
+
 def slice_ctx(ctx, end):
     """把 ctx 截断到第 end 根（含）：与 dates 等长的序列一并截断，as_of 前移。
 
-    融资余额行按数据日 < 截断日保留（T+1 披露：T 日扫描时最新只有 T−1）。
-    只用 ≤ 截断日的数据，周期回看不引入前视。
+    融资余额行（指数 margin、个股 stock_margin）按数据日 < 截断日保留（T+1 披露：
+    T 日扫描时最新只有 T−1）。只用 ≤ 截断日的数据，周期回看不引入前视。
     """
     dates = ctx.get('dates') or []
     n = len(dates)
     out = dict(ctx)
     for key, val in ctx.items():
-        if key in ('dates', 'margin'):
+        if key in ('dates',) + _DATED_ROW_KEYS:
             continue
         if isinstance(val, list) and len(val) == n:
             out[key] = val[:end + 1]
     out['dates'] = dates[:end + 1]
     out['as_of'] = dates[end]
-    if isinstance(ctx.get('margin'), list):
-        out['margin'] = [m for m in ctx['margin'] if str(m.get('date')) < str(dates[end])]
+    for key in _DATED_ROW_KEYS:
+        if isinstance(ctx.get(key), list):
+            out[key] = [m for m in ctx[key] if str(m.get('date')) < str(dates[end])]
     return out
 
 

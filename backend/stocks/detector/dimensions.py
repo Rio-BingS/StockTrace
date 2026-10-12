@@ -17,7 +17,7 @@ from __future__ import annotations
 import math
 from datetime import date as _date, timedelta
 
-from ..models import DailyQuote, MarketDailySnapshot
+from ..models import DailyQuote, MarketDailySnapshot, StockMarginDaily
 # 阈值数值集中在 constants.py（ARC-06），这里保留同名引用，dimensions.X 旧路径照常可用
 from .constants import (
     AXIS_CALENDAR_BUFFER,
@@ -37,6 +37,7 @@ from .constants import (
     SECTOR_LOOKBACK_DAYS,  # noqa: F401  旧路径 dimensions.SECTOR_LOOKBACK_DAYS 保留
     SIGMA_DEFAULTS,
     SPLIT_RATIO_DEFAULT,
+    STOCK_MARGIN_CONTEXT_DAYS,
 )
 
 # ============================================================
@@ -504,7 +505,24 @@ def build_stock_context(stock):
     ctx['volume_adj'], ctx['volume_basis'] = adjusted_volume_series(
         ctx, listing_date=_listing_date(history),
     )
+    # 个股融资明细（det-v2）：只取 T 之前的信用交易日（两融 T+1 披露，扫描日 T 最新是 T−1）
+    ctx['stock_margin'] = load_stock_margin_rows(stock.code, ctx['as_of'])
     return ctx, ''
+
+
+def load_stock_margin_rows(code, as_of, n=STOCK_MARGIN_CONTEXT_DAYS):
+    """个股融资明细序列：信用交易日 < as_of 的最近 n 行，升序。
+
+    返回 [{'date', 'rz', 'rz_buy'}]（元）；非两融标的或尚未回补时为空列表。
+    只读 as_of 之前（不含）的行：事后重算（信号详情页）也不会混入 T 及以后的数。
+    """
+    if isinstance(as_of, str):
+        as_of = _date.fromisoformat(as_of)
+    rows = list(
+        StockMarginDaily.objects.filter(code=code, trade_date__lt=as_of)
+        .order_by('-trade_date').values_list('trade_date', 'rz', 'rz_buy')[:n]
+    )[::-1]
+    return [{'date': d.isoformat(), 'rz': rz, 'rz_buy': buy} for d, rz, buy in rows]
 
 
 def _float_share_history(code):
