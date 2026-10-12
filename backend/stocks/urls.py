@@ -37,6 +37,7 @@ from .detector.views import (
     detector_heatmap,
     detector_signal_detail,
     detector_signals,
+    detector_stock_events,
 )
 
 router = DefaultRouter()
@@ -76,4 +77,5 @@ urlpatterns = [
     path('detector/signals/<int:pk>/', detector_signal_detail, name='detector-signal-detail'),
     path('detector/heatmap/', detector_heatmap, name='detector-heatmap'),
     path('detector/config/', detector_config, name='detector-config'),
+    path('detector/stock-events/<str:code>/', detector_stock_events, name='detector-stock-events'),
 ]

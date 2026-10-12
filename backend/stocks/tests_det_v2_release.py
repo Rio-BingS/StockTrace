@@ -137,3 +137,37 @@ class BackfillRestrictedReleaseCommandTests(TestCase):
                              '--sleep', '0', stdout=StringIO(), stderr=StringIO())
         self.assertEqual(sorted(StockRestrictedRelease.objects.values_list('free_date', flat=True)),
                          [date(2025, 1, 1), date(2025, 7, 1)])
+
+
+class StockEventsApiTests(TestCase):
+    def setUp(self):
+        p = patch('stocks.detector.views.expected_latest_date', return_value=date(2026, 10, 9))
+        p.start()
+        self.addCleanup(p.stop)
+        p2 = patch('stocks.trading_calendar.is_trading_day', side_effect=lambda d: d.weekday() < 5)
+        p2.start()
+        self.addCleanup(p2.stop)
+
+    def test_triggered_lift_and_upcoming_list(self):
+        for d, ratio, kind in ((date(2026, 10, 9), 0.5, '当日'), (date(2026, 10, 20), 0.012, '首发原股东限售股份'),
+                               (date(2026, 11, 30), 0.3, '定向增发机构配售股份')):
+            StockRestrictedRelease.objects.create(code='600000', free_date=d, share_type=kind, free_ratio=ratio)
+        body = self.client.get('/api/detector/stock-events/600000/').json()
+        self.assertTrue(body['available'])
+        self.assertTrue(body['lift']['triggered'])
+        self.assertEqual(body['lift']['first_date'], '2026-10-20')
+        self.assertEqual(body['lift']['days_to'], 7)
+        # T 当日的解禁不再提示；60 日内的排期都列出
+        self.assertEqual([u['date'] for u in body['upcoming']], ['2026-10-20', '2026-11-30'])
+
+    def test_not_triggered_when_beyond_20_trading_days(self):
+        StockRestrictedRelease.objects.create(code='600000', free_date=date(2026, 11, 30), share_type='x',
+                                              free_ratio=0.3)
+        body = self.client.get('/api/detector/stock-events/600000/').json()
+        self.assertFalse(body['lift']['triggered'])
+        self.assertEqual(len(body['upcoming']), 1)
+
+    def test_schedule_not_loaded_and_bad_code(self):
+        body = self.client.get('/api/detector/stock-events/600000/').json()
+        self.assertFalse(body['available'])
+        self.assertEqual(self.client.get('/api/detector/stock-events/abc/').status_code, 400)

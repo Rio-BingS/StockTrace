@@ -478,3 +478,60 @@ def detector_config(request):
             'sector_signal_cap': _sector_signal_cap(),
         },
     })
+
+
+# 个股页展示的解禁排期：往后看这么多自然日（与每日刷新窗口一致）
+_STOCK_EVENTS_AHEAD_DAYS = 60
+
+
+@api_view(['GET'])
+def detector_stock_events(request, code):
+    """个股事件提示（det-v2）：限售解禁排期 + 探测器 lift_pressure 是否触发。
+
+    只读本站日程表（StockRestrictedRelease，每日 18:00 刷新），不触发上游请求。
+    触发口径与扫描相同：以最近已完成交易日为 T，T 之后 20 个交易日内解禁合计
+    ≥1% 流通股；解禁日当天起失效。只作提示，不参与任何信号判定。
+    """
+    from ..models import StockRestrictedRelease
+    from ..serializers import normalize_stock_code
+    from .dimensions import load_upcoming_releases
+    from .events import eval_lift_pressure
+
+    norm = normalize_stock_code(code)
+    if norm is None:
+        return Response({'detail': '股票代码须为 6 位数字'}, status=status.HTTP_400_BAD_REQUEST)
+    as_of = expected_latest_date() or timezone.localdate()
+    meta = {
+        'source': '东方财富数据中心 限售股解禁（RPT_LIFT_STAGE），本站每日 18:00 刷新',
+        'data_as_of': as_of.isoformat(),
+        'disclaimer': '解禁日程为已公开排期，可能因追加承诺等推迟；事件提示不构成买卖建议。',
+    }
+    releases, calendar = load_upcoming_releases(norm, as_of)
+    if releases is None:
+        return Response({'available': False, 'code': norm, 'as_of': as_of.isoformat(),
+                         'message': '解禁日程尚未接入', 'upcoming': [], 'lift': None, 'meta': meta})
+    spec = registry.DIMENSION_MAP['lift_pressure']
+    cfg = DetectorDimConfig.objects.filter(key='lift_pressure').first()
+    params = {**spec['defaults'], **((cfg.params or {}) if cfg else {})}
+    res = eval_lift_pressure({'as_of': as_of.isoformat(), 'lift_as_of': as_of.isoformat(),
+                              'restricted_releases': releases, 'lift_calendar': calendar}, params)
+    upcoming = [
+        {'date': r.free_date.isoformat(), 'share_type': r.share_type, 'ratio': r.free_ratio,
+         'free_shares': r.free_shares, 'lift_market_cap': r.lift_market_cap}
+        for r in StockRestrictedRelease.objects.filter(
+            code=norm, free_date__gt=as_of,
+            free_date__lte=as_of + timedelta(days=_STOCK_EVENTS_AHEAD_DAYS),
+        ).order_by('free_date', 'share_type')
+    ]
+    return Response({
+        'available': True,
+        'code': norm,
+        'as_of': as_of.isoformat(),
+        'lift': {
+            'triggered': res.get('direction') == 'down',
+            'note': res.get('note', ''),
+            **(res.get('annotation') or {}),
+        },
+        'upcoming': upcoming,
+        'meta': meta,
+    })
