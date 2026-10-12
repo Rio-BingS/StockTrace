@@ -9,6 +9,7 @@ APScheduler 集成到 Django
 5. 每交易日 17:15 探测器扫描（行业/概念板块快照已在前两轮预热落库后）
 6. 每日 02:30 清理超出保留期的分钟 K 线
 7. 工作日 09:30 拉取上一交易日个股融资明细（交易所 T+1 早间披露，探测器融资拥挤度用）
+8. 每日 18:00 刷新限售解禁日程（解禁日 前 5 天 ~ 后 60 天整段覆盖，探测器解禁事件用）
 
 运行方式（REL-01）：
 - 生产：独立进程 `python manage.py run_scheduler`（systemd 单元 stocktrace-scheduler），
@@ -380,6 +381,20 @@ def _stock_margin_job():
         logger.info("个股融资明细补拉: %s", result)
 
 
+def _restricted_release_job():
+    """限售解禁日程：每日 18:00 覆盖解禁日在 [今天−5, 今天+60] 的排期。
+
+    日程在发行时即公开、偶有推迟；每天整段覆盖让推迟的旧排期及时消失。
+    拉取不完整时保留旧排期，只记日志（宁可旧也不可缺）。
+    """
+    from .market.restricted_release import ReleaseFetchError, refresh_restricted_releases
+
+    try:
+        refresh_restricted_releases()
+    except ReleaseFetchError:
+        logger.warning('限售解禁日程刷新失败，保留旧排期', exc_info=True)
+
+
 # 任务互斥（REL-04）：与手动拉取、管理命令共用 task_lock 的同名锁。
 # 盘中任务忙则直接跳过（下一轮 5 分钟后再来）；日度任务限时等待，等不到才跳过。
 _INTRADAY_SKIP = 0
@@ -452,6 +467,11 @@ def register_jobs(sched):
     add(_guarded(_stock_margin_job, 'stock_margin', _DAILY_WAIT_SECONDS),
         CronTrigger(day_of_week='mon-fri', hour=9, minute=30, timezone=SCHEDULER_TZ),
         'stock_margin_daily', 3600)
+
+    # 限售解禁日程：每日 18:00（北京时间）整段覆盖前 5 天 ~ 后 60 天
+    add(_guarded(_restricted_release_job, 'restricted_release', _DAILY_WAIT_SECONDS),
+        CronTrigger(hour=18, minute=0, timezone=SCHEDULER_TZ),
+        'restricted_release', 3600)
 
     # 分钟 K 线保留期清理：每日 02:30 低峰执行（PERF-02）
     add(_guarded(_minute_bar_cleanup_job, 'minute_bar_cleanup', _DAILY_WAIT_SECONDS),

@@ -86,3 +86,22 @@ class RefreshWindowTests(TestCase):
             with self.assertRaises(rr.ReleaseFetchError):
                 rr.refresh_restricted_releases(today=date(2026, 10, 12))
         self.assertEqual(StockRestrictedRelease.objects.count(), 1)
+
+
+class RestrictedReleaseJobTests(TestCase):
+    def test_job_registered_daily_1800_beijing(self):
+        from zoneinfo import ZoneInfo
+
+        from stocks import scheduler as sch
+
+        job = {j.id: j for j in sch.build_scheduler().get_jobs()}['restricted_release']
+        fields = {f.name: str(f) for f in job.trigger.fields}
+        self.assertEqual((fields['hour'], fields['minute'], fields['day_of_week']), ('18', '0', '*'))
+        self.assertEqual(job.trigger.timezone, ZoneInfo('Asia/Shanghai'))
+
+    def test_job_swallows_fetch_error(self):
+        from stocks import scheduler as sch
+
+        with patch.object(rr, 'refresh_restricted_releases', side_effect=rr.ReleaseFetchError('x')) as ref:
+            sch._restricted_release_job()
+        ref.assert_called_once_with()
