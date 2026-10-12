@@ -64,6 +64,13 @@ export function liftText(lift) {
   return `${horizon} 个交易日内解禁 ${(lift.ratio_total * 100).toFixed(2)}% 流通股（首个 ${lift.first_date}${when}）`
 }
 
+/** 个股页解禁排期一行：「2026-10-20 首发原股东限售股份 1.20%」；比例缺失显示 '-' */
+export function releaseRowText(u) {
+  if (!u?.date) return ''
+  const ratio = isNum(u.ratio) ? `${(u.ratio * 100).toFixed(2)}%` : '-'
+  return `${u.date} ${u.share_type || '限售股'} ${ratio}`
+}
+
 /** 信号卡片徽标：未经验证 / 融资拥挤 / 日内追买过热 / 解禁 */
 export function signalBadges(signal) {
   const s = signal || {}

@@ -7,6 +7,7 @@ import {
   liftText,
   nodeCells,
   POSITIONING_TEXT,
+  releaseRowText,
   signalBadges,
   statusClass,
   statusText,
@@ -154,4 +155,13 @@ test('nodeCells：20/60 日节点——观察期不判定、进行中、到期�
   })
   assert.equal(noBench[0].value, '-')
   assert.deepEqual(nodeCells(null), [])
+})
+
+test('releaseRowText：个股页解禁排期一行', () => {
+  assert.equal(
+    releaseRowText({ date: '2026-10-20', share_type: '首发原股东限售股份', ratio: 0.012 }),
+    '2026-10-20 首发原股东限售股份 1.20%',
+  )
+  assert.equal(releaseRowText({ date: '2026-10-20', ratio: null }), '2026-10-20 限售股 -')
+  assert.equal(releaseRowText(null), '')
 })
