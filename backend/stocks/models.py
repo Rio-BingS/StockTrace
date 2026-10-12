@@ -522,6 +522,41 @@ class IndexConstituent(models.Model):
         return f"{self.index_code} {self.code} {self.name}"
 
 
+class PoolStockState(models.Model):
+    """成分池个股的采集游标（限速队列断点续跑）与流通股本缓存。
+
+    每只成分股一行，由 pool.collector 维护：队列每次只处理一只，按本表决定
+    下一只是谁（收盘后增量优先，其次历史回补、股本刷新）；进程重启或命令中断后
+    从本表接着跑。日线本身写 DailyQuote（外键指向 is_active=False 的 Stock 行）。
+    """
+    code = models.CharField('证券代码', max_length=6, unique=True)
+    # 库内已收盘日线的根数与最新日期（每次拉取后从 DailyQuote 回读）
+    bar_count = models.PositiveIntegerField('已收盘日线根数', default=0)
+    last_bar_date = models.DateField('最新已收盘日线', null=True, blank=True)
+    # 历史回补完成时刻：拉过完整回补窗口（或本地已够根数）就不再回补
+    backfilled_at = models.DateTimeField('回补完成时间', null=True, blank=True)
+    # 已处理过的「期望交易日」：停牌等拉不到当日 bar 的，复查 3 次后不再为这一天反复请求
+    checked_date = models.DateField('已处理期望交易日', null=True, blank=True)
+    stale_checks = models.PositiveSmallIntegerField('当日 bar 未出复查次数', default=0)
+    fail_count = models.PositiveSmallIntegerField('连续失败次数', default=0)
+    next_attempt_at = models.DateTimeField('最早下次尝试', null=True, blank=True)
+    last_attempt_at = models.DateTimeField('最近尝试', null=True, blank=True)
+    last_error = models.CharField('最近错误', max_length=200, blank=True, default='')
+    # 流通股本变动历史 [[ISO 日期, 股数]]（新浪 getAmountBySymbol，与自选同源）：
+    # 扫描时成分池个股只读这里，不在 17:15 对上游突发 800 次请求；None = 未取到
+    float_shares = models.JSONField('流通股本历史', null=True, blank=True)
+    float_shares_at = models.DateTimeField('股本刷新时间', null=True, blank=True)
+    updated_at = models.DateTimeField('更新时间', auto_now=True)
+
+    class Meta:
+        verbose_name = '成分池采集状态'
+        verbose_name_plural = '成分池采集状态'
+        ordering = ['code']
+
+    def __str__(self):
+        return f"{self.code} bars={self.bar_count} last={self.last_bar_date}"
+
+
 class DetectorDimConfig(models.Model):
     """探测器微变维度的可调配置（权重 / 阈值 / 启停）。
 

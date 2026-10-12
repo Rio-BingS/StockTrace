@@ -11,6 +11,7 @@ APScheduler 集成到 Django
 7. 工作日 09:30 拉取上一交易日个股融资明细（交易所 T+1 早间披露，探测器融资拥挤度用）
 8. 每日 18:00 刷新限售解禁日程（解禁日 前 5 天 ~ 后 60 天整段覆盖，探测器解禁事件用）
 9. 每周一 08:30 刷新成分池（沪深300 + 中证500 当前成分，失败保留旧值）
+10. 全天每 POOL_FETCH_INTERVAL_SECONDS 秒（默认 20）成分池限速采集一只（收盘后增量优先，其次回补）
 
 运行方式（REL-01）：
 - 生产：独立进程 `python manage.py run_scheduler`（systemd 单元 stocktrace-scheduler），
@@ -404,6 +405,26 @@ def _index_constituents_job():
     logger.info("成分池刷新: %s", {k: v['status'] for k, v in result.items()})
 
 
+def _pool_quotes_job():
+    """成分池限速采集：每次最多处理一只股票（一个上游请求），单线程。
+
+    与回补命令共用 pool_quotes 任务锁：命令在跑时本任务直接跳过（只记 debug，
+    命令可能连跑数小时，每 20 秒一条 WARNING 会刷屏）。
+    """
+    from .pool.collector import tick
+    from .task_lock import task_lock
+
+    with task_lock('pool_quotes', timeout=0) as ok:
+        if not ok:
+            logger.debug('成分池采集跳过：pool_quotes 锁被占用（回补命令运行中）')
+            return None
+        try:
+            return tick()
+        except Exception:  # 边界：单次 tick 异常只记日志，下一个间隔照常
+            logger.exception('成分池采集异常')
+            return None
+
+
 # 任务互斥（REL-04）：与手动拉取、管理命令共用 task_lock 的同名锁。
 # 盘中任务忙则直接跳过（下一轮 5 分钟后再来）；日度任务限时等待，等不到才跳过。
 _INTRADAY_SKIP = 0
@@ -486,6 +507,12 @@ def register_jobs(sched):
     add(_guarded(_index_constituents_job, 'index_constituents', _DAILY_WAIT_SECONDS),
         CronTrigger(day_of_week='mon', hour=8, minute=30, timezone=SCHEDULER_TZ),
         'index_constituents', 3600)
+
+    # 成分池限速采集：全天每 N 秒最多一只（默认 20s；max_instances=1 保证不并发）
+    from .pool.collector import interval_seconds
+    add(_pool_quotes_job,
+        IntervalTrigger(seconds=interval_seconds(), timezone=SCHEDULER_TZ),
+        'pool_quotes', 60)
 
     # 分钟 K 线保留期清理：每日 02:30 低峰执行（PERF-02）
     add(_guarded(_minute_bar_cleanup_job, 'minute_bar_cleanup', _DAILY_WAIT_SECONDS),
