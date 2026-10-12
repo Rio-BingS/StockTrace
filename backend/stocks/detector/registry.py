@@ -44,6 +44,7 @@ from __future__ import annotations
 
 from . import dimensions as _dims
 from . import dimensions_extra as _dims_extra
+from . import events as _events
 from . import xsection as _xsection
 # 噪声闸门默认值（各价量维度共用，见模块 docstring），数值在 constants.py
 from .constants import (
@@ -168,6 +169,24 @@ DIMENSIONS = [
         'defaults': {'mb5_days': 5, 'dtc_days': 20, 'dtc_min_days': 15,
                      'veto_pct': 0.70, 'escalate_pct': 0.70, 'min_pool': 10},
         'evaluate': _xsection.eval_margin_crowding,
+    },
+    {
+        # det-v2（第九轮 E2）：限售解禁事件。事件组、方向向下，只作提示不投票
+        'key': 'lift_pressure',
+        'group': 'event',
+        'role': 'event',
+        'vote_enabled': False,
+        'name': '限售解禁',
+        'targets': ('stock',),
+        'enabled': True,
+        'note': (
+            '扫描日 T 之后 20 个交易日内有限售股解禁、且合计占解禁前流通股 ≥1% 时提示（东财解禁日程）；'
+            '分值 = −clip(25+25·log2(R/1%), 25, 100)，解禁日当天起失效。'
+            '第九轮：解禁前 20 日跑输同行业随机股 2.03pp（6/6 检验期，BH q=0.0065），解禁后不再跑输。'
+            '只在信号卡片与个股页提示，不参与投票。'
+        ),
+        'defaults': {'horizon_days': 20, 'min_ratio': 0.01},
+        'evaluate': _events.eval_lift_pressure,
     },
     {
         # 数据诚信说明：以下两个维度是任务要求中列出、但本站现有数据源

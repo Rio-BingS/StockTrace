@@ -4,6 +4,7 @@
 解禁只看 T 之后已排期的日程且解禁日当天起失效。
 """
 
+import math
 from datetime import date, timedelta
 from decimal import Decimal
 
@@ -378,3 +379,98 @@ class ScanCrossSectionTests(TestCase):
         with patch.object(xsection, 'attach_cross_section', side_effect=ValueError('boom')):
             self.assertEqual(scan._attach_cross_section(
                 _pool(), [{'key': 'margin_crowding', 'params': {}, 'enabled': True}]), {})
+
+
+def _lift_ctx(as_of, releases, n_days=20):
+    base = date.fromisoformat(as_of)
+    cal = [(base + timedelta(days=i)).isoformat() for i in range(1, n_days + 1)]
+    return {'as_of': as_of, 'lift_as_of': as_of, 'restricted_releases': releases, 'lift_calendar': cal}
+
+
+_LIFT_PARAMS = {'horizon_days': 20, 'min_ratio': 0.01}
+
+
+class LiftPressureTests(TestCase):
+    def test_value_formula_and_clip(self):
+        from .detector.events import lift_value
+
+        self.assertEqual(lift_value(0.01), -25.0)
+        self.assertAlmostEqual(lift_value(0.02), -50.0)
+        self.assertEqual(lift_value(0.08), -100.0)
+        self.assertEqual(lift_value(0.5), -100.0)
+        self.assertAlmostEqual(lift_value(0.011), -(25 + 25 * math.log2(1.1)))
+
+    def test_triggers_within_horizon_and_sums_ratio(self):
+        from .detector.events import eval_lift_pressure
+
+        ctx = _lift_ctx('2026-10-09', [{'date': '2026-10-15', 'ratio': 0.006, 'types': ['首发原股东限售股份']},
+                                       {'date': '2026-10-20', 'ratio': 0.006, 'types': ['股权激励限售股份']}])
+        res = eval_lift_pressure(ctx, _LIFT_PARAMS)
+        self.assertEqual(res['direction'], 'down')
+        self.assertAlmostEqual(res['annotation']['ratio_total'], 0.012)
+        self.assertEqual(res['annotation']['first_date'], '2026-10-15')
+        self.assertEqual(res['annotation']['days_to'], 6)
+        self.assertAlmostEqual(res['value'], round(-(25 + 25 * math.log2(1.2)), 1))
+
+    def test_below_one_percent_does_not_trigger(self):
+        from .detector.events import eval_lift_pressure
+
+        res = eval_lift_pressure(_lift_ctx('2026-10-09', [{'date': '2026-10-15', 'ratio': 0.009, 'types': []}]),
+                                 _LIFT_PARAMS)
+        self.assertTrue(res['available'])
+        self.assertIsNone(res['direction'])
+
+    def test_beyond_20_trading_days_not_counted(self):
+        from .detector.events import eval_lift_pressure
+
+        ctx = _lift_ctx('2026-10-09', [{'date': '2026-11-20', 'ratio': 0.2, 'types': []}])
+        self.assertIsNone(eval_lift_pressure(ctx, _LIFT_PARAMS)['direction'])
+
+    def test_expires_on_release_day(self):
+        from .detector.events import eval_lift_pressure
+
+        # T = 解禁日 U：当天起失效（只认 U > T）
+        ctx = _lift_ctx('2026-10-15', [{'date': '2026-10-15', 'ratio': 0.2, 'types': []}])
+        self.assertIsNone(eval_lift_pressure(ctx, _LIFT_PARAMS)['direction'])
+
+    def test_unavailable_without_schedule_or_on_sliced_ctx(self):
+        from .detector.events import eval_lift_pressure
+
+        self.assertFalse(eval_lift_pressure({'as_of': '2026-10-09', 'restricted_releases': None},
+                                            _LIFT_PARAMS)['available'])
+        ctx = _lift_ctx('2026-10-09', [{'date': '2026-10-15', 'ratio': 0.2, 'types': []}])
+        ctx['as_of'] = '2026-10-08'  # 周期回看截断后的 ctx
+        self.assertFalse(eval_lift_pressure(ctx, _LIFT_PARAMS)['available'])
+
+    def test_context_loads_only_future_schedule(self):
+        from unittest.mock import patch
+
+        from .models import StockRestrictedRelease
+
+        stock = Stock.objects.create(code='600000', name='浦发银行')
+        start = date(2026, 1, 1)
+        _quotes(stock, start, 40)
+        as_of = start + timedelta(days=39)
+        for offset, ratio, kind in ((0, 0.5, '当日'), (3, 0.004, 'A'), (3, 0.007, 'B'), (-2, 0.3, '过去')):
+            StockRestrictedRelease.objects.create(code='600000', free_date=as_of + timedelta(days=offset),
+                                                  share_type=kind, free_ratio=ratio)
+        with patch('stocks.trading_calendar.is_trading_day', side_effect=lambda d: d.weekday() < 5):
+            ctx, _ = dimensions.build_stock_context(stock)
+        self.assertEqual(ctx['restricted_releases'],
+                         [{'date': (as_of + timedelta(days=3)).isoformat(), 'ratio': 0.011, 'types': ['A', 'B']}])
+        self.assertEqual(len(ctx['lift_calendar']), 20)
+        self.assertTrue(all(d > as_of.isoformat() for d in ctx['lift_calendar']))
+
+    def test_context_schedule_none_when_table_empty(self):
+        stock = Stock.objects.create(code='600000', name='浦发银行')
+        _quotes(stock, date(2026, 1, 1), 40)
+        ctx, _ = dimensions.build_stock_context(stock)
+        self.assertIsNone(ctx['restricted_releases'])
+
+    def test_lift_is_display_only_in_vote(self):
+        from .detector import registry
+
+        spec = registry.DIMENSION_MAP['lift_pressure']
+        self.assertFalse(spec['vote_enabled'])
+        self.assertEqual(spec['group'], 'event')
+        self.assertFalse(signals.dim_votes('lift_pressure'))

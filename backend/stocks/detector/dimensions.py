@@ -14,10 +14,11 @@
 
 from __future__ import annotations
 
+import logging
 import math
 from datetime import date as _date, timedelta
 
-from ..models import DailyQuote, MarketDailySnapshot, StockMarginDaily
+from ..models import DailyQuote, MarketDailySnapshot, StockMarginDaily, StockRestrictedRelease
 # 阈值数值集中在 constants.py（ARC-06），这里保留同名引用，dimensions.X 旧路径照常可用
 from .constants import (
     AXIS_CALENDAR_BUFFER,
@@ -26,6 +27,8 @@ from .constants import (
     CONTEXT_BARS,
     FLOW_RESID_MIN_OBS,
     FLOW_RESID_WINDOW,
+    LIFT_HORIZON_TRADING_DAYS,
+    LIFT_LOOKAHEAD_CALENDAR_DAYS,
     MARGIN_CONTEXT_DAYS,
     MARGIN_VALUE_KEY,
     MARGIN_VOTE_CODES,
@@ -39,6 +42,8 @@ from .constants import (
     SPLIT_RATIO_DEFAULT,
     STOCK_MARGIN_CONTEXT_DAYS,
 )
+
+logger = logging.getLogger(__name__)
 
 # ============================================================
 # 数学小工具（只依赖纯 Python，方便离线单测）
@@ -507,7 +512,59 @@ def build_stock_context(stock):
     )
     # 个股融资明细（det-v2）：只取 T 之前的信用交易日（两融 T+1 披露，扫描日 T 最新是 T−1）
     ctx['stock_margin'] = load_stock_margin_rows(stock.code, ctx['as_of'])
+    # 限售解禁排期（det-v2）：T 之后已公开的日程；日程表为空（未回补）时为 None
+    ctx['restricted_releases'], ctx['lift_calendar'] = load_upcoming_releases(stock.code, ctx['as_of'])
+    ctx['lift_as_of'] = ctx['as_of']
     return ctx, ''
+
+
+def _trading_days_after(day, n):
+    """day 之后（不含）的 n 个交易日 ISO 串；日历未知的工作日按交易日计（只用于提示窗口）。"""
+    from ..trading_calendar import is_trading_day
+
+    out, cur = [], day
+    for _ in range(n * 3 + 30):
+        cur += timedelta(days=1)
+        try:
+            flag = is_trading_day(cur)
+        except Exception:  # noqa: BLE001 边界：日历异常按工作日近似，只影响提示窗口边界
+            logger.warning("解禁窗口交易日判定失败，按工作日近似", exc_info=True)
+            flag = None
+        if flag is None:
+            flag = cur.weekday() < 5
+        if flag:
+            out.append(cur.isoformat())
+            if len(out) == n:
+                break
+    return out
+
+
+def load_upcoming_releases(code, as_of, horizon=LIFT_HORIZON_TRADING_DAYS):
+    """T（as_of）之后的解禁排期：返回 (按日合并的行, T 之后 horizon 个交易日)。
+
+    行：[{'date', 'ratio', 'types'}]，ratio 为同日各类解禁占解禁前流通股比例之和。
+    只查解禁日 > T 的排期：解禁日当天起事件失效。日程表整体为空（尚未回补）时
+    返回 (None, [])，维度如实不可用；该股窗口内无排期时返回 ([], [])，不查日历。
+    """
+    if isinstance(as_of, str):
+        as_of = _date.fromisoformat(as_of)
+    if not StockRestrictedRelease.objects.exists():
+        return None, []
+    rows = list(
+        StockRestrictedRelease.objects.filter(
+            code=code, free_date__gt=as_of,
+            free_date__lte=as_of + timedelta(days=LIFT_LOOKAHEAD_CALENDAR_DAYS),
+        ).order_by('free_date').values_list('free_date', 'free_ratio', 'share_type')
+    )
+    if not rows:
+        return [], []
+    by_day = {}
+    for day, ratio, share_type in rows:
+        item = by_day.setdefault(day.isoformat(), {'date': day.isoformat(), 'ratio': 0.0, 'types': []})
+        item['ratio'] += ratio or 0.0
+        if share_type and share_type not in item['types']:
+            item['types'].append(share_type)
+    return list(by_day.values()), _trading_days_after(as_of, horizon)
 
 
 def load_stock_margin_rows(code, as_of, n=STOCK_MARGIN_CONTEXT_DAYS):

@@ -186,6 +186,10 @@ MARGIN_CONTEXT_DAYS = 120
 # 个股融资明细上下文（det-v2）：取信号日 T 之前（不含 T）最近这么多个信用交易日
 # 的 StockMarginDaily 行；融资拥挤度只用 T−20..T−1，留余量覆盖个别缺日。
 STOCK_MARGIN_CONTEXT_DAYS = 40
+# 解禁事件上下文（det-v2）：查信号日 T 之后这么多个自然日内的解禁排期，再按交易日
+# 历截到 T 之后 LIFT_HORIZON_TRADING_DAYS 个交易日（45 自然日足以覆盖含长假的 20 个交易日）
+LIFT_LOOKAHEAD_CALENDAR_DAYS = 45
+LIFT_HORIZON_TRADING_DAYS = 20
 # 融资余额维度使用的快照字段（#9）：rz=融资余额（沪+深），不再用融资融券余额 total
 MARGIN_VALUE_KEY = 'rz'
 # 日期轴往回走的自然日上限 = 交易日数 × 倍数 + 缓冲（覆盖春节/国庆长假）
