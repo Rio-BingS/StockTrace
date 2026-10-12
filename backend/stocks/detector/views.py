@@ -30,7 +30,7 @@ from .dimensions import (
     build_stock_context,
 )
 from .scan import _sector_signal_cap
-from .signals import dim_group
+from .signals import dim_group, dim_votes
 
 logger = logging.getLogger(__name__)
 
@@ -315,8 +315,10 @@ def detector_heatmap(request):
             'rows': [],
         })
 
+    # 热力图只列投票维度：只展示/只作否决的维度（det-v2）不评估板块
+    keys = [k for k in registry.ENABLED_KEYS if dim_votes(k)]
     dim_names = {d['key']: d['name'] for d in registry.DIMENSIONS if d['enabled']}
-    dims = [{'key': k, 'name': dim_names[k]} for k in registry.ENABLED_KEYS]
+    dims = [{'key': k, 'name': dim_names[k]} for k in keys]
     shown = [
         {
             'code': r.get('code'),
@@ -324,7 +326,7 @@ def detector_heatmap(request):
             'as_of': r.get('as_of'),
             'direction': r.get('direction'),
             'score': r.get('score'),
-            'values': {k: r.get('values', {}).get(k) for k in registry.ENABLED_KEYS},
+            'values': {k: r.get('values', {}).get(k) for k in keys},
         }
         for r in rows[:40]
     ]
@@ -348,7 +350,7 @@ def _vote_groups():
     """投票信息组（#4）：{group: {'role', 'dims': [启用维度 key...]}}，与 signals.vote 同源。"""
     groups = {}
     for spec in registry.DIMENSIONS:
-        if not spec['enabled']:
+        if not spec['enabled'] or not dim_votes(spec['key']):
             continue
         group, role = dim_group(spec['key'])
         entry = groups.setdefault(group, {'role': role, 'dims': []})
@@ -376,6 +378,8 @@ def detector_config(request):
             'vote_codes': list(constants.MARGIN_VOTE_CODES) if spec['key'] == 'margin_north' else None,
             'group': group,
             'role': role,
+            # False = 只展示/只作否决，不参加投票（det-v2）
+            'vote_enabled': dim_votes(spec['key']),
             'note': spec['note'],
             'weight': cfg.weight if cfg else 1.0,
             'params': {**spec['defaults'], **((cfg.params or {}) if cfg else {})},

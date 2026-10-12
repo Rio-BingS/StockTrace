@@ -144,6 +144,14 @@ def dim_group(key, cfg=None):
     return group, role
 
 
+def dim_votes(key, cfg=None):
+    """维度是否参加投票：cfg/注册表的 vote_enabled，缺省 True（det-v2 只展示维度为 False）。"""
+    if cfg is not None and 'vote_enabled' in cfg:
+        return bool(cfg['vote_enabled'])
+    spec = registry.DIMENSION_MAP.get(key) or {}
+    return bool(spec.get('vote_enabled', True))
+
+
 def _strength(res):
     return (res.get('weight') or 0.0) * abs(res.get('value') or 0.0)
 
@@ -158,6 +166,9 @@ def vote(dim_results):
     groups = {}
     available = set()
     for key, res in dim_results.items():
+        # 只展示/只作否决的维度（vote_enabled=False）不计票，也不算可用信息组
+        if res.get('vote_enabled') is False:
+            continue
         group, role = res.get('group'), res.get('role')
         if not group or not role:
             group, role = dim_group(key)
@@ -264,6 +275,7 @@ def _evaluate_dims(ctx, configs):
                 'note': f'维度计算异常: {e}', 'series': [],
             }
         group, role = dim_group(cfg['key'], cfg)
+        res['vote_enabled'] = dim_votes(cfg['key'], cfg)
         res['name'] = cfg['name']
         res['weight'] = cfg['weight']
         res['params'] = dict(cfg.get('params') or {})
@@ -410,6 +422,8 @@ def dimensions_payload(dim_results):
             'group': res.get('group'),
             'role': res.get('role'),
             'counted': bool(res.get('counted')),
+            # 只展示/只作否决的维度（det-v2），前端据此不显示为「投票」
+            'vote_enabled': res.get('vote_enabled', True),
         }
         for key, res in dim_results.items()
     }

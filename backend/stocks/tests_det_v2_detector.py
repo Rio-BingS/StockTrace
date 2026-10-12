@@ -56,3 +56,44 @@ class StockMarginContextTests(TestCase):
         cut = signals.slice_ctx(ctx, 1)
         self.assertEqual([r['date'] for r in cut['stock_margin']], ['2026-01-05'])
         self.assertEqual(cut['close'], [1, 2])
+
+
+def _res(direction, value=60.0, weight=1.0, group=None, role='direction', votes=True):
+    return {'available': True, 'direction': direction, 'value': value, 'weight': weight,
+            'group': group, 'role': role, 'vote_enabled': votes}
+
+
+class NonVotingDimTests(TestCase):
+    """vote_enabled=False 的维度照常评估，但不计票、不算可用信息组。"""
+
+    def test_display_only_dim_never_adds_a_vote(self):
+        base = {'ma_relation': _res('down', group='price'),
+                'vol_ratio_slope': _res('up', group='volume', role='strength')}
+        before = signals.vote(base)
+        with_display = dict(base, lift_pressure=_res('down', 80, group='event', votes=False),
+                            margin_crowding=_res('down', 90, group='leverage', votes=False))
+        after = signals.vote(with_display)
+        self.assertEqual(after['direction'], before['direction'])
+        self.assertEqual(after['support'], before['support'])
+        self.assertEqual(after['groups_available'], before['groups_available'])
+        self.assertNotIn('lift_pressure', after['counted'])
+
+    def test_display_only_dim_cannot_create_a_signal(self):
+        # 单个方向组 + 只展示维度：仍不够两组，不出信号
+        res = signals.vote({'ma_relation': _res('down', group='price'),
+                            'lift_pressure': _res('down', 100, group='event', votes=False)})
+        self.assertIsNone(res['direction'])
+
+    def test_null_fire_probability_ignores_display_dims(self):
+        from .detector import scan
+
+        configs = [
+            {'key': 'ma_relation', 'targets': ('stock',), 'evaluate': lambda c, p: None, 'weight': 1.0,
+             'params': {}, 'enabled': True},
+            {'key': 'vol_compress', 'targets': ('stock',), 'evaluate': lambda c, p: None, 'weight': 1.0,
+             'params': {}, 'enabled': True},
+        ]
+        base = scan.null_fire_probability(configs, 'stock')
+        extra = configs + [{'key': 'x_display', 'targets': ('stock',), 'evaluate': lambda c, p: None,
+                            'weight': 1.0, 'params': {}, 'enabled': True, 'vote_enabled': False}]
+        self.assertEqual(scan.null_fire_probability(extra, 'stock'), base)

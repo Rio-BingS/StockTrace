@@ -93,6 +93,8 @@ def load_configs(create=True):
             # 投票分组（#4）：注册表声明，未声明的维度自成方向组
             'group': spec.get('group') or spec['key'],
             'role': spec.get('role') or ROLE_DIRECTION,
+            # 只展示/只作否决的维度不参加投票（det-v2）
+            'vote_enabled': spec.get('vote_enabled', True),
         })
     return out
 
@@ -216,6 +218,7 @@ def null_fire_probability(configs, kind, code=None):
     dims = [
         c for c in configs
         if c.get('enabled', True) and c.get('evaluate') is not None and kind in c['targets']
+        and signals.dim_votes(c['key'], c)
         and not (c['key'] == 'margin_north' and code not in MARGIN_VOTE_CODES)
     ]
     if not dims:

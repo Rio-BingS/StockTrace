@@ -84,6 +84,7 @@ def build_configs(overrides=None):
             'evaluate': spec['evaluate'],
             'enabled': enabled,
             'defaults': spec['defaults'],
+            'vote_enabled': spec.get('vote_enabled', True),
         })
     return out
 
