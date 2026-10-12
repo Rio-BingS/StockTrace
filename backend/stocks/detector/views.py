@@ -10,6 +10,7 @@
 from __future__ import annotations
 
 import logging
+from bisect import bisect_right
 from datetime import timedelta
 
 from django.conf import settings
@@ -23,7 +24,7 @@ from ..common.pagination import paginate
 from ..common.params import parse_bool, parse_date, positive_int
 from ..trading_calendar import expected_latest_date
 from ..models import DetectorDimConfig, DetectorRun, DetectorSignal, DetectorTuneLog
-from . import constants, registry
+from . import constants, nodes, registry
 from .dimensions import (
     build_index_context,
     build_sector_context,
@@ -86,7 +87,19 @@ def _meta(latest_run, message=''):
     }
 
 
-def _signal_row(sig):
+def _scan_dates():
+    """已有扫描记录的交易日（升序）：列表行据此估算信号已过交易日数（det-v2）。"""
+    return sorted(DetectorRun.objects.values_list('trade_date', flat=True))
+
+
+def _elapsed_days(trade_date, scan_dates):
+    """信号日之后已扫描的交易日数；扫描缺日只会少算（多给观察期，不会提前判失败）。"""
+    if scan_dates is None:
+        return None
+    return len(scan_dates) - bisect_right(scan_dates, trade_date)
+
+
+def _signal_row(sig, scan_dates=None):
     return {
         'id': sig.id,
         'target_kind': sig.target_kind,
@@ -114,6 +127,8 @@ def _signal_row(sig):
         'bench_return': sig.bench_return,
         'excess_return': sig.excess_return,
         'benchmark_code': sig.benchmark_code,
+        # 信号后已过的交易日（det-v2）：前 nodes.NO_FAIL_DAYS 日页面不显示「失败」
+        'elapsed_days': _elapsed_days(sig.trade_date, scan_dates),
         'created_at': sig.created_at,
     }
 
@@ -171,7 +186,8 @@ def detector_signals(request):
 
     if all_dates and trade_date is None:
         qs = qs.order_by('-trade_date')[:300]
-    rows = [_signal_row(s) for s in qs]
+    scan_dates = _scan_dates()
+    rows = [_signal_row(s, scan_dates) for s in qs]
     if not all_dates and trade_date is None and latest_run is not None:
         rows.sort(key=lambda r: r['score'], reverse=True)
     items, pagination = paginate(
@@ -293,7 +309,9 @@ def detector_signal_detail(request, pk):
     return Response({
         'meta': _meta(_runs_brief().first(),
                       message=(err or '') if ctx is None else ''),
-        'signal': _signal_row(sig),
+        'signal': _signal_row(sig, _scan_dates()),
+        # 复盘节点（det-v2）：20/60 日相对沪深300 超额，前 10 日不判定失败
+        'review_nodes': nodes.review_nodes(sig),
         'dimension_series': dimension_series,
         'params_source': params_source,
         'disabled_dims': [
@@ -413,6 +431,9 @@ def detector_config(request):
         # 共用一份，旧实现在这里手写了一份副本，改阈值后配置页会与实际不一致
         'review_rules': {
             'version': constants.REVIEW_VERSION,
+            # 复盘节点（det-v2）：页面以 20/60 日为准，前 10 日不判定失败
+            'node_horizons': list(nodes.NODE_HORIZONS),
+            'no_fail_days': nodes.NO_FAIL_DAYS,
             'lookback_days': constants.REVIEW_LOOKBACK,
             'hit_sigma_k': getattr(settings, 'DETECTOR_REVIEW_SIGMA_K', constants.HIT_SIGMA_K),
             'sigma_window': constants.SIGMA_WINDOW,
