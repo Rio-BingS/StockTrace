@@ -52,7 +52,7 @@ def _meta_disclaimer():
 _SIGNALS_KEY_ORDER = ('meta', 'trade_date', 'latest_run', 'summary', 'pagination', 'items', 'vetoed')
 
 # DetectorRun 里的大 JSON 字段：列表/元信息只用标量，读这些字段纯属浪费（PERF-09）
-_HEAVY_RUN_FIELDS = ('matrix', 'degraded', 'adjustments', 'vetoed')
+_HEAVY_RUN_FIELDS = ('matrix', 'degraded', 'adjustments', 'vetoed', 'pool_coverage')
 
 
 def _runs_brief():
@@ -99,11 +99,23 @@ def _elapsed_days(trade_date, scan_dates):
     return len(scan_dates) - bisect_right(scan_dates, trade_date)
 
 
-def _signal_row(sig, scan_dates=None):
+def _watchlist_codes():
+    from ..models import Stock
+
+    return set(Stock.objects.filter(is_active=True).values_list('code', flat=True))
+
+
+def _signal_row(sig, scan_dates=None, watch_codes=None):
     return {
         'id': sig.id,
         'target_kind': sig.target_kind,
         'target_kind_display': sig.get_target_kind_display(),
+        # 信号来源（成分池扩容）：watchlist 自选 / pool 算法推送（沪深300+中证500）/ market 指数板块
+        'source': sig.source,
+        'source_display': sig.get_source_display(),
+        # 个股是否已在自选（前端据此显示「加自选」）；指数/板块为 None
+        'in_watchlist': (sig.target_code in watch_codes
+                         if watch_codes is not None and sig.target_kind == DetectorSignal.TARGET_STOCK else None),
         'target_code': sig.target_code,
         'target_name': sig.target_name,
         'trade_date': sig.trade_date,
@@ -139,6 +151,7 @@ def detector_signals(request):
 
     筛选：severity(high/medium/low)、direction(up/down)、
     target_kind(index/stock/industry/concept)、status、date=YYYY-MM-DD、
+    source(watchlist/pool/market：自选 / 成分池算法推送 / 指数板块)、
     all_dates=1（近 30 天历史，默认只看最新扫描日）。
     """
     latest_run = _runs_brief().first()
@@ -174,6 +187,7 @@ def detector_signals(request):
         ('direction', dict(DetectorSignal.DIRECTION_CHOICES)),
         ('target_kind', dict(DetectorSignal.TARGET_KIND_CHOICES)),
         ('status', dict(DetectorSignal.STATUS_CHOICES)),
+        ('source', dict(DetectorSignal.SOURCE_CHOICES)),
     ):
         value = request.query_params.get(field)
         if value:
@@ -187,7 +201,8 @@ def detector_signals(request):
     if all_dates and trade_date is None:
         qs = qs.order_by('-trade_date')[:300]
     scan_dates = _scan_dates()
-    rows = [_signal_row(s, scan_dates) for s in qs]
+    watch_codes = _watchlist_codes()
+    rows = [_signal_row(s, scan_dates, watch_codes) for s in qs]
     if not all_dates and trade_date is None and latest_run is not None:
         # 向上信号未经验证（多轮前推验证 20/60 日超额均不显著）：降权排在向下信号之后
         rows.sort(key=lambda r: (r['direction'] == DetectorSignal.DIRECTION_UP, -r['score']))
@@ -203,8 +218,10 @@ def detector_signals(request):
         'by_severity': {},
         'by_direction': {},
         'by_status': {},
+        'by_source': {},
     }
     for row in rows:
+        summary['by_source'][row['source']] = summary['by_source'].get(row['source'], 0) + 1
         summary['by_severity'][row['severity']] = summary['by_severity'].get(row['severity'], 0) + 1
         summary['by_direction'][row['direction']] = summary['by_direction'].get(row['direction'], 0) + 1
         summary['by_status'][row['status']] = summary['by_status'].get(row['status'], 0) + 1
@@ -219,7 +236,7 @@ def detector_signals(request):
         key_order=_SIGNALS_KEY_ORDER,
         vetoed=vetoed,
         trade_date=trade_date.isoformat() if trade_date else (latest_run.trade_date.isoformat() if latest_run else None),
-        latest_run=_run_brief(latest_run) if latest_run else None,
+        latest_run=_run_brief(latest_run, pool=True) if latest_run else None,
         summary=summary,
     ))
 
@@ -227,15 +244,35 @@ def detector_signals(request):
 def _run_vetoed(trade_date, params):
     """某扫描日的否决记录；方向/对象类型筛选与信号列表一致。"""
     rows = DetectorRun.objects.filter(trade_date=trade_date).values_list('vetoed', flat=True).first() or []
-    for field in ('direction', 'target_kind'):
+    for field in ('direction', 'target_kind', 'source'):
         value = params.get(field)
         if value:
-            rows = [r for r in rows if r.get(field) == value]
+            # 旧否决记录没有 source：个股按自选、其余按指数/板块
+            rows = [r for r in rows if (r.get(field) if field != 'source' or 'source' in r
+                                        else _legacy_source(r)) == value]
     return rows
 
 
-def _run_brief(run):
-    return {
+def _legacy_source(record):
+    return (DetectorSignal.SOURCE_WATCHLIST if record.get('target_kind') == DetectorSignal.TARGET_STOCK
+            else DetectorSignal.SOURCE_MARKET)
+
+
+# 成分池完整度里给页面的标量（代码明细列表留在库里，不随信号列表下发）
+_POOL_BRIEF_KEYS = ('members', 'expected', 'fresh', 'ratio', 'threshold', 'missing_count',
+                    'not_ready_count', 'scanned', 'skipped_count', 'signals_raw', 'signals_pushed',
+                    'cap', 'mode', 'reason')
+
+
+def _pool_brief(run):
+    cov = DetectorRun.objects.filter(pk=run.pk).values_list('pool_coverage', flat=True).first() or {}
+    out = {'status': run.pool_status or None}
+    out.update({k: cov[k] for k in _POOL_BRIEF_KEYS if k in cov})
+    return out
+
+
+def _run_brief(run, pool=False):
+    brief = {
         'trade_date': run.trade_date,
         'status': run.status,
         'targets_scanned': run.targets_scanned,
@@ -251,7 +288,11 @@ def _run_brief(run):
         'independent_samples': run.independent_samples,
         'avg_excess_return': run.avg_excess_return,
         'message': run.message,
+        'pool_status': run.pool_status or None,
     }
+    if pool:
+        brief['pool'] = _pool_brief(run)
+    return brief
 
 
 def _context_for_signal(sig):
@@ -264,6 +305,11 @@ def _context_for_signal(sig):
         stock = Stock.objects.filter(code=sig.target_code).first()
         if stock is None:
             return None, '该股票已不在自选库，无法重建序列'
+        if not stock.is_active:
+            # 成分池个股：股本读采集队列的缓存，详情页不额外触网
+            from .scan import _load_float_histories
+
+            return build_stock_context(stock, float_history=_load_float_histories([stock.code]).get(stock.code))
         return build_stock_context(stock)
     return build_sector_context(sig.target_kind, sig.target_code)
 
@@ -310,7 +356,7 @@ def detector_signal_detail(request, pk):
     return Response({
         'meta': _meta(_runs_brief().first(),
                       message=(err or '') if ctx is None else ''),
-        'signal': _signal_row(sig, _scan_dates()),
+        'signal': _signal_row(sig, _scan_dates(), _watchlist_codes()),
         # 复盘节点（det-v2）：20/60 日相对沪深300 超额，前 10 日不判定失败
         'review_nodes': nodes.review_nodes(sig),
         'dimension_series': dimension_series,
