@@ -13,6 +13,14 @@ import { SEVERITY_LABEL, STATUS_LABEL, dirText } from '../constants/labels.js'
 import { axisLabel, tooltip } from '../charts/theme.js'
 import { fmtFixed } from '../utils/number.js'
 import { directionalExcess, fmtRate, fmtReturn, signClass } from '../utils/detectorReview.js'
+import {
+  crowdingInfo,
+  dimRoleText,
+  liftText,
+  signalBadges,
+  trendStateText,
+  trendStateTitle,
+} from '../utils/detectorSignal.js'
 
 use([LineChart, GridComponent, TooltipComponent, MarkLineComponent, CanvasRenderer])
 
@@ -25,6 +33,10 @@ const error = ref('')
 const detail = ref(null)
 
 const signal = computed(() => detail.value?.signal || {})
+const annotations = computed(() => signal.value.annotations || {})
+const badges = computed(() => signalBadges(signal.value))
+const crowding = computed(() => crowdingInfo(annotations.value))
+const lift = computed(() => liftText(annotations.value.lift_pressure))
 const dims = computed(() => {
   const dimensions = signal.value.dimensions || {}
   const series = detail.value?.dimension_series || {}
@@ -124,14 +136,44 @@ onMounted(load)
           <span class="badge status" :class="signal.status">{{
             STATUS_LABEL[signal.status] || signal.status
           }}</span>
+          <span
+            v-for="b in badges"
+            :key="b.key"
+            class="badge hint"
+            :class="b.cls"
+            :title="b.title"
+            >{{ b.text }}</span
+          >
         </div>
       </div>
+
+      <!-- 趋势状态与事件提示（det-v2）：只展示，不参与判定 -->
+      <div
+        v-if="trendStateText(annotations)"
+        class="trend-line"
+        :title="trendStateTitle(annotations)"
+      >
+        {{ trendStateText(annotations) }}
+      </div>
+      <ul v-if="crowding || lift || annotations.intraday_reversal" class="notes">
+        <li v-if="crowding">
+          融资拥挤度：{{ crowding.text }}
+          <b v-if="crowding.reason" class="warn">{{ crowding.reason }}</b>
+        </li>
+        <li v-if="lift">
+          限售解禁：{{ lift }}（解禁前 20 日历史上平均跑输同行业约 2pp，只作提示）
+        </li>
+        <li v-if="annotations.intraday_reversal?.tag">
+          {{ annotations.intraday_reversal.tag }}：ID20 分位
+          {{ annotations.intraday_reversal.id20_pct }}（只展示，不参与判定）
+        </li>
+      </ul>
 
       <div class="dims">
         <div v-for="dim in dims" :key="dim.key" class="dim-chip" :class="{ off: !dim.available }">
           <b>{{ dim.name }}</b>
           <span :class="dim.direction">{{
-            dim.available ? dirText(dim.direction) : '不可用'
+            !dim.available ? '不可用' : dimRoleText(dim) || dirText(dim.direction)
           }}</span>
           <small v-if="dim.available && dim.note">{{ dim.note }}</small>
           <small v-else-if="!dim.available">{{ dim.note }}</small>
@@ -250,6 +292,35 @@ onMounted(load)
 .badge.status.missed {
   color: var(--danger);
   background: var(--danger-bg);
+}
+
+.badge.hint.muted {
+  border: 1px dashed #4a5a78;
+}
+.badge.hint.warn {
+  color: #ffbd6b;
+  background: #382711;
+}
+.badge.hint.event {
+  color: #79c7ff;
+  background: #122736;
+}
+.trend-line {
+  color: #c9d4e6;
+  font-size: 13px;
+  margin-bottom: 8px;
+}
+.notes {
+  margin: 0 0 10px;
+  padding-left: 18px;
+  color: #9eabc1;
+  font-size: 12px;
+  line-height: 1.7;
+}
+.notes b.warn {
+  color: #ffbd6b;
+  font-weight: 500;
+  margin-left: 6px;
 }
 
 .dims {

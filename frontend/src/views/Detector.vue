@@ -25,10 +25,15 @@ import {
   voteRuleText,
 } from '../utils/detectorDims.js'
 import {
+  dimRoleText,
   isUnverified,
   POSITIONING_TEXT,
+  signalBadges,
+  trendStateText,
+  trendStateTitle,
   UNVERIFIED_TEXT,
   UNVERIFIED_TITLE,
+  vetoedText,
 } from '../utils/detectorSignal.js'
 
 const loading = ref(false),
@@ -286,6 +291,7 @@ onUnmounted(() => {
               <th>对象</th>
               <th>名称</th>
               <th>信号日</th>
+              <th>趋势状态</th>
               <th>强度</th>
               <th>周期</th>
               <th>严重程度</th>
@@ -311,8 +317,19 @@ onUnmounted(() => {
               <td>{{ row.target_kind_display }}</td>
               <td class="name">
                 {{ row.target_name }} <small>{{ row.target_code }}</small>
+                <span
+                  v-for="b in signalBadges(row).filter((x) => x.key !== 'unverified')"
+                  :key="b.key"
+                  class="hint-badge"
+                  :class="b.cls"
+                  :title="b.title"
+                  >{{ b.text }}</span
+                >
               </td>
               <td>{{ row.trade_date }}</td>
+              <td class="trend-cell" :title="trendStateTitle(row.annotations)">
+                {{ trendStateText(row.annotations) || '-' }}
+              </td>
               <td :class="dirClass(row.direction)">{{ row.score?.toFixed?.(0) ?? row.score }}</td>
               <td>{{ row.cycles }}</td>
               <td>
@@ -333,6 +350,13 @@ onUnmounted(() => {
               : '暂无信号数据'
           }}
         </div>
+      </div>
+      <!-- 当日被否决的信号（det-v2）：如向上信号因融资拥挤被否决，不进入上面的列表 -->
+      <div v-if="data?.vetoed?.length" class="vetoed-box">
+        <b>今日已否决 {{ data.vetoed.length }} 个信号</b>
+        <ul>
+          <li v-for="v in data.vetoed" :key="v.target_kind + v.target_code">{{ vetoedText(v) }}</li>
+        </ul>
       </div>
       <div v-if="(data?.pagination?.total_pages || 1) > 1" class="pager">
         <button @click="setPage(-1)" :disabled="page <= 1">上一页</button>
@@ -399,7 +423,10 @@ onUnmounted(() => {
                 <td>{{ dimThresholdText(dim) }}</td>
                 <td>{{ dim.params?.noise_pct ?? '-' }}</td>
                 <td>
-                  <span v-if="dim.enabled" class="status active">启用</span>
+                  <span v-if="dim.enabled && dimRoleText(dim)" class="status watching">{{
+                    dimRoleText(dim)
+                  }}</span>
+                  <span v-else-if="dim.enabled" class="status active">启用</span>
                   <span v-else class="status missed" :title="dim.disabled_reason">{{
                     disabledText(dim)
                   }}</span>
@@ -677,6 +704,38 @@ tbody tr {
 tbody tr:hover,
 tbody tr.selected {
   background: #162b49;
+}
+/* 卡片提示徽标（det-v2）：融资拥挤 / 日内追买过热 / 解禁 */
+.hint-badge {
+  margin-left: 5px;
+  padding: 1px 5px;
+  border-radius: 4px;
+  font-size: 10px;
+  color: #8f9bb2;
+  background: #16213e;
+}
+.hint-badge.warn {
+  color: #ffbd6b;
+  background: #382711;
+}
+.hint-badge.event {
+  color: #79c7ff;
+  background: #122736;
+}
+.trend-cell {
+  color: #9eabc1;
+}
+.vetoed-box {
+  margin-top: 8px;
+  padding: 8px 10px;
+  border: 1px dashed #4a5a78;
+  border-radius: 7px;
+  color: #9eabc1;
+  font-size: 12px;
+}
+.vetoed-box ul {
+  margin: 4px 0 0;
+  padding-left: 18px;
 }
 /* 向上信号未经验证：降权显示（淡化），排序上后端已排在向下信号之后 */
 tr.unverified td {

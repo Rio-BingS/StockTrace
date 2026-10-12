@@ -17,6 +17,10 @@ test('dimThresholdText：价格类显示 z 区间，经验闸门类显示 min', 
   assert.equal(dimThresholdText({ params: { min: 0.02 } }), '0.02')
   assert.equal(dimThresholdText({ params: {} }), '-')
   assert.equal(dimThresholdText({}), '-')
+  // det-v2：截面分位门槛与解禁比例
+  assert.equal(dimThresholdText({ params: { veto_pct: 0.7, escalate_pct: 0.7 } }), '分位 ≥0.7')
+  assert.equal(dimThresholdText({ params: { tag_pct: 0.8 } }), '分位 ≥0.8')
+  assert.equal(dimThresholdText({ params: { min_ratio: 0.01 } }), '≥1%')
 })
 
 test('disabledText：候选维度与无数据源分开', () => {

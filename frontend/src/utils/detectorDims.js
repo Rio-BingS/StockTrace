@@ -28,6 +28,10 @@ const isNum = (v) => typeof v === 'number' && Number.isFinite(v)
 export function dimThresholdText(dim) {
   const p = dim?.params || {}
   if (isNum(p.z_lo) && isNum(p.z_hi)) return `z ${p.z_lo}~${p.z_hi}`
+  // det-v2 只展示/只作否决的维度：截面分位门槛与解禁比例门槛
+  if (isNum(p.veto_pct)) return `分位 ≥${p.veto_pct}`
+  if (isNum(p.tag_pct)) return `分位 ≥${p.tag_pct}`
+  if (isNum(p.min_ratio)) return `≥${(p.min_ratio * 100).toFixed(0)}%`
   return isNum(p.min) ? String(p.min) : '-'
 }
 
