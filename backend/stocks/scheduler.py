@@ -8,6 +8,7 @@ APScheduler 集成到 Django
 4. 收盘后 15:30–21:00 每30分钟预热晚到行情缓存并落日度快照（交易日）
 5. 每交易日 17:15 探测器扫描（行业/概念板块快照已在前两轮预热落库后）
 6. 每日 02:30 清理超出保留期的分钟 K 线
+7. 工作日 09:30 拉取上一交易日个股融资明细（交易所 T+1 早间披露，探测器融资拥挤度用）
 
 运行方式（REL-01）：
 - 生产：独立进程 `python manage.py run_scheduler`（systemd 单元 stocktrace-scheduler），
@@ -366,6 +367,19 @@ def _detector_scan_job():
         logger.exception('探测器扫描失败')
 
 
+def _stock_margin_job():
+    """个股融资明细（StockMarginDaily）：工作日 09:30 拉上一交易日，顺带补前两日缺口。
+
+    交易所在 T 日早间披露 T−1 的两融明细；探测器 17:15 扫描读的就是这一天。
+    节假日照跑无妨：补拉只处理今天之前、库里缺的信用交易日，已有即跳过。
+    """
+    from .market.margin_stock import sync_recent_stock_margin
+
+    result = sync_recent_stock_margin()
+    if result:
+        logger.info("个股融资明细补拉: %s", result)
+
+
 # 任务互斥（REL-04）：与手动拉取、管理命令共用 task_lock 的同名锁。
 # 盘中任务忙则直接跳过（下一轮 5 分钟后再来）；日度任务限时等待，等不到才跳过。
 _INTRADAY_SKIP = 0
@@ -433,6 +447,11 @@ def register_jobs(sched):
     add(_guarded(_detector_scan_job, 'detector_scan', _DAILY_WAIT_SECONDS),
         CronTrigger(day_of_week='mon-fri', hour='17-18', minute='15,45', timezone=SCHEDULER_TZ),
         'detector_scan', 1500)
+
+    # 个股融资明细：工作日 09:30（T+1 早间披露后），补拉今天之前缺的信用交易日
+    add(_guarded(_stock_margin_job, 'stock_margin', _DAILY_WAIT_SECONDS),
+        CronTrigger(day_of_week='mon-fri', hour=9, minute=30, timezone=SCHEDULER_TZ),
+        'stock_margin_daily', 3600)
 
     # 分钟 K 线保留期清理：每日 02:30 低峰执行（PERF-02）
     add(_guarded(_minute_bar_cleanup_job, 'minute_bar_cleanup', _DAILY_WAIT_SECONDS),

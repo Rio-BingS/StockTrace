@@ -106,3 +106,19 @@ class SyncRecentStockMarginTests(TestCase):
         StockMarginDaily.objects.create(code='000001', trade_date=d1, exchange='szse', rz=1)
         StockMarginDaily.objects.create(code='600000', trade_date=d2, exchange='sse', rz=1)
         self.assertEqual(margin_stock.stock_margin_days_present(d1, d2), {d1})
+
+
+class StockMarginJobTests(TestCase):
+    def test_job_registered_at_0930_weekdays(self):
+        from stocks import scheduler as sch
+
+        job = {j.id: j for j in sch.build_scheduler().get_jobs()}['stock_margin_daily']
+        fields = {f.name: str(f) for f in job.trigger.fields}
+        self.assertEqual((fields['hour'], fields['minute'], fields['day_of_week']), ('9', '30', 'mon-fri'))
+
+    def test_job_calls_sync(self):
+        from stocks import scheduler as sch
+
+        with patch('stocks.market.margin_stock.sync_recent_stock_margin', return_value={}) as sync:
+            sch._stock_margin_job()
+        sync.assert_called_once_with()
