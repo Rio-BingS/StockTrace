@@ -417,6 +417,46 @@ class MinuteBar(models.Model):
         return f"{self.stock.code} {self.datetime}"
 
 
+class StockMarginDaily(models.Model):
+    """个股融资明细日表（沪深交易所官方披露，T+1）：每只两融标的每个信用交易日一行。
+
+    为什么落库：探测器融资拥挤度（MB5/DTC）要在扫描当日的股票池内取截面分位，
+    需要逐股 T−5..T−1 的融资买入额与 T−1 融资余额；接口按日返回全市场明细，
+    逐股现拉既慢又不可回放。金额一律为元（整数），与交易所口径一致。
+    - 沪市明细自带融资偿还额；深市只有余额与买入额，偿还额由
+      前一交易日余额 + 当日买入 − 当日余额 推出，rz_repay_derived=True；
+      前一日余额缺失时推不出，留空（不补 0）。
+    """
+    EXCHANGE_SSE = 'sse'
+    EXCHANGE_SZSE = 'szse'
+    EXCHANGE_CHOICES = [
+        (EXCHANGE_SSE, '上交所'),
+        (EXCHANGE_SZSE, '深交所'),
+    ]
+
+    code = models.CharField('证券代码', max_length=6)
+    trade_date = models.DateField('信用交易日')
+    exchange = models.CharField('交易所', max_length=4, choices=EXCHANGE_CHOICES)
+    rz = models.BigIntegerField('融资余额(元)')
+    rz_buy = models.BigIntegerField('融资买入额(元)', null=True, blank=True)
+    rz_repay = models.BigIntegerField('融资偿还额(元)', null=True, blank=True)
+    rz_repay_derived = models.BooleanField('偿还额为推导值', default=False)
+    source = models.CharField('数据来源', max_length=32, blank=True, default='')
+    fetched_at = models.DateTimeField('拉取时间', auto_now=True)
+
+    class Meta:
+        verbose_name = '个股融资明细'
+        verbose_name_plural = '个股融资明细'
+        ordering = ['-trade_date', 'code']
+        constraints = [
+            models.UniqueConstraint(fields=['code', 'trade_date'], name='uniq_stock_margin_day'),
+        ]
+        indexes = [models.Index(fields=['trade_date'], name='stockmargin_date_idx')]
+
+    def __str__(self):
+        return f"{self.code} {self.trade_date} 融资余额 {self.rz}"
+
+
 class DetectorDimConfig(models.Model):
     """探测器微变维度的可调配置（权重 / 阈值 / 启停）。
 
